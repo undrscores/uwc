@@ -23,6 +23,13 @@ options {
     // Programs started afterwards inherit them through XCURSOR_THEME / XCURSOR_SIZE.
     cursor-theme ""
     cursor-size 24
+
+    // Real session (udev backend) only. These are on by default; turn one off when a driver gets it
+    // wrong (NVIDIA has had trouble with each at some point). hardware-cursor and explicit-sync apply
+    // after a restart, direct-scanout at once.
+    hardware-cursor true        // draw the pointer on the GPU's cursor plane; false = composite it
+    direct-scanout true         // show a client buffer that covers the output without compositing
+    explicit-sync true          // linux-drm-syncobj-v1, needed for flicker-free GL/Vulkan apps on NVIDIA
 }
 
 // Outputs (in a real session). Not listed: preferred mode, scale 1. Only one output is used for now:

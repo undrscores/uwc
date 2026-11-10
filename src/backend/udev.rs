@@ -33,7 +33,7 @@ use smithay::{
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{gles::GlesRenderer, ImportDma},
         session::{libseat::LibSeatSession, Event as SessionEvent, Session},
-        udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent},
+        udev::{all_gpus, driver, primary_gpu, UdevBackend, UdevEvent},
     },
     output::{Mode as WlMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
@@ -50,7 +50,10 @@ use smithay::{
         wayland_server::backend::GlobalId,
     },
     utils::{DeviceFd, Transform},
-    wayland::dmabuf::DmabufFeedbackBuilder,
+    wayland::{
+        dmabuf::DmabufFeedbackBuilder,
+        drm_syncobj::{supports_syncobj_eventfd, DrmSyncobjState},
+    },
 };
 
 use super::Backend;
@@ -81,6 +84,11 @@ pub struct UdevData {
     monitors: Vec<MonitorConfig>,
     /// The monitor settings changed: set the output up again on the next scan.
     reinit: bool,
+    /// Why the primary GPU could not be opened, for the startup error.
+    gpu_error: Option<String>,
+    hardware_cursor: bool,
+    direct_scanout: bool,
+    explicit_sync: bool,
 }
 
 struct Gpu {
@@ -115,6 +123,7 @@ impl UdevData {
     }
 
     pub fn config_changed(&mut self, config: &Config) {
+        self.direct_scanout = config.direct_scanout;
         self.touchpad = config.touchpad.clone();
         self.mouse = config.mouse_input.clone();
         if self.monitors != config.monitors {
@@ -166,14 +175,21 @@ pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>) -> Result<()> {
         mouse: state.config.mouse_input.clone(),
         monitors: state.config.monitors.clone(),
         reinit: false,
+        gpu_error: None,
+        hardware_cursor: state.config.hardware_cursor,
+        direct_scanout: state.config.direct_scanout,
+        explicit_sync: state.config.explicit_sync,
     }));
 
     let udev = UdevBackend::new(&seat)?;
     for (dev, path) in udev.device_list() {
         state.udev_device_added(dev, path);
     }
-    if !matches!(&state.backend, Backend::Udev(u) if u.gpu.is_some()) {
-        anyhow::bail!("could not open the primary GPU {}", path.display());
+    if let Backend::Udev(u) = &state.backend {
+        if u.gpu.is_none() {
+            let why = u.gpu_error.clone().unwrap_or_else(|| "it was not among the DRM devices udev lists".into());
+            anyhow::bail!("could not use the GPU {}: {why}", path.display());
+        }
     }
     handle
         .insert_source(udev, |event, _, state| match event {
@@ -320,21 +336,34 @@ impl Uwc {
             // Secondary GPUs are not driven yet.
             return;
         }
-        match self.open_gpu(node, path) {
+        match self.open_gpu(node, dev, path) {
             Ok(()) => self.udev_scan_connectors(),
-            Err(e) => tracing::error!("GPU {}: {e:#}", path.display()),
+            Err(e) => {
+                tracing::error!("GPU {}: {e:#}", path.display());
+                if let Some(u) = self.udev() {
+                    u.gpu_error = Some(format!("{e:#}"));
+                }
+            }
         }
     }
 
-    fn open_gpu(&mut self, node: DrmNode, path: &Path) -> Result<()> {
+    fn open_gpu(&mut self, node: DrmNode, dev: libc_dev_t, path: &Path) -> Result<()> {
+        let drv = driver(dev).ok().flatten().map(|d| d.to_string_lossy().into_owned());
+        let modeset = std::fs::read_to_string("/sys/module/nvidia_drm/parameters/modeset").ok();
+        if let Some(problem) = nvidia_problem(drv.as_deref(), modeset.as_deref()) {
+            anyhow::bail!(problem);
+        }
+        let nvidia = is_nvidia(drv.as_deref());
+        tracing::info!("GPU driver: {}", drv.as_deref().unwrap_or("unknown"));
         let Backend::Udev(u) = &mut self.backend else { return Ok(()) };
+        let (hardware_cursor, explicit_sync) = (u.hardware_cursor, u.explicit_sync);
         let fd = u
             .session
             .open(path, OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK)
             .map_err(|e| anyhow!("open: {e}"))?;
         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
         let (drm, drm_notifier) = DrmDevice::new(fd.clone(), true).context("DRM device")?;
-        let gbm = GbmDevice::new(fd).context("GBM device")?;
+        let gbm = GbmDevice::new(fd.clone()).context("GBM device")?;
         // Safety: the EGL display and context live as long as the renderer, which owns them.
         let egl = unsafe { EGLDisplay::new(gbm.clone()) }.context("EGL display")?;
         let context = EGLContext::new(&egl).context("EGL context")?;
@@ -343,7 +372,9 @@ impl Uwc {
         let render_formats = renderer.egl_context().dmabuf_render_formats().clone();
         let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
         let exporter = GbmFramebufferExporter::new(gbm.clone(), Some(node));
-        let manager = OutputManager::new(drm, allocator, exporter, Some(gbm), FORMATS, render_formats);
+        // Without a GBM device for it, the manager does not use the cursor plane.
+        let cursor_gbm = hardware_cursor.then_some(gbm);
+        let manager = OutputManager::new(drm, allocator, exporter, cursor_gbm, FORMATS, render_formats);
 
         let notifier = self
             .loop_handle
@@ -361,6 +392,21 @@ impl Uwc {
         }
         self.dmabuf_global =
             Some(self.dmabuf_state.create_global_with_default_feedback::<Uwc>(&self.display_handle, &feedback));
+
+        // Explicit sync, when the kernel driver can do syncobj eventfds (NVIDIA 560+, recent Mesa drivers).
+        if explicit_sync && self.syncobj_state.is_none() {
+            if supports_syncobj_eventfd(&fd) {
+                self.syncobj_state = Some(DrmSyncobjState::new::<Uwc>(&self.display_handle, fd));
+                tracing::info!("explicit sync (linux-drm-syncobj-v1) enabled");
+            } else {
+                tracing::info!("explicit sync not supported by this GPU driver");
+                if nvidia {
+                    tracing::warn!(
+                        "NVIDIA without explicit sync: GL/Vulkan apps may flicker; NVIDIA 560 or newer has it"
+                    );
+                }
+            }
+        }
 
         let Backend::Udev(u) = &mut self.backend else { unreachable!() };
         u.gpu = Some(Gpu { node, path: path.into(), manager, renderer, notifier, out: None });
@@ -527,6 +573,12 @@ impl Uwc {
         }
         let Backend::Udev(mut u) = std::mem::take(&mut self.backend) else { unreachable!() };
         let active = u.session.is_active();
+        let frame_flags = if u.direct_scanout {
+            FrameFlags::DEFAULT
+        } else {
+            // Composite everything; only the cursor may still use its plane.
+            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+        };
         if let (true, Some(gpu)) = (active, u.gpu.as_mut()) {
             if let Some(out) = gpu.out.as_mut().filter(|o| !o.pending) {
                 self.redraw = false;
@@ -536,7 +588,7 @@ impl Uwc {
                     &mut gpu.renderer,
                     &elements,
                     self.config.root_color,
-                    FrameFlags::DEFAULT,
+                    frame_flags,
                 ) {
                     Ok(r) if !r.is_empty => match out.drm_output.queue_frame(()) {
                         Ok(()) => {
@@ -608,3 +660,39 @@ impl Uwc {
 
 #[allow(non_camel_case_types)]
 type libc_dev_t = smithay::reexports::rustix::fs::Dev;
+
+fn is_nvidia(driver: Option<&str>) -> bool {
+    driver.is_some_and(|d| d.starts_with("nvidia"))
+}
+
+/// What is wrong with an NVIDIA setup that cannot work, if anything. `modeset` is the content of
+/// /sys/module/nvidia_drm/parameters/modeset (absent when nvidia_drm is not loaded).
+fn nvidia_problem(driver: Option<&str>, modeset: Option<&str>) -> Option<String> {
+    if !is_nvidia(driver) {
+        return None;
+    }
+    const FIX: &str = "add `nvidia_drm.modeset=1 nvidia_drm.fbdev=1` to the kernel command line (or \
+        `options nvidia_drm modeset=1 fbdev=1` in /etc/modprobe.d/nvidia.conf, then rebuild the initramfs) and reboot";
+    match modeset.map(str::trim) {
+        Some("Y") => None,
+        Some(_) => Some(format!("the NVIDIA driver has kernel modesetting off; {FIX}")),
+        None => Some(format!("the NVIDIA driver is loaded but nvidia_drm is not; {FIX}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nvidia_modeset_is_required() {
+        assert_eq!(nvidia_problem(Some("amdgpu"), None), None);
+        assert_eq!(nvidia_problem(Some("i915"), Some("N")), None);
+        assert_eq!(nvidia_problem(None, None), None);
+        assert_eq!(nvidia_problem(Some("nvidia"), Some("Y\n")), None);
+        assert!(nvidia_problem(Some("nvidia"), Some("N\n")).unwrap().contains("nvidia_drm.modeset=1"));
+        assert!(nvidia_problem(Some("nvidia"), None).unwrap().contains("nvidia_drm is not"));
+        // nouveau is not the proprietary driver and needs none of this.
+        assert_eq!(nvidia_problem(Some("nouveau"), None), None);
+    }
+}

@@ -25,6 +25,8 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | `input { keyboard / touchpad / mouse }` (XKB layout, repeat, libinput settings), `monitor "NAME" { mode scale transform off }` | done |
 | IPC: `state` (also `work_area`, `layers`, `keyboard_focus`, `backend`), `subscribe`, `get`, `pan`, `panto`, `zoom`, `view`, `toggleview`, `focus`, `close`, `move`, `resize`, `overview`, `home`, `reload`, `quit` | done |
 | Backends: `udev` (real session), `winit` (nested), `headless` (tests) | done, see below |
+| Buffer sync: explicit sync (`linux-drm-syncobj-v1`) on udev; commits wait for a dmabuf's acquire point or implicit fences (all backends) | done |
+| NVIDIA: modesetting check with the fix in the error, `hardware-cursor` / `direct-scanout` / `explicit-sync` switches | done |
 | Borders (solid, focus color) | done |
 | wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
 
@@ -77,6 +79,22 @@ user in its group. `uwc-session` logs to `~/.local/state/uwc.log` (the previous 
 session variables to D-Bus/systemd for portals, then runs `~/.config/uwc/startup` if it is executable (start your bar,
 notification daemon, etc. there). Ctrl+Alt+Backspace quits; Ctrl+Alt+F1..F12 switch VTs.
 
+### NVIDIA
+
+The proprietary driver works through the same GBM/KMS path as Mesa drivers, with these conditions:
+
+- **Kernel modesetting must be on**: `nvidia_drm.modeset=1` (and `nvidia_drm.fbdev=1`) on the kernel command line,
+  or `options nvidia_drm modeset=1 fbdev=1` in `/etc/modprobe.d/` plus an initramfs rebuild. uwc checks
+  `/sys/module/nvidia_drm/parameters/modeset` and refuses to start with that instruction if it is off.
+- **Driver 560 or newer** for explicit sync (`linux-drm-syncobj-v1`). NVIDIA has no implicit sync, so without it
+  GL/Vulkan clients (browsers, games, Electron apps) can flicker or show old frames. uwc offers the protocol whenever the
+  kernel driver supports syncobj eventfds and logs whether it did.
+- If the pointer or fullscreen apps misbehave, try `hardware-cursor false` or `direct-scanout false` in `options`.
+- Shaders (for the decoration work) are written for NVIDIA's stricter GLSL compiler: no implicit int/float conversion,
+  no redefined builtins (uwm hit this with scenefx's `clamp`).
+
+None of this has run on NVIDIA hardware yet.
+
 Config: `-c FILE`, else `$UWC_CONFIG`, else `~/.config/uwc/config.kdl`. `config.def.kdl` is the built-in default and the
 documentation; a file only needs what it changes, and it is reloaded when saved. Control socket: `$UWC_SOCKET`
 (`$XDG_RUNTIME_DIR/uwc-<wayland display>.sock`); `socat - UNIX-CONNECT:$UWC_SOCKET` then type `state`.
@@ -94,6 +112,7 @@ src/input.rs       keyboard/pointer/drag handling, backend-independent
 src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
 src/ipc.rs         control socket
 src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
+src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
 src/cursor.rs      the pointer image (xcursor theme, client surfaces, fallback arrow)
 src/backend/       udev (real session), winit (nested), headless (tests)
 tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland clients, drive over IPC

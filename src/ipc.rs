@@ -257,6 +257,11 @@ impl Uwc {
             "move-step": c.move_step,
             "zoom-scroll": c.zoom_scroll,
             "new-window-offset": c.new_window_offset,
+            "cursor-theme": c.cursor_theme,
+            "cursor-size": c.cursor_size,
+            "hardware-cursor": c.hardware_cursor,
+            "direct-scanout": c.direct_scanout,
+            "explicit-sync": c.explicit_sync,
         })
     }
 

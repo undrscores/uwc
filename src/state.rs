@@ -159,6 +159,8 @@ pub struct Uwc {
     /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
     pub layer_focus: Option<WlSurface>,
     pub dmabuf_state: DmabufState,
+    /// linux-drm-syncobj-v1 (explicit sync), when the GPU supports it.
+    pub syncobj_state: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
     pub dmabuf_global: Option<DmabufGlobal>,
     pub backend: Backend,
 
@@ -234,6 +236,7 @@ impl Uwc {
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
+            syncobj_state: None,
             dmabuf_global: None,
             backend: Backend::None,
             cursor_status: CursorImageStatus::default_named(),

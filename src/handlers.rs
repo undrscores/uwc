@@ -49,6 +49,10 @@ impl CompositorHandler for Uwc {
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        Uwc::watch_buffer_readiness(surface);
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
         if is_sync_subsurface(surface) {

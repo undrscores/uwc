@@ -195,6 +195,12 @@ pub struct Config {
     /// xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
     pub cursor_theme: String,
     pub cursor_size: u32,
+    /// Real session only: use the GPU's cursor plane for the pointer.
+    pub hardware_cursor: bool,
+    /// Real session only: let a fullscreen-sized client buffer go straight to the screen.
+    pub direct_scanout: bool,
+    /// Real session only: offer linux-drm-syncobj-v1 when the GPU supports it.
+    pub explicit_sync: bool,
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
     pub keyboard: Keyboard,
@@ -285,6 +291,9 @@ impl Config {
             new_window_offset: 32,
             cursor_theme: String::new(),
             cursor_size: 24,
+            hardware_cursor: true,
+            direct_scanout: true,
+            explicit_sync: true,
             keys: Vec::new(),
             mouse: Vec::new(),
             keyboard: Keyboard::default(),
@@ -362,6 +371,9 @@ impl Config {
             "new-window-offset" => self.new_window_offset = range(num()?, 0.0, 500.0)? as i32,
             "cursor-theme" => self.cursor_theme = v.as_str().ok_or_else(|| anyhow!("expected a theme name"))?.into(),
             "cursor-size" => self.cursor_size = range(num()?, 8.0, 256.0)? as u32,
+            "hardware-cursor" => self.hardware_cursor = boolean()?,
+            "direct-scanout" => self.direct_scanout = boolean()?,
+            "explicit-sync" => self.explicit_sync = boolean()?,
             other => bail!("unknown option `{other}`"),
         }
         Ok(())

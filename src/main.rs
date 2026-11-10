@@ -12,6 +12,7 @@ mod kdl;
 mod layer;
 mod render;
 mod state;
+mod sync;
 
 use std::{path::PathBuf, time::Duration};
 
