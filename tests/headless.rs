@@ -306,6 +306,7 @@ fn state_shape_and_defaults() {
     assert_eq!(m["viewport"]["zoom"], 1.0);
     assert_eq!(m["tags"][0]["active"], true);
     assert!(s["windows"].as_array().unwrap().is_empty());
+    assert_eq!(s["backend"], "headless");
     assert!(uwc.cmd("bogus").get("error").is_some());
     assert!(uwc.cmd("pan x y").get("error").is_some());
 }
@@ -324,6 +325,9 @@ fn window_maps_centered_and_focused() {
     assert_eq!(a["app_id"], "uwc.test");
     assert_eq!(a["tags"], 1);
     assert_eq!(s["monitors"][0]["tags"][0]["occupied"], true);
+    // Regression: the per-turn render hook once took the backend out of the state and never put it back.
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(uwc.state()["backend"], "headless", "backend lost after event-loop turns");
 }
 
 #[test]

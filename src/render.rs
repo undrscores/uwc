@@ -6,6 +6,7 @@
 use smithay::{
     backend::renderer::{
         element::{
+            memory::MemoryRenderBufferRenderElement,
             render_elements,
             solid::SolidColorRenderElement,
             surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
@@ -23,19 +24,28 @@ render_elements! {
     pub UwcElement<=GlesRenderer>;
     Surface=RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     Solid=SolidColorRenderElement,
-}
-
-fn phys(p: (f64, f64)) -> Point<i32, Physical> {
-    (p.0.round() as i32, p.1.round() as i32).into()
+    Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
 }
 
 impl Uwc {
+    /// Everything on one output for one frame, front to back: the pointer, then the canvas.
+    /// `scale` is the output scale (physical px per logical px).
+    pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
+        let mut out = self.cursor_elements(renderer, scale);
+        out.extend(self.render_elements(renderer, scale));
+        out
+    }
+
     /// Every visible window (and its popups and border) as elements, topmost first.
-    pub fn render_elements(&self, renderer: &mut GlesRenderer) -> Vec<UwcElement> {
+    pub fn render_elements(&self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
         let vp = self.viewport();
         let z = vp.zoom;
         let bw = self.config.border_width;
+        // Screen (logical) px to physical px.
+        let phys = |p: (f64, f64)| -> Point<i32, Physical> {
+            ((p.0 * scale).round() as i32, (p.1 * scale).round() as i32).into()
+        };
 
         for c in self.clients.iter().rev().filter(|c| self.visible(c)) {
             let origin = phys(vp.canvas_to_screen((c.surface_origin().x, c.surface_origin().y)));
@@ -45,12 +55,12 @@ impl Uwc {
             for (popup, offset) in smithay::desktop::PopupManager::popups_for_surface(c.surface()) {
                 // Same placement as smithay's `Space`: relative to the window geometry, not the surface.
                 let rel: Point<i32, smithay::utils::Logical> = g + offset - popup.geometry().loc;
-                let at = origin + Point::<i32, Physical>::from((rel.x, rel.y));
+                let at = origin + rel.to_f64().to_physical(scale).to_i32_round();
                 let els = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
                     renderer,
                     popup.wl_surface(),
                     at,
-                    Scale::from(1.0),
+                    Scale::from(scale),
                     1.0,
                     Kind::Unspecified,
                 );
@@ -61,7 +71,7 @@ impl Uwc {
                 &c.window,
                 renderer,
                 origin,
-                Scale::from(1.0),
+                Scale::from(scale),
                 1.0,
             );
             out.extend(els.into_iter().map(|e| UwcElement::from(RescaleRenderElement::from_element(e, origin, z))));

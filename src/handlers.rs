@@ -1,9 +1,10 @@
 //! Wayland protocol handlers: wl_compositor, xdg-shell (+ decoration), shm, seat, data device, output.
 
 use smithay::{
+    backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{utils::output_update, PopupKind, Window},
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
     reexports::{
@@ -21,6 +22,7 @@ use smithay::{
         compositor::{
             get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler, CompositorState,
         },
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::OutputHandler,
         selection::{
             data_device::{
@@ -244,8 +246,10 @@ impl SeatHandler for Uwc {
         self.ipc.dirty = true;
     }
 
-    // The winit backend shows the host's pointer; a DRM backend will draw this image itself.
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_status = image;
+        self.redraw = true;
+    }
 }
 
 impl SelectionHandler for Uwc {
@@ -263,6 +267,20 @@ impl ServerDndGrabHandler for Uwc {}
 
 impl OutputHandler for Uwc {}
 
+impl DmabufHandler for Uwc {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(&mut self, _global: &DmabufGlobal, dmabuf: Dmabuf, notifier: ImportNotifier) {
+        if self.backend.import_dmabuf(&dmabuf) {
+            let _ = notifier.successful::<Uwc>();
+        } else {
+            notifier.failed();
+        }
+    }
+}
+
 delegate_compositor!(Uwc);
 delegate_shm!(Uwc);
 delegate_xdg_shell!(Uwc);
@@ -270,3 +288,4 @@ delegate_xdg_decoration!(Uwc);
 delegate_seat!(Uwc);
 delegate_data_device!(Uwc);
 delegate_output!(Uwc);
+delegate_dmabuf!(Uwc);

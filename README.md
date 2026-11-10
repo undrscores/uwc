@@ -2,41 +2,50 @@
 
 A Wayland compositor with an infinite 2D canvas and real workspaces, in Rust on [smithay](https://github.com/Smithay/smithay).
 The rewrite of [uwm](https://github.com/undrscores/uwm) (C, wlroots + scenefx): the same ideas, the same config
-syntax and the same IPC, so a shell written for uwm (ushell) can follow uwc.
+syntax and the same IPC.
 
 - Windows have positions on an unbounded canvas; the screen is a camera (viewport) with zoom.
 - dwm-style tags (9), each with its own canvas, viewport and zoom.
 - Everything floats. No tiling, no client-side decoration, no built-in bar.
 - Looks and behaviour are configuration (`config.def.kdl`), not code.
 
-## Status: a start
+## Status
 
-What works today (all of it covered by `cargo test`, and the render path checked by eye under Xvfb):
+What works (covered by `cargo test`; rendering also checked by eye nested under Xvfb):
 
 | Area | State |
 |---|---|
 | Canvas, viewport, zoom (about the pointer), pan, overview, fit/center | done |
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
-| xdg-shell toplevels and popups, xdg-decoration (server side), shm, seat, data device, output | done |
+| xdg-shell toplevels and popups, xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
 | Mouse: Mod+drag move / resize / pan, empty-canvas drag pans, Mod+scroll zooms | done |
+| Pointer drawn by uwc: xcursor theme (`cursor-theme`, `cursor-size`), client cursor surfaces, built-in fallback arrow | done |
 | Config: KDL (uwm's parser, ported), `include`, `vars`, validation as a whole, live reload | done |
+| `input { keyboard / touchpad / mouse }` (XKB layout, repeat, libinput settings), `monitor "NAME" { mode scale transform off }` | done |
 | IPC: `state`, `subscribe`, `get`, `pan`, `panto`, `zoom`, `view`, `toggleview`, `focus`, `close`, `move`, `resize`, `overview`, `home`, `reload`, `quit` | done |
-| Backends: `winit` (nested, for development) and `headless` (tests) | done |
+| Backends: `udev` (real session), `winit` (nested), `headless` (tests) | done, see below |
 | Borders (solid, focus color) | done |
+
+**The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
+types and was reviewed against smithay's source, but the machine it was written on has no GPU or seat. Expect the first
+run on a real TTY to turn up something. What it does: libseat session (VT switching with Ctrl+Alt+F1..F12, pause and
+resume), the primary GPU via udev, KMS through smithay's `DrmOutputManager` (hardware cursor plane when available),
+connector hotplug, libinput with the config's touchpad/mouse settings, linux-dmabuf with feedback for GL clients.
+Limits: one GPU, and one output at a time (the first connected one not marked `off`) until multi-monitor.
 
 Not yet (roughly in the order to do them):
 
-1. **DRM/libinput/libseat backend**, so it can run as a session and not only nested. The cursor image must be drawn then.
-2. **`wlr-layer-shell`** (bars, panels, wallpaper programs) and `ext-workspace-v1`: needed for Quickshell/ushell.
-3. Multiple monitors (state has one `Monitor` today), pinned windows, minimize/scratchpad, fullscreen.
-4. The rest of uwm's IPC (`set`, `theme`, `rule`, `bookmark`, `swipe`, `pinch`, `palette`, ...) and window rules.
-5. Animations (open/close/move/tag-switch, eased pan, momentum), driven from the frame callback, never timers.
-6. Decoration: rounded corners, shadows, blur, gradients, dim. scenefx has no Rust equivalent, so this means custom GLES
-   shaders on smithay's `GlesRenderer` (`Frame::render_texture_from_to` with a texture program, `compile_custom_*`).
-7. Wallpaper, grid, per-tag looks, theme switching.
-8. Popup grabs (clicking outside a menu closes it), xdg-activation, idle-inhibit, pointer constraints, gestures,
-   Xwayland, input-method/text-input, screencopy.
+1. **`wlr-layer-shell`** (bars, panels, wallpaper programs, launchers) and `ext-workspace-v1`.
+2. Multiple monitors (the state has one `Monitor`), pinned windows, minimize/scratchpad, fullscreen.
+3. The rest of uwm's IPC (`set`, `theme`, `rule`, `bookmark`, `swipe`, `pinch`, `palette`, ...) and window rules.
+4. Animations (open/close/move/tag-switch, eased pan, momentum), driven from the frame callback, never timers.
+5. Decoration: rounded corners, shadows, blur, gradients, dim. scenefx has no Rust equivalent, so this means custom GLES
+   shaders on smithay's `GlesRenderer`.
+6. Wallpaper, grid, per-tag looks, theme switching.
+7. Popup grabs (clicking outside a menu closes it), xdg-activation, idle-inhibit/idle-notify, session-lock, pointer
+   constraints, gestures, fractional-scale, Xwayland, input-method/text-input, screencopy, output-management.
+8. Multi-GPU, animated cursors, DPMS.
 
 ## Build and run
 
@@ -46,12 +55,25 @@ Needs a Rust toolchain (edition 2021) and the system libraries smithay links: `l
 
 ```sh
 cargo build
-cargo run -- -s foot                 # nested in your current session; -s runs a command once it is up
+cargo run -- -s foot                 # nested (winit) when WAYLAND_DISPLAY/DISPLAY is set; -s runs a command once up
 cargo run -- --headless 1280x720     # no display, for tests
 cargo run -- -t                      # validate the config and exit
 cargo test                           # unit tests + end-to-end tests against a headless uwc
 cargo run --example paint -- "red" 400 300 d03030    # a test client that draws a solid window
 ```
+
+### As a session
+
+```sh
+make                      # cargo build --release
+sudo make install         # /usr/local/bin/uwc, uwc-session, share/wayland-sessions/uwc.desktop
+```
+
+Then pick "uwc" in your display manager, or log in on a TTY and run `uwc-session` (plain `uwc` works too; with no
+`WAYLAND_DISPLAY`/`DISPLAY` set it picks the udev backend). It needs seat access: logind (systemd) or seatd with your
+user in its group. `uwc-session` logs to `~/.local/state/uwc.log` (the previous run in `uwc.log.old`), exports the
+session variables to D-Bus/systemd for portals, then runs `~/.config/uwc/startup` if it is executable (start your bar,
+notification daemon, etc. there). Ctrl+Alt+Backspace quits; Ctrl+Alt+F1..F12 switch VTs.
 
 Config: `-c FILE`, else `$UWC_CONFIG`, else `~/.config/uwc/config.kdl`. `config.def.kdl` is the built-in default and the
 documentation; a file only needs what it changes, and it is reloaded when saved. Control socket: `$UWC_SOCKET`
@@ -69,7 +91,8 @@ src/handlers.rs    wayland protocol handlers
 src/input.rs       keyboard/pointer/drag handling, backend-independent
 src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
 src/ipc.rs         control socket
-src/backend/       winit (nested), headless (tests)
+src/cursor.rs      the pointer image (xcursor theme, client surfaces, fallback arrow)
+src/backend/       udev (real session), winit (nested), headless (tests)
 tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland clients, drive over IPC
 ```
 

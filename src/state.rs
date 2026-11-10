@@ -11,7 +11,11 @@ use std::{
 use smithay::{
     backend::renderer::element::Id,
     desktop::{PopupManager, Window},
-    input::{keyboard::KeyboardHandle, pointer::PointerHandle, Seat, SeatState},
+    input::{
+        keyboard::{KeyboardHandle, XkbConfig},
+        pointer::{CursorImageStatus, PointerHandle},
+        Seat, SeatState,
+    },
     output::Output,
     reexports::{
         calloop::{LoopHandle, LoopSignal},
@@ -24,6 +28,7 @@ use smithay::{
     utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        dmabuf::{DmabufGlobal, DmabufState},
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
         shell::xdg::{decoration::XdgDecorationState, XdgShellState},
@@ -33,6 +38,7 @@ use smithay::{
 };
 
 use crate::{
+    backend::Backend,
     canvas::{lowest_tag, Viewport, ALLTAGS, TAGCOUNT},
     config::{Action, Config, Dir},
     ipc::Ipc,
@@ -146,6 +152,9 @@ pub struct Uwc {
     pub data_device_state: DataDeviceState,
     pub popups: PopupManager,
     pub seat: Seat<Uwc>,
+    pub dmabuf_state: DmabufState,
+    pub dmabuf_global: Option<DmabufGlobal>,
+    pub backend: Backend,
 
     pub config: Config,
     pub config_path: Option<std::path::PathBuf>,
@@ -159,6 +168,10 @@ pub struct Uwc {
     pub mon: Option<Monitor>,
     /// Pointer position on the screen (logical px).
     pub cursor: Point<f64, Logical>,
+    /// What the client under the pointer asked the pointer to look like.
+    pub cursor_status: CursorImageStatus,
+    /// The xcursor theme, loaded lazily per image.
+    pub cursor_theme: crate::cursor::CursorTheme,
     pub drag: Option<Drag>,
     /// Pointer position at the previous step of a pan drag.
     pub drag_last: Point<f64, Logical>,
@@ -212,6 +225,11 @@ impl Uwc {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Uwc>(&dh),
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
             popups: PopupManager::default(),
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
+            backend: Backend::None,
+            cursor_status: CursorImageStatus::default_named(),
+            cursor_theme: crate::cursor::CursorTheme::new(&config.cursor_theme, config.cursor_size),
             seat_state,
             seat,
             display_handle: dh,
@@ -266,7 +284,16 @@ impl Uwc {
 
     // ---- monitor / viewport -------------------------------------------------------------
 
+    /// Use `output` as the monitor. A new output after a hotplug keeps the tags and viewports.
     pub fn add_monitor(&mut self, output: Output, size: Size<i32, Logical>) {
+        if let Some(m) = self.mon.as_mut() {
+            m.output = output;
+            m.size = size;
+            let (w, h) = (size.w as f64, size.h as f64);
+            self.cursor = (self.cursor.x.clamp(0.0, w - 1.0), self.cursor.y.clamp(0.0, h - 1.0)).into();
+            self.damage();
+            return;
+        }
         self.mon = Some(Monitor {
             output,
             size,
@@ -613,7 +640,26 @@ impl Uwc {
             Action::ToggleOverview => self.toggle_overview(),
             // Mouse-only actions are handled where the button press is.
             Action::DragMove | Action::DragResize | Action::DragPan => {}
+            Action::SwitchVt(vt) => self.backend.switch_vt(*vt),
         }
+    }
+
+    /// Keyboard layout and repeat from the config (all backends); pointer settings are libinput's (udev).
+    pub fn apply_input_config(&mut self) {
+        let k = self.config.keyboard.clone();
+        let kb = self.keyboard();
+        let xkb = XkbConfig {
+            rules: &k.rules,
+            model: &k.model,
+            layout: &k.layout,
+            variant: &k.variant,
+            options: k.options.clone(),
+        };
+        // The config was only accepted if this keymap compiles, so this does not fail in practice.
+        if let Err(e) = kb.set_xkb_config(self, xkb) {
+            tracing::warn!("keymap: {e:?}");
+        }
+        kb.change_repeat_info(k.repeat_rate, k.repeat_delay);
     }
 
     pub fn spawn(&self, cmd: &str, args: &[String]) {
@@ -640,6 +686,10 @@ impl Uwc {
         match Config::load(self.config_path.as_deref()) {
             Ok(c) => {
                 self.config = c;
+                self.apply_input_config();
+                self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
+                self.backend.config_changed(&self.config);
+                self.udev_scan_connectors();
                 self.config_error = None;
                 self.config_rev += 1;
                 self.deco_commit.increment();

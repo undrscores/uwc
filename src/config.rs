@@ -78,6 +78,7 @@ pub enum Action {
     DragMove,
     DragResize,
     DragPan,
+    SwitchVt(i32),
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,89 @@ pub struct MouseBind {
     pub action: Action,
 }
 
+/// `input { keyboard { ... } }`. Empty strings mean "from XKB_DEFAULT_*".
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keyboard {
+    pub rules: String,
+    pub model: String,
+    pub layout: String,
+    pub variant: String,
+    pub options: Option<String>,
+    pub repeat_rate: i32,
+    pub repeat_delay: i32,
+}
+
+impl Default for Keyboard {
+    fn default() -> Self {
+        Keyboard {
+            rules: String::new(),
+            model: String::new(),
+            layout: String::new(),
+            variant: String::new(),
+            options: None,
+            repeat_rate: 25,
+            repeat_delay: 600,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollMethod {
+    None,
+    TwoFinger,
+    Edge,
+    OnButtonDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickMethod {
+    None,
+    ButtonAreas,
+    Clickfinger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccelProfile {
+    Flat,
+    Adaptive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendEvents {
+    Enabled,
+    Disabled,
+    DisabledOnExternalMouse,
+}
+
+/// `input { touchpad { ... } }` / `mouse { ... }`: libinput settings; `None` keeps the device default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Pointer {
+    pub tap: Option<bool>,
+    pub tap_and_drag: Option<bool>,
+    pub drag_lock: Option<bool>,
+    pub natural_scroll: Option<bool>,
+    pub disable_while_typing: Option<bool>,
+    pub left_handed: Option<bool>,
+    pub middle_emulation: Option<bool>,
+    pub scroll_method: Option<ScrollMethod>,
+    pub click_method: Option<ClickMethod>,
+    pub accel_profile: Option<AccelProfile>,
+    pub accel_speed: Option<f64>,
+    /// true = left/right/middle for 1/2/3 fingers ("lrm"), false = "lmr".
+    pub tap_button_map_lrm: Option<bool>,
+    pub send_events: Option<SendEvents>,
+}
+
+/// `monitor "NAME" { mode W H [HZ]; scale S; transform "90" }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorConfig {
+    pub name: String,
+    pub mode: Option<(i32, i32, Option<f64>)>,
+    pub scale: Option<f64>,
+    pub transform: Option<smithay::utils::Transform>,
+    pub off: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub mod_key: ModKey,
@@ -108,8 +192,15 @@ pub struct Config {
     pub move_step: f64,
     pub zoom_scroll: f64,
     pub new_window_offset: i32,
+    /// xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
+    pub cursor_theme: String,
+    pub cursor_size: u32,
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
+    pub keyboard: Keyboard,
+    pub touchpad: Pointer,
+    pub mouse_input: Pointer,
+    pub monitors: Vec<MonitorConfig>,
     /// Every file that went into this config (the main one and its includes), for watching.
     pub files: Vec<PathBuf>,
 }
@@ -192,8 +283,14 @@ impl Config {
             move_step: 50.0,
             zoom_scroll: 1.1,
             new_window_offset: 32,
+            cursor_theme: String::new(),
+            cursor_size: 24,
             keys: Vec::new(),
             mouse: Vec::new(),
+            keyboard: Keyboard::default(),
+            touchpad: Pointer::default(),
+            mouse_input: Pointer::default(),
+            monitors: Vec::new(),
             files,
         };
         // Options first, so `mod-key` applies to every bind whatever the section order.
@@ -204,6 +301,23 @@ impl Config {
                     for o in &n.kids {
                         cfg.set_option(o, &vars).with_context(|| format!("option `{}` (line {})", o.name, o.line))?;
                     }
+                }
+                "input" => {
+                    for s in &n.kids {
+                        let what = format!("input {} (line {})", s.name, s.line);
+                        match s.name.as_str() {
+                            "keyboard" => parse_keyboard(s, &mut cfg.keyboard).with_context(|| what)?,
+                            "touchpad" => parse_pointer(s, &mut cfg.touchpad).with_context(|| what)?,
+                            "mouse" => parse_pointer(s, &mut cfg.mouse_input).with_context(|| what)?,
+                            other => bail!("unknown input section `{other}` (line {})", s.line),
+                        }
+                    }
+                }
+                "monitor" => {
+                    let m = parse_monitor(n).with_context(|| format!("monitor (line {})", n.line))?;
+                    // A later section for the same output replaces the earlier one.
+                    cfg.monitors.retain(|o| o.name != m.name);
+                    cfg.monitors.push(m);
                 }
                 other => bail!("unknown section `{other}` (line {})", n.line),
             }
@@ -246,6 +360,8 @@ impl Config {
             "move-step" => self.move_step = range(num()?, 1.0, 10000.0)?,
             "zoom-scroll" => self.zoom_scroll = range(num()?, 1.01, 3.0)?,
             "new-window-offset" => self.new_window_offset = range(num()?, 0.0, 500.0)? as i32,
+            "cursor-theme" => self.cursor_theme = v.as_str().ok_or_else(|| anyhow!("expected a theme name"))?.into(),
+            "cursor-size" => self.cursor_size = range(num()?, 8.0, 256.0)? as u32,
             other => bail!("unknown option `{other}`"),
         }
         Ok(())
@@ -291,6 +407,151 @@ fn range(v: f64, lo: f64, hi: f64) -> Result<f64> {
     } else {
         bail!("{v} is out of range ({lo} to {hi})")
     }
+}
+
+fn parse_keyboard(n: &Node, k: &mut Keyboard) -> Result<()> {
+    for f in &n.kids {
+        let s = || f.arg_str(0).map(str::to_string).ok_or_else(|| anyhow!("`{}` needs a string", f.name));
+        let num = || f.args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("`{}` needs a number", f.name));
+        match f.name.as_str() {
+            "xkb-rules" => k.rules = s()?,
+            "xkb-model" => k.model = s()?,
+            "xkb-layout" => k.layout = s()?,
+            "xkb-variant" => k.variant = s()?,
+            "xkb-options" => k.options = Some(s()?),
+            "repeat-rate" => k.repeat_rate = range(num()?, 0.0, 1000.0)? as i32,
+            "repeat-delay" => k.repeat_delay = range(num()?, 0.0, 10000.0)? as i32,
+            other => bail!("unknown keyboard setting `{other}`"),
+        }
+    }
+    // A layout that does not compile rejects the whole config.
+    let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = xkb::Keymap::new_from_names(
+        &ctx,
+        &k.rules,
+        &k.model,
+        &k.layout,
+        &k.variant,
+        k.options.clone(),
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    );
+    if keymap.is_none() {
+        bail!(
+            "the keymap (layout `{}`, variant `{}`, options `{:?}`) does not compile",
+            k.layout,
+            k.variant,
+            k.options
+        );
+    }
+    Ok(())
+}
+
+/// A flag: `tap` alone means true, `tap false` sets it off.
+fn flag(f: &Node) -> Result<bool> {
+    match f.args.first() {
+        None => Ok(true),
+        Some(Val::Bool(b)) => Ok(*b),
+        _ => bail!("`{}` takes nothing, true or false", f.name),
+    }
+}
+
+fn parse_pointer(n: &Node, p: &mut Pointer) -> Result<()> {
+    for f in &n.kids {
+        let s = || f.arg_str(0).ok_or_else(|| anyhow!("`{}` needs a string", f.name));
+        match f.name.as_str() {
+            "tap" => p.tap = Some(flag(f)?),
+            "tap-and-drag" => p.tap_and_drag = Some(flag(f)?),
+            "drag-lock" => p.drag_lock = Some(flag(f)?),
+            "natural-scroll" => p.natural_scroll = Some(flag(f)?),
+            "disable-while-typing" => p.disable_while_typing = Some(flag(f)?),
+            "left-handed" => p.left_handed = Some(flag(f)?),
+            "middle-emulation" => p.middle_emulation = Some(flag(f)?),
+            "scroll-method" => {
+                p.scroll_method = Some(match s()? {
+                    "none" => ScrollMethod::None,
+                    "two-finger" => ScrollMethod::TwoFinger,
+                    "edge" => ScrollMethod::Edge,
+                    "on-button-down" => ScrollMethod::OnButtonDown,
+                    o => bail!("unknown scroll-method `{o}` (none, two-finger, edge, on-button-down)"),
+                })
+            }
+            "click-method" => {
+                p.click_method = Some(match s()? {
+                    "none" => ClickMethod::None,
+                    "button-areas" => ClickMethod::ButtonAreas,
+                    "clickfinger" => ClickMethod::Clickfinger,
+                    o => bail!("unknown click-method `{o}` (none, button-areas, clickfinger)"),
+                })
+            }
+            "accel-profile" => {
+                p.accel_profile = Some(match s()? {
+                    "flat" => AccelProfile::Flat,
+                    "adaptive" => AccelProfile::Adaptive,
+                    o => bail!("unknown accel-profile `{o}` (flat, adaptive)"),
+                })
+            }
+            "accel-speed" => {
+                let v = f.args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("accel-speed needs a number"))?;
+                p.accel_speed = Some(range(v, -1.0, 1.0)?);
+            }
+            "tap-button-map" => {
+                p.tap_button_map_lrm = Some(match s()? {
+                    "lrm" => true,
+                    "lmr" => false,
+                    o => bail!("unknown tap-button-map `{o}` (lrm, lmr)"),
+                })
+            }
+            "send-events" => {
+                p.send_events = Some(match s()? {
+                    "enabled" => SendEvents::Enabled,
+                    "disabled" => SendEvents::Disabled,
+                    "disabled-on-external-mouse" => SendEvents::DisabledOnExternalMouse,
+                    o => bail!("unknown send-events `{o}` (enabled, disabled, disabled-on-external-mouse)"),
+                })
+            }
+            other => bail!("unknown pointer setting `{other}`"),
+        }
+    }
+    Ok(())
+}
+
+fn parse_monitor(n: &Node) -> Result<MonitorConfig> {
+    use smithay::utils::Transform;
+    let name = n.arg_str(0).ok_or_else(|| anyhow!("monitor needs an output name, e.g. monitor \"eDP-1\""))?;
+    let mut m = MonitorConfig { name: name.into(), mode: None, scale: None, transform: None, off: false };
+    for f in &n.kids {
+        let num = |i: usize| f.args.get(i).and_then(Val::as_num);
+        match f.name.as_str() {
+            "mode" => {
+                let (w, h) = (num(0), num(1));
+                let (Some(w), Some(h)) = (w, h) else { bail!("mode needs a width and a height") };
+                let hz = match num(2) {
+                    Some(hz) => Some(range(hz, 1.0, 1000.0)?),
+                    None => None,
+                };
+                m.mode = Some((range(w, 1.0, 16384.0)? as i32, range(h, 1.0, 16384.0)? as i32, hz));
+            }
+            "scale" => m.scale = Some(range(num(0).ok_or_else(|| anyhow!("scale needs a number"))?, 0.25, 10.0)?),
+            "transform" => {
+                m.transform = Some(match f.arg_str(0).unwrap_or("") {
+                    "normal" => Transform::Normal,
+                    "90" => Transform::_90,
+                    "180" => Transform::_180,
+                    "270" => Transform::_270,
+                    "flipped" => Transform::Flipped,
+                    "flipped-90" => Transform::Flipped90,
+                    "flipped-180" => Transform::Flipped180,
+                    "flipped-270" => Transform::Flipped270,
+                    o => bail!("unknown transform `{o}`"),
+                })
+            }
+            "off" => m.off = flag(f)?,
+            // uwm settings that need several monitors or wallpapers; accepted so uwm configs load.
+            "position" | "wallpaper" | "wallpaper-fit" => {}
+            other => bail!("unknown monitor setting `{other}`"),
+        }
+    }
+    Ok(m)
 }
 
 fn expand_includes(doc: &mut Vec<Node>, dir: &Path, files: &mut Vec<PathBuf>, depth: &mut u32) -> Result<()> {
@@ -418,6 +679,10 @@ fn parse_action(n: &Node) -> Result<Action> {
         "drag-move" => Action::DragMove,
         "drag-resize" => Action::DragResize,
         "drag-pan" => Action::DragPan,
+        "switch-vt" => {
+            let vt = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("switch-vt needs a number"))?;
+            Action::SwitchVt(range(vt, 1.0, 63.0)? as i32)
+        }
         other => bail!("unknown action `{other}`"),
     })
 }
@@ -466,6 +731,42 @@ mod tests {
             "binds { Mod+1 { view-tag 10; } }",
             "wat { }",
             "options {",
+        ] {
+            assert!(Config::parse(bad, p).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn input_and_monitor_sections() {
+        let c = Config::parse(
+            "input {\n keyboard { xkb-layout \"de\"; xkb-options \"ctrl:nocaps\"; repeat-rate 40 }\n touchpad { tap; natural-scroll false; scroll-method \"edge\"; accel-speed 0.5 }\n mouse { accel-profile \"flat\" }\n}\nmonitor \"eDP-1\" { mode 1920 1080 60; scale 1.5; transform \"90\"; position 0 0 }",
+            Some(Path::new("/x/c.kdl")),
+        )
+        .unwrap();
+        assert_eq!(c.keyboard.layout, "de");
+        assert_eq!(c.keyboard.repeat_rate, 40);
+        assert_eq!(c.touchpad.tap, Some(true));
+        assert_eq!(c.touchpad.natural_scroll, Some(false));
+        assert_eq!(c.touchpad.scroll_method, Some(ScrollMethod::Edge));
+        assert_eq!(c.mouse_input.accel_profile, Some(AccelProfile::Flat));
+        let m = &c.monitors[0];
+        assert_eq!((m.name.as_str(), m.mode, m.scale), ("eDP-1", Some((1920, 1080, Some(60.0))), Some(1.5)));
+        assert_eq!(m.transform, Some(smithay::utils::Transform::_90));
+    }
+
+    #[test]
+    fn bad_input_sections_are_rejected() {
+        let p = Some(Path::new("/x/c.kdl"));
+        for bad in [
+            "input { keyboard { xkb-layout \"no-such-layout\" } }",
+            "input { touchpad { tap 3 } }",
+            "input { touchpad { accel-speed 2 } }",
+            "input { touchpad { scroll-method \"sideways\" } }",
+            "input { joystick { } }",
+            "monitor { scale 2 }",
+            "monitor \"X\" { scale 0 }",
+            "monitor \"X\" { mode 1920 }",
+            "binds { Ctrl+Alt+F1 { switch-vt 0; } }",
         ] {
             assert!(Config::parse(bad, p).is_err(), "should reject: {bad}");
         }

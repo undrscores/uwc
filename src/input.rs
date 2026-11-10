@@ -117,6 +117,8 @@ impl Uwc {
 
     /// Pointer moved by the user (as opposed to the scene moving under it): applies drags and sloppy focus.
     fn real_motion(&mut self, time: u32) {
+        // The pointer is drawn by uwc, so moving it is a new frame.
+        self.redraw = true;
         self.pointer_motion_to(self.cursor, time);
         if self.drag.is_none() && self.config.sloppy_focus {
             if let Some((i, _, _)) = self.surface_under_screen(self.cursor) {

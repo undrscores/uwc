@@ -19,7 +19,42 @@ options {
     move-step 50                // canvas px for move-window / resize-window
     zoom-scroll 1.1             // zoom factor per scroll notch with Mod held
     new-window-offset 32        // each new window on a tag is offset by this much from the last
+    // Pointer image: the xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
+    // Programs started afterwards inherit them through XCURSOR_THEME / XCURSOR_SIZE.
+    cursor-theme ""
+    cursor-size 24
 }
+
+// Outputs (in a real session). Not listed: preferred mode, scale 1. Only one output is used for now:
+// the first connected one that is not `off`.
+// monitor "eDP-1" {
+//     mode 2560 1440 165         // width height [refresh]; the closest available mode is used
+//     scale 1.5
+//     transform "normal"         // normal, 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
+//     off                        // don't use this output
+// }
+
+// Keyboard and pointers. Unset keyboard fields come from the XKB_DEFAULT_* variables. A layout that does
+// not compile rejects the whole config. touchpad applies to devices that can tap, mouse to the rest.
+// input {
+//     keyboard {
+//         xkb-layout "us"            // also xkb-model, xkb-variant, xkb-options, xkb-rules
+//         xkb-options "ctrl:nocaps"
+//         repeat-rate 25
+//         repeat-delay 600
+//     }
+//     touchpad {
+//         tap; tap-and-drag; drag-lock; natural-scroll; disable-while-typing   // flags, or `tap false`
+//         left-handed; middle-emulation
+//         scroll-method "two-finger"    // none, two-finger, edge, on-button-down
+//         click-method "button-areas"   // none, button-areas, clickfinger
+//         accel-profile "adaptive"      // flat, adaptive
+//         accel-speed 0.0               // -1 to 1
+//         tap-button-map "lrm"          // lrm, lmr
+//         send-events "enabled"         // enabled, disabled, disabled-on-external-mouse
+//     }
+//     mouse { accel-profile "flat" }
+// }
 
 binds {
     Mod+T { spawn "foot"; }
@@ -88,4 +123,18 @@ binds {
     Mod+MouseLeft { drag-move; }
     Mod+MouseMiddle { drag-pan; }
     Mod+MouseRight { drag-resize; }
+
+    // VT switching (in a real session); do not remove unless you know what a VT is
+    Ctrl+Alt+XF86Switch_VT_1 { switch-vt 1; }
+    Ctrl+Alt+XF86Switch_VT_2 { switch-vt 2; }
+    Ctrl+Alt+XF86Switch_VT_3 { switch-vt 3; }
+    Ctrl+Alt+XF86Switch_VT_4 { switch-vt 4; }
+    Ctrl+Alt+XF86Switch_VT_5 { switch-vt 5; }
+    Ctrl+Alt+XF86Switch_VT_6 { switch-vt 6; }
+    Ctrl+Alt+XF86Switch_VT_7 { switch-vt 7; }
+    Ctrl+Alt+XF86Switch_VT_8 { switch-vt 8; }
+    Ctrl+Alt+XF86Switch_VT_9 { switch-vt 9; }
+    Ctrl+Alt+XF86Switch_VT_10 { switch-vt 10; }
+    Ctrl+Alt+XF86Switch_VT_11 { switch-vt 11; }
+    Ctrl+Alt+XF86Switch_VT_12 { switch-vt 12; }
 }

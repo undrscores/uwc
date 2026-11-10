@@ -4,6 +4,7 @@
 mod backend;
 mod canvas;
 mod config;
+mod cursor;
 mod handlers;
 mod input;
 mod ipc;
@@ -25,22 +26,31 @@ use smithay::reexports::{
 
 use crate::{config::Config, state::Uwc};
 
-const USAGE: &str = "usage: uwc [-c FILE] [-s CMD] [-t] [--headless [WxH]]
+const USAGE: &str = "usage: uwc [-c FILE] [-s CMD] [-t] [--backend udev|winit] [--headless [WxH]]
   -c, --config FILE   config file (default: $UWC_CONFIG, else ~/.config/uwc/config.kdl)
   -s CMD              run CMD (through sh) once the compositor is up
   -t, --check-config  validate the config and exit
+      --backend NAME  udev: a real session (run from a TTY); winit: a window in the current session.
+                      Default: winit if WAYLAND_DISPLAY or DISPLAY is set, else udev
       --headless [WxH]  no display: a virtual output of WxH (default 1280x720), for tests
   -h, --help";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BackendKind {
+    Udev,
+    Winit,
+    Headless(i32, i32),
+}
 
 struct Args {
     config: Option<String>,
     startup: Option<String>,
     check: bool,
-    headless: Option<(i32, i32)>,
+    backend: Option<BackendKind>,
 }
 
 fn parse_args() -> Result<Args> {
-    let mut a = Args { config: None, startup: None, check: false, headless: None };
+    let mut a = Args { config: None, startup: None, check: false, backend: None };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -60,7 +70,15 @@ fn parse_args() -> Result<Args> {
                 if size.0 < 1 || size.1 < 1 || size.0 > 16384 || size.1 > 16384 {
                     bail!("--headless size out of range");
                 }
-                a.headless = Some(size);
+                a.backend = Some(BackendKind::Headless(size.0, size.1));
+            }
+            "--backend" => {
+                a.backend = Some(match it.next().as_deref() {
+                    Some("udev") => BackendKind::Udev,
+                    Some("winit") => BackendKind::Winit,
+                    Some("headless") => BackendKind::Headless(1280, 720),
+                    _ => bail!("--backend needs udev, winit or headless"),
+                })
             }
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -72,7 +90,15 @@ fn parse_args() -> Result<Args> {
     Ok(a)
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        // One readable line: this is what someone starting a session from a TTY sees.
+        eprintln!("uwc: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -98,10 +124,16 @@ fn main() -> Result<()> {
     let mut state = Uwc::new(display, event_loop.handle(), event_loop.get_signal(), cfg, path)?;
     let handle = event_loop.handle();
 
-    match args.headless {
-        Some(size) => backend::headless::init(&mut state, &handle, size)?,
-        None => backend::winit::init(&mut state, &handle)?,
+    state.apply_input_config();
+
+    let nested = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+    let kind = args.backend.unwrap_or(if nested { BackendKind::Winit } else { BackendKind::Udev });
+    match kind {
+        BackendKind::Headless(w, h) => backend::headless::init(&mut state, &handle, (w, h))?,
+        BackendKind::Winit => backend::winit::init(&mut state, &handle)?,
+        BackendKind::Udev => backend::udev::init(&mut state, &handle)?,
     }
+    tracing::info!("backend: {}", state.backend.name());
 
     // SIGINT/SIGTERM end the session cleanly (the socket file is removed on drop).
     let signal = event_loop.get_signal();
@@ -127,6 +159,12 @@ fn main() -> Result<()> {
 
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
     std::env::set_var("UWC_SOCKET", &state.ipc.path);
+    std::env::set_var("XDG_CURRENT_DESKTOP", "uwc");
+    std::env::set_var("XDG_SESSION_TYPE", "wayland");
+    std::env::set_var("XCURSOR_SIZE", state.config.cursor_size.to_string());
+    if !state.config.cursor_theme.is_empty() {
+        std::env::set_var("XCURSOR_THEME", &state.config.cursor_theme);
+    }
     tracing::info!(
         "listening on WAYLAND_DISPLAY={} control socket {}",
         state.socket_name.to_string_lossy(),
@@ -138,6 +176,7 @@ fn main() -> Result<()> {
     }
 
     event_loop.run(None, &mut state, |state| {
+        state.udev_render();
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();
     })?;

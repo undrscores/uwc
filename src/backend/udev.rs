@@ -1,0 +1,610 @@
+//! A real session: libseat for device access and VT switching, udev for GPUs and hotplug, DRM/KMS +
+//! GBM + GLES for output, libinput for input.
+//!
+//! Scope for now: the primary GPU only, and one output on it (the state has one monitor until
+//! multi-monitor lands): the first connected connector that the config does not turn `off`. Connector
+//! hotplug rescans, so unplugging that output moves to the next one.
+//!
+//! Frame pacing: a frame is rendered when something asked for one (`Uwc.redraw`) and the previous
+//! one has been scanned out (its vblank arrived). Frame callbacks go out right after a frame is queued;
+//! when nothing changed on screen they go out one refresh later, so a client committing without
+//! damage cannot spin.
+
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use anyhow::{anyhow, Context, Result};
+use smithay::{
+    backend::{
+        allocator::{
+            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
+            Fourcc,
+        },
+        drm::{
+            compositor::FrameFlags,
+            exporter::gbm::GbmFramebufferExporter,
+            output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
+            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode,
+        },
+        egl::{EGLContext, EGLDisplay},
+        input::InputEvent,
+        libinput::{LibinputInputBackend, LibinputSessionInterface},
+        renderer::{gles::GlesRenderer, ImportDma},
+        session::{libseat::LibSeatSession, Event as SessionEvent, Session},
+        udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent},
+    },
+    output::{Mode as WlMode, Output, PhysicalProperties, Scale, Subpixel},
+    reexports::{
+        calloop::{
+            timer::{TimeoutAction, Timer},
+            LoopHandle, RegistrationToken,
+        },
+        drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags},
+        input::{
+            AccelProfile as LiAccel, ClickMethod as LiClick, Device as InputDevice, DeviceCapability, Libinput,
+            ScrollMethod as LiScroll, SendEventsMode, TapButtonMap,
+        },
+        rustix::fs::OFlags,
+        wayland_server::backend::GlobalId,
+    },
+    utils::{DeviceFd, Transform},
+    wayland::dmabuf::DmabufFeedbackBuilder,
+};
+
+use super::Backend;
+use crate::{
+    config::{AccelProfile, ClickMethod, Config, MonitorConfig, Pointer, ScrollMethod, SendEvents},
+    render::UwcElement,
+    state::Uwc,
+};
+
+type Allocator = GbmAllocator<DrmDeviceFd>;
+type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
+type OutputManager = DrmOutputManager<Allocator, Exporter, (), DrmDeviceFd>;
+type GbmDrmOutput = DrmOutput<Allocator, Exporter, (), DrmDeviceFd>;
+
+/// Scan-out formats to try, in order.
+const FORMATS: [Fourcc; 2] = [Fourcc::Argb8888, Fourcc::Xrgb8888];
+
+pub struct UdevData {
+    session: LibSeatSession,
+    /// The GPU uwc renders with and drives outputs from.
+    primary: DrmNode,
+    gpu: Option<Gpu>,
+    libinput: Libinput,
+    /// Pointer devices, so a config reload can apply touchpad / mouse settings to them.
+    pointers: Vec<InputDevice>,
+    touchpad: Pointer,
+    mouse: Pointer,
+    monitors: Vec<MonitorConfig>,
+    /// The monitor settings changed: set the output up again on the next scan.
+    reinit: bool,
+}
+
+struct Gpu {
+    node: DrmNode,
+    path: PathBuf,
+    manager: OutputManager,
+    renderer: GlesRenderer,
+    notifier: RegistrationToken,
+    out: Option<Out>,
+}
+
+/// The output in use.
+struct Out {
+    crtc: crtc::Handle,
+    connector: connector::Handle,
+    output: Output,
+    global: GlobalId,
+    drm_output: GbmDrmOutput,
+    /// A frame is queued and its vblank has not arrived yet.
+    pending: bool,
+}
+
+impl UdevData {
+    pub fn switch_vt(&mut self, vt: i32) {
+        if let Err(e) = self.session.change_vt(vt) {
+            tracing::warn!("switch to VT {vt}: {e}");
+        }
+    }
+
+    pub fn renderer_mut(&mut self) -> Option<&mut GlesRenderer> {
+        self.gpu.as_mut().map(|g| &mut g.renderer)
+    }
+
+    pub fn config_changed(&mut self, config: &Config) {
+        self.touchpad = config.touchpad.clone();
+        self.mouse = config.mouse_input.clone();
+        if self.monitors != config.monitors {
+            self.monitors = config.monitors.clone();
+            self.reinit = true;
+        }
+        for d in &mut self.pointers {
+            apply_pointer_config(d, &self.touchpad, &self.mouse);
+        }
+    }
+}
+
+pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>) -> Result<()> {
+    let (session, notifier) = LibSeatSession::new().map_err(|e| {
+        anyhow!(
+            "could not start a session ({e}); run uwc from a TTY with seatd or logind, or nested with --backend winit"
+        )
+    })?;
+    let seat = session.seat();
+
+    let path = primary_gpu(&seat)
+        .ok()
+        .flatten()
+        .or_else(|| all_gpus(&seat).ok().and_then(|g| g.into_iter().next()))
+        .context("no GPU found")?;
+    let primary = DrmNode::from_path(&path).with_context(|| format!("{}", path.display()))?;
+    tracing::info!("primary GPU {}", path.display());
+
+    let mut libinput = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
+    libinput.udev_assign_seat(&seat).map_err(|()| anyhow!("libinput could not assign seat {seat}"))?;
+    handle
+        .insert_source(LibinputInputBackend::new(libinput.clone()), |event, _, state| state.libinput_event(event))
+        .map_err(|e| anyhow!("{e}"))?;
+
+    handle
+        .insert_source(notifier, |event, _, state| match event {
+            SessionEvent::PauseSession => state.udev_pause(),
+            SessionEvent::ActivateSession => state.udev_resume(),
+        })
+        .map_err(|e| anyhow!("{e}"))?;
+
+    state.backend = Backend::Udev(Box::new(UdevData {
+        session,
+        primary,
+        gpu: None,
+        libinput,
+        pointers: Vec::new(),
+        touchpad: state.config.touchpad.clone(),
+        mouse: state.config.mouse_input.clone(),
+        monitors: state.config.monitors.clone(),
+        reinit: false,
+    }));
+
+    let udev = UdevBackend::new(&seat)?;
+    for (dev, path) in udev.device_list() {
+        state.udev_device_added(dev, path);
+    }
+    if !matches!(&state.backend, Backend::Udev(u) if u.gpu.is_some()) {
+        anyhow::bail!("could not open the primary GPU {}", path.display());
+    }
+    handle
+        .insert_source(udev, |event, _, state| match event {
+            UdevEvent::Added { device_id, path } => state.udev_device_added(device_id, &path),
+            UdevEvent::Changed { device_id } => state.udev_device_changed(device_id),
+            UdevEvent::Removed { device_id } => state.udev_device_removed(device_id),
+        })
+        .map_err(|e| anyhow!("{e}"))?;
+    // The loop sleeps until something happens; draw the first frame without waiting for that.
+    handle.insert_idle(|state| state.udev_render());
+    Ok(())
+}
+
+/// The mode for a connector: the configured size (nearest refresh), else the preferred mode.
+fn pick_mode(
+    modes: &[smithay::reexports::drm::control::Mode],
+    cfg: Option<&MonitorConfig>,
+) -> Option<smithay::reexports::drm::control::Mode> {
+    if let Some((w, h, hz)) = cfg.and_then(|c| c.mode) {
+        let sized = modes.iter().filter(|m| m.size() == (w as u16, h as u16));
+        let best = match hz {
+            Some(hz) => {
+                sized.min_by(|a, b| (a.vrefresh() as f64 - hz).abs().total_cmp(&(b.vrefresh() as f64 - hz).abs()))
+            }
+            None => sized.max_by_key(|m| m.vrefresh()),
+        };
+        if let Some(m) = best {
+            return Some(*m);
+        }
+        tracing::warn!("no {w}x{h} mode on {}; using the preferred one", cfg.unwrap().name);
+    }
+    modes.iter().find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED)).or(modes.first()).copied()
+}
+
+fn connector_name(info: &connector::Info) -> String {
+    format!("{}-{}", info.interface().as_str(), info.interface_id())
+}
+
+fn apply_pointer_config(d: &mut InputDevice, touchpad: &Pointer, mouse: &Pointer) {
+    if !d.has_capability(DeviceCapability::Pointer) {
+        return;
+    }
+    // Devices that can tap are touchpads; everything else is a mouse.
+    let p = if d.config_tap_finger_count() > 0 { touchpad } else { mouse };
+    if let Some(v) = p.tap {
+        let _ = d.config_tap_set_enabled(v);
+    }
+    if let Some(v) = p.tap_and_drag {
+        let _ = d.config_tap_set_drag_enabled(v);
+    }
+    if let Some(v) = p.drag_lock {
+        let _ = d.config_tap_set_drag_lock_enabled(v);
+    }
+    if let Some(v) = p.natural_scroll {
+        let _ = d.config_scroll_set_natural_scroll_enabled(v);
+    }
+    if let Some(v) = p.disable_while_typing {
+        let _ = d.config_dwt_set_enabled(v);
+    }
+    if let Some(v) = p.left_handed {
+        let _ = d.config_left_handed_set(v);
+    }
+    if let Some(v) = p.middle_emulation {
+        let _ = d.config_middle_emulation_set_enabled(v);
+    }
+    if let Some(v) = p.scroll_method {
+        let _ = d.config_scroll_set_method(match v {
+            ScrollMethod::None => LiScroll::NoScroll,
+            ScrollMethod::TwoFinger => LiScroll::TwoFinger,
+            ScrollMethod::Edge => LiScroll::Edge,
+            ScrollMethod::OnButtonDown => LiScroll::OnButtonDown,
+        });
+    }
+    if let Some(v) = p.click_method {
+        match v {
+            // libinput has no "none" click method value; leave the device's own.
+            ClickMethod::None => {}
+            ClickMethod::ButtonAreas => {
+                let _ = d.config_click_set_method(LiClick::ButtonAreas);
+            }
+            ClickMethod::Clickfinger => {
+                let _ = d.config_click_set_method(LiClick::Clickfinger);
+            }
+        }
+    }
+    if let Some(v) = p.accel_profile {
+        let _ = d.config_accel_set_profile(match v {
+            AccelProfile::Flat => LiAccel::Flat,
+            AccelProfile::Adaptive => LiAccel::Adaptive,
+        });
+    }
+    if let Some(v) = p.accel_speed {
+        let _ = d.config_accel_set_speed(v);
+    }
+    if let Some(lrm) = p.tap_button_map_lrm {
+        let _ = d.config_tap_set_button_map(if lrm {
+            TapButtonMap::LeftRightMiddle
+        } else {
+            TapButtonMap::LeftMiddleRight
+        });
+    }
+    if let Some(v) = p.send_events {
+        let _ = d.config_send_events_set_mode(match v {
+            SendEvents::Enabled => SendEventsMode::ENABLED,
+            SendEvents::Disabled => SendEventsMode::DISABLED,
+            SendEvents::DisabledOnExternalMouse => SendEventsMode::DISABLED_ON_EXTERNAL_MOUSE,
+        });
+    }
+}
+
+impl Uwc {
+    fn udev(&mut self) -> Option<&mut UdevData> {
+        match &mut self.backend {
+            Backend::Udev(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    fn libinput_event(&mut self, event: InputEvent<LibinputInputBackend>) {
+        match &event {
+            InputEvent::DeviceAdded { device } => {
+                let mut d = device.clone();
+                if let Some(u) = self.udev() {
+                    apply_pointer_config(&mut d, &u.touchpad, &u.mouse);
+                    if d.has_capability(DeviceCapability::Pointer) {
+                        u.pointers.push(d);
+                    }
+                }
+            }
+            InputEvent::DeviceRemoved { device } => {
+                if let Some(u) = self.udev() {
+                    u.pointers.retain(|d| d != device);
+                }
+            }
+            _ => {}
+        }
+        self.process_input_event(event);
+    }
+
+    fn udev_device_added(&mut self, dev: libc_dev_t, path: &Path) {
+        let Some(u) = self.udev() else { return };
+        let Ok(node) = DrmNode::from_dev_id(dev) else { return };
+        if node != u.primary || u.gpu.is_some() {
+            // Secondary GPUs are not driven yet.
+            return;
+        }
+        match self.open_gpu(node, path) {
+            Ok(()) => self.udev_scan_connectors(),
+            Err(e) => tracing::error!("GPU {}: {e:#}", path.display()),
+        }
+    }
+
+    fn open_gpu(&mut self, node: DrmNode, path: &Path) -> Result<()> {
+        let Backend::Udev(u) = &mut self.backend else { return Ok(()) };
+        let fd = u
+            .session
+            .open(path, OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK)
+            .map_err(|e| anyhow!("open: {e}"))?;
+        let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+        let (drm, drm_notifier) = DrmDevice::new(fd.clone(), true).context("DRM device")?;
+        let gbm = GbmDevice::new(fd).context("GBM device")?;
+        // Safety: the EGL display and context live as long as the renderer, which owns them.
+        let egl = unsafe { EGLDisplay::new(gbm.clone()) }.context("EGL display")?;
+        let context = EGLContext::new(&egl).context("EGL context")?;
+        let renderer = unsafe { GlesRenderer::new(context) }.context("GLES renderer")?;
+
+        let render_formats = renderer.egl_context().dmabuf_render_formats().clone();
+        let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+        let exporter = GbmFramebufferExporter::new(gbm.clone(), Some(node));
+        let manager = OutputManager::new(drm, allocator, exporter, Some(gbm), FORMATS, render_formats);
+
+        let notifier = self
+            .loop_handle
+            .insert_source(drm_notifier, |event, _, state| match event {
+                DrmEvent::VBlank(crtc) => state.udev_vblank(crtc),
+                DrmEvent::Error(e) => tracing::error!("DRM: {e}"),
+            })
+            .map_err(|e| anyhow!("{e}"))?;
+
+        // GL clients need linux-dmabuf; the feedback tells them which device to allocate on.
+        let feedback =
+            DmabufFeedbackBuilder::new(node.dev_id(), renderer.dmabuf_formats()).build().context("dmabuf feedback")?;
+        if let Some(old) = self.dmabuf_global.take() {
+            self.dmabuf_state.destroy_global::<Uwc>(&self.display_handle, old);
+        }
+        self.dmabuf_global =
+            Some(self.dmabuf_state.create_global_with_default_feedback::<Uwc>(&self.display_handle, &feedback));
+
+        let Backend::Udev(u) = &mut self.backend else { unreachable!() };
+        u.gpu = Some(Gpu { node, path: path.into(), manager, renderer, notifier, out: None });
+        Ok(())
+    }
+
+    fn udev_device_changed(&mut self, dev: libc_dev_t) {
+        let Some(u) = self.udev() else { return };
+        if u.gpu.as_ref().is_some_and(|g| g.node.dev_id() == dev) {
+            self.udev_scan_connectors();
+        }
+    }
+
+    fn udev_device_removed(&mut self, dev: libc_dev_t) {
+        let Some(u) = self.udev() else { return };
+        if !u.gpu.as_ref().is_some_and(|g| g.node.dev_id() == dev) {
+            return;
+        }
+        let gpu = u.gpu.take().unwrap();
+        tracing::warn!("primary GPU {} removed", gpu.path.display());
+        self.loop_handle.remove(gpu.notifier);
+        if let Some(out) = gpu.out {
+            self.display_handle.remove_global::<Uwc>(out.global);
+        }
+    }
+
+    /// Make sure the output in use is still connected, else pick the first usable connected one.
+    pub fn udev_scan_connectors(&mut self) {
+        // Check before taking: a failed match must not leave the backend taken.
+        if !matches!(self.backend, Backend::Udev(_)) {
+            return;
+        }
+        let Backend::Udev(mut u) = std::mem::take(&mut self.backend) else { unreachable!() };
+        let reinit = std::mem::take(&mut u.reinit);
+        if let Some(gpu) = u.gpu.as_mut() {
+            if let Err(e) = self.scan_gpu(gpu, &u.monitors, reinit) {
+                tracing::error!("outputs: {e:#}");
+            }
+        }
+        self.backend = Backend::Udev(u);
+        self.damage();
+    }
+
+    fn scan_gpu(&mut self, gpu: &mut Gpu, monitors: &[MonitorConfig], reinit: bool) -> Result<()> {
+        let device = gpu.manager.device();
+        let res = device.resource_handles().context("DRM resources")?;
+        let connected: Vec<connector::Info> = res
+            .connectors()
+            .iter()
+            .filter_map(|c| device.get_connector(*c, true).ok())
+            .filter(|i| i.state() == connector::State::Connected && !i.modes().is_empty())
+            .collect();
+
+        if let Some(out) = &gpu.out {
+            let still = connected.iter().any(|i| i.handle() == out.connector);
+            let off = monitors.iter().any(|m| m.name == out.output.name() && m.off);
+            if still && !off && !reinit {
+                return Ok(());
+            }
+            tracing::info!("output {} {}", out.output.name(), if still && !off { "reconfigured" } else { "gone" });
+            let out = gpu.out.take().unwrap();
+            self.display_handle.remove_global::<Uwc>(out.global);
+            drop(out.drm_output);
+        }
+
+        for info in &connected {
+            let name = connector_name(info);
+            let cfg = monitors.iter().find(|m| m.name == name);
+            if cfg.is_some_and(|c| c.off) {
+                continue;
+            }
+            let device = gpu.manager.device();
+            let crtc = info
+                .encoders()
+                .iter()
+                .filter_map(|e| device.get_encoder(*e).ok())
+                .flat_map(|e| res.filter_crtcs(e.possible_crtcs()))
+                .next();
+            let (Some(crtc), Some(mode)) = (crtc, pick_mode(info.modes(), cfg)) else { continue };
+
+            let (mm_w, mm_h) = info.size().unwrap_or((0, 0));
+            let output = Output::new(
+                name.clone(),
+                PhysicalProperties {
+                    size: (mm_w as i32, mm_h as i32).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "Unknown".into(),
+                    model: "Unknown".into(),
+                },
+            );
+            let wl_mode = WlMode::from(mode);
+            let scale = cfg.and_then(|c| c.scale).unwrap_or(1.0);
+            let transform = cfg.and_then(|c| c.transform).unwrap_or(Transform::Normal);
+            output.change_current_state(
+                Some(wl_mode),
+                Some(transform),
+                Some(Scale::Fractional(scale)),
+                Some((0, 0).into()),
+            );
+            output.set_preferred(wl_mode);
+            let global = output.create_global::<Uwc>(&self.display_handle);
+
+            let drm_output = match gpu.manager.initialize_output::<_, UwcElement>(
+                crtc,
+                mode,
+                &[info.handle()],
+                &output,
+                None,
+                &mut gpu.renderer,
+                &DrmOutputRenderElements::new(),
+            ) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!("output {name}: {e}");
+                    self.display_handle.remove_global::<Uwc>(global);
+                    continue;
+                }
+            };
+            let logical = transform.transform_size(wl_mode.size).to_f64().to_logical(scale).to_i32_round();
+            tracing::info!(
+                "output {name}: {}x{}@{:.2} scale {scale}, {}x{} logical",
+                wl_mode.size.w,
+                wl_mode.size.h,
+                wl_mode.refresh as f64 / 1000.0,
+                logical.w,
+                logical.h
+            );
+            self.add_monitor(output.clone(), logical);
+            // Windows already mapped need to know about the (new) output for their scale.
+            for c in &self.clients {
+                smithay::desktop::utils::output_update(
+                    &output,
+                    Some(smithay::utils::Rectangle::from_size(logical)),
+                    c.surface(),
+                );
+            }
+            gpu.out = Some(Out { crtc, connector: info.handle(), output, global, drm_output, pending: false });
+            return Ok(());
+        }
+        if gpu.out.is_none() {
+            tracing::warn!("no usable output connected");
+        }
+        Ok(())
+    }
+
+    fn udev_vblank(&mut self, crtc: crtc::Handle) {
+        let Some(u) = self.udev() else { return };
+        let Some(out) = u.gpu.as_mut().and_then(|g| g.out.as_mut()).filter(|o| o.crtc == crtc) else { return };
+        if let Err(e) = out.drm_output.frame_submitted() {
+            tracing::warn!("frame submitted: {e}");
+        }
+        out.pending = false;
+        // The next frame, if one is wanted, is rendered at the end of this event-loop turn.
+    }
+
+    /// Called once per event-loop turn: draw if something changed and the output is free.
+    pub fn udev_render(&mut self) {
+        if !self.redraw {
+            return;
+        }
+        // Check before taking: a failed match must not leave the backend taken.
+        if !matches!(self.backend, Backend::Udev(_)) {
+            return;
+        }
+        let Backend::Udev(mut u) = std::mem::take(&mut self.backend) else { unreachable!() };
+        let active = u.session.is_active();
+        if let (true, Some(gpu)) = (active, u.gpu.as_mut()) {
+            if let Some(out) = gpu.out.as_mut().filter(|o| !o.pending) {
+                self.redraw = false;
+                let scale = out.output.current_scale().fractional_scale();
+                let elements = self.frame_elements(&mut gpu.renderer, scale);
+                let queued = match out.drm_output.render_frame(
+                    &mut gpu.renderer,
+                    &elements,
+                    self.config.root_color,
+                    FrameFlags::DEFAULT,
+                ) {
+                    Ok(r) if !r.is_empty => match out.drm_output.queue_frame(()) {
+                        Ok(()) => {
+                            out.pending = true;
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!("queue frame: {e}");
+                            false
+                        }
+                    },
+                    Ok(_) => false,
+                    Err(e) => {
+                        tracing::warn!("render: {e}");
+                        false
+                    }
+                };
+                let output = out.output.clone();
+                if queued {
+                    super::send_frame_callbacks(self, &output);
+                } else {
+                    // Nothing changed on screen: answer frame callbacks one refresh later.
+                    let refresh = output.current_mode().map(|m| m.refresh).unwrap_or(60_000).max(1000);
+                    let d = Duration::from_micros(1_000_000_000 / refresh as u64);
+                    let _ = self.loop_handle.insert_source(Timer::from_duration(d), move |_, _, state| {
+                        super::send_frame_callbacks(state, &output);
+                        TimeoutAction::Drop
+                    });
+                }
+            }
+        }
+        self.popups.cleanup();
+        self.backend = Backend::Udev(u);
+    }
+
+    /// Switched away from our VT: stop touching devices.
+    fn udev_pause(&mut self) {
+        let Some(u) = self.udev() else { return };
+        tracing::info!("session paused");
+        u.libinput.suspend();
+        if let Some(gpu) = u.gpu.as_mut() {
+            gpu.manager.pause();
+            if let Some(out) = gpu.out.as_mut() {
+                out.pending = false;
+            }
+        }
+    }
+
+    /// Back on our VT: take the devices again and redraw everything.
+    fn udev_resume(&mut self) {
+        let Some(u) = self.udev() else { return };
+        tracing::info!("session resumed");
+        if u.libinput.resume().is_err() {
+            tracing::error!("libinput resume failed");
+        }
+        if let Some(gpu) = u.gpu.as_mut() {
+            if let Err(e) = gpu.manager.activate(false) {
+                tracing::error!("DRM activate: {e}");
+            }
+            if let Some(out) = gpu.out.as_mut() {
+                out.pending = false;
+            }
+        }
+        // Monitors may have been plugged in while we were away.
+        self.udev_scan_connectors();
+        self.damage();
+    }
+}
+
+#[allow(non_camel_case_types)]
+type libc_dev_t = smithay::reexports::rustix::fs::Dev;

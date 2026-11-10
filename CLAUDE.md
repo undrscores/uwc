@@ -3,8 +3,8 @@
 ## What this is
 
 uwc: the Rust/smithay rewrite of uwm (`undrscores/uwm`, C and wlroots). An infinite 2D canvas with dwm-style tags, each
-with its own canvas, viewport and zoom; everything floats; made to work with Quickshell (ushell) and meant to be ricked
-out through configuration. Keep the **config syntax, action names and IPC schema compatible with uwm** unless there is a
+with its own canvas, viewport and zoom; everything floats; meant to be ricked out through
+configuration. Keep the **config syntax, action names and IPC schema compatible with uwm** unless there is a
 reason not to; `README.md` has the status table and the roadmap. Not goals: client-side decorations, a built-in bar.
 
 ## Build and test
@@ -16,6 +16,12 @@ reason not to; `README.md` has the status table and the roadmap. Not goals: clie
 - To see rendering: `Xvfb :77 &`, then `DISPLAY=:77 WINIT_UNIX_BACKEND=x11 LIBGL_ALWAYS_SOFTWARE=1 target/debug/uwc`,
   run `cargo run --example paint` against its `WAYLAND_DISPLAY`, and screenshot with `import -window root`.
 - System libs: see README. The sandbox needs `libxkbcommon-x11-0` for winit's X11 path.
+- The udev backend cannot run in a sandbox (no GPU, no seat); it only builds there. Say so when changing it, and keep
+  backend-independent logic (input, cursor, rendering, frame callbacks) out of it so the nested and headless runs
+  exercise it.
+- `Uwc.backend` is taken out with `std::mem::take` when its renderer and the state are needed together. Check the
+  variant *before* taking it (`matches!`), or a mismatch silently leaves `Backend::None` behind; `tests/headless.rs`
+  checks `"backend"` in the IPC state for this.
 
 ## Conventions
 

@@ -29,6 +29,7 @@ pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>, size: (i32, i32)
     output.change_current_state(Some(mode), Some(Transform::Normal), None, Some((0, 0).into()));
     output.set_preferred(mode);
     state.add_monitor(output.clone(), (size.0, size.1).into());
+    state.backend = super::Backend::Headless;
 
     handle
         .insert_source(Timer::from_duration(Duration::from_millis(16)), move |_, _, state| {

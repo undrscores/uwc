@@ -1,0 +1,17 @@
+#!/bin/sh
+# Session launcher (what uwc.desktop runs; also fine to type on a TTY): runs uwc with its output
+# logged to ${XDG_STATE_HOME:-~/.local/state}/uwc.log (the previous run kept as uwc.log.old).
+# Once the compositor is up it hands WAYLAND_DISPLAY etc. to D-Bus / systemd (portals, notification
+# daemons and other activated services need them), then runs ~/.config/uwc/startup if executable.
+dir="${XDG_STATE_HOME:-$HOME/.local/state}"
+mkdir -p "$dir"
+[ -f "$dir/uwc.log" ] && mv -f "$dir/uwc.log" "$dir/uwc.log.old"
+startup='vars="WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE UWC_SOCKET XCURSOR_THEME XCURSOR_SIZE"
+if command -v dbus-update-activation-environment >/dev/null; then
+    dbus-update-activation-environment --systemd $vars
+elif command -v systemctl >/dev/null; then
+    systemctl --user import-environment $vars
+fi
+s="${XDG_CONFIG_HOME:-$HOME/.config}/uwc/startup"
+[ -x "$s" ] && exec "$s"'
+exec @PREFIX@/bin/uwc --backend udev -s "$startup" "$@" >"$dir/uwc.log" 2>&1

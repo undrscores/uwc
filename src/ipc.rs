@@ -217,6 +217,7 @@ impl Uwc {
             "selmon": name,
             "config_error": self.config_error,
             "config_rev": self.config_rev,
+            "backend": self.backend.name(),
             "monitors": mons,
             "cursor": {"x": self.cursor.x.round() as i64, "y": self.cursor.y.round() as i64, "hidden": false},
             "windows": windows,
