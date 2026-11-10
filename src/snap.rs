@@ -78,18 +78,15 @@ impl Uwc {
         let ys: Vec<_> = others.iter().flat_map(|r| lines(r, false)).collect();
         let mut guides = Vec::new();
         let (mut nx, mut ny) = (x, y);
-        match dist > 0.0 {
-            true => {
-                if let Some((d, t, span)) = snap_axis([x, x + me.w / 2.0, x + me.w], &xs, threshold) {
-                    nx = x + d;
-                    guides.push(Guide { vertical: true, pos: t, from: span.0.min(y), to: span.1.max(y + me.h) });
-                }
-                if let Some((d, t, span)) = snap_axis([y, y + me.h / 2.0, y + me.h], &ys, threshold) {
-                    ny = y + d;
-                    guides.push(Guide { vertical: false, pos: t, from: span.0.min(x), to: span.1.max(x + me.w) });
-                }
+        if dist > 0.0 {
+            if let Some((d, t, span)) = snap_axis([x, x + me.w / 2.0, x + me.w], &xs, threshold) {
+                nx = x + d;
+                guides.push(Guide { vertical: true, pos: t, from: span.0.min(y), to: span.1.max(y + me.h) });
             }
-            false => {}
+            if let Some((d, t, span)) = snap_axis([y, y + me.h / 2.0, y + me.h], &ys, threshold) {
+                ny = y + d;
+                guides.push(Guide { vertical: false, pos: t, from: span.0.min(x), to: span.1.max(x + me.w) });
+            }
         }
         // The grid takes what no window claimed.
         if grid > 0.0 {
