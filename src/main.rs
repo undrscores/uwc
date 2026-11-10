@@ -18,6 +18,8 @@ mod ipc;
 mod kdl;
 mod layer;
 mod options;
+mod output_management;
+mod output_power;
 mod protocol;
 mod protocols;
 mod render;

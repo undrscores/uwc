@@ -4,21 +4,27 @@
 //! think in screen coordinates, so they stay put on screen, unzoomed, on every tag): it gets
 //! uwc's decoration, focus, move / resize / fullscreen and the IPC. Override-redirect windows
 //! (X menus, tooltips) are not managed: they are drawn on top and take the pointer by their
-//! own geometry. No clipboard bridging yet.
+//! own geometry. The clipboard and primary selection are bridged both ways: when an X client
+//! takes a selection it is re-published to wayland clients as a compositor selection, and when
+//! a wayland client takes one the X server is told, so pasting works across the divide.
 
 use smithay::{
     reexports::calloop::LoopHandle,
     utils::{Logical, Point, Rectangle, Size},
-    wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
+    wayland::{
+        selection::{data_device, primary_selection, SelectionTarget},
+        xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
+    },
     xwayland::{
         xwm::{Reorder, ResizeEdge, XwmId},
         X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
     },
 };
+use std::os::unix::io::OwnedFd;
 
 use crate::{
     canvas::ALLTAGS,
-    state::{Client, Fx, Shell, Uwc},
+    state::{sel_idx, Client, Fx, SelectionOwner, Shell, Uwc},
 };
 
 impl Uwc {
@@ -131,6 +137,57 @@ impl XwmHandler for Uwc {
     }
 
     fn new_window(&mut self, _: XwmId, _: X11Surface) {}
+
+    // An X client took a selection: re-publish it to wayland clients as a compositor selection.
+    fn new_selection(&mut self, _: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        self.selection_owner[sel_idx(selection)] = SelectionOwner::X11;
+        let mimes: Vec<String> = mime_types
+            .iter()
+            .filter_map(|m| match m.as_str() {
+                "UTF8_STRING" | "STRING" | "TEXT" | "COMPOUND_TEXT" => Some("text/plain;charset=utf-8".to_string()),
+                "TARGETS" | "TIMESTAMP" | "MULTIPLE" | "DELETE" | "SAVE_TARGETS" | "ATOM" | "ATOM_PAIR" => None,
+                m => Some(m.to_string()),
+            })
+            .collect();
+        let dh = self.display_handle.clone();
+        let seat = self.seat.clone();
+        match selection {
+            SelectionTarget::Clipboard => data_device::set_data_device_selection::<Uwc>(&dh, &seat, mimes, ()),
+            SelectionTarget::Primary => primary_selection::set_primary_selection::<Uwc>(&dh, &seat, mimes, ()),
+        }
+    }
+
+    // The X selection owner is gone: clear the wayland side, but only if it was X-backed.
+    fn cleared_selection(&mut self, _: XwmId, selection: SelectionTarget) {
+        if self.selection_owner[sel_idx(selection)] != SelectionOwner::X11 {
+            return;
+        }
+        self.selection_owner[sel_idx(selection)] = SelectionOwner::None;
+        let dh = self.display_handle.clone();
+        let seat = self.seat.clone();
+        match selection {
+            SelectionTarget::Clipboard => data_device::clear_data_device_selection::<Uwc>(&dh, &seat),
+            SelectionTarget::Primary => primary_selection::clear_primary_selection::<Uwc>(&dh, &seat),
+        }
+    }
+
+    // An X client wants to read the selection: only when a wayland client owns it.
+    fn allow_selection_access(&mut self, _: XwmId, selection: SelectionTarget) -> bool {
+        self.selection_owner[sel_idx(selection)] == SelectionOwner::Wayland
+    }
+
+    // Forward the X read request to the wayland client that owns the selection.
+    fn send_selection(&mut self, _: XwmId, selection: SelectionTarget, mime_type: String, fd: OwnedFd) {
+        let seat = self.seat.clone();
+        match selection {
+            SelectionTarget::Clipboard => {
+                let _ = data_device::request_data_device_client_selection::<Uwc>(&seat, mime_type, fd);
+            }
+            SelectionTarget::Primary => {
+                let _ = primary_selection::request_primary_client_selection::<Uwc>(&seat, mime_type, fd);
+            }
+        }
+    }
 
     fn new_override_redirect_window(&mut self, _: XwmId, _: X11Surface) {}
 

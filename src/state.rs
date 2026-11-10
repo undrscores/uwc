@@ -256,6 +256,23 @@ pub enum Gesture {
     },
 }
 
+/// Which side owns a selection target (clipboard, primary): a wayland client, an X11 client
+/// (via the Xwayland bridge), or nobody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOwner {
+    None,
+    Wayland,
+    X11,
+}
+
+/// Index of a selection target in `Uwc::selection_owner`.
+pub fn sel_idx(ty: smithay::wayland::selection::SelectionTarget) -> usize {
+    match ty {
+        smithay::wayland::selection::SelectionTarget::Clipboard => 0,
+        smithay::wayland::selection::SelectionTarget::Primary => 1,
+    }
+}
+
 /// What a pointer drag with Mod held is doing.
 #[derive(Debug, Clone, Copy)]
 pub enum Drag {
@@ -311,6 +328,8 @@ pub struct Monitor {
     pub target: Option<(usize, Viewport)>,
     /// Sharp zoom: the zoom this monitor's windows are told, once it has settled.
     pub settled_zoom: f64,
+    /// The output's power mode (zwlr-output-power-management): a blanked monitor draws nothing.
+    pub powered: bool,
     /// The zoom seen last turn, and a counter so only the last zoom change of a burst settles.
     pub seen_zoom: f64,
 }
@@ -407,6 +426,11 @@ pub struct Uwc {
     pub input_method: smithay::wayland::input_method::InputMethodManagerState,
     /// The IME's popups (candidate lists), drawn on top.
     pub ime_popups: Vec<smithay::wayland::input_method::PopupSurface>,
+    /// zwlr-output-management-v1 (kanshi, wdisplays).
+    pub output_management: crate::output_management::OutputManagement,
+    /// zwlr-output-power-management-v1 (swayidle): held so the global stays alive.
+    #[allow(dead_code)]
+    pub output_power: crate::output_power::OutputPower,
     #[allow(dead_code)] // held so the global stays alive
     pub idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
     /// Live zwp-idle-inhibitor-v1 objects; any one pauses the idle notifications.
@@ -452,6 +476,8 @@ pub struct Uwc {
     pub drag: Option<Drag>,
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
+    pub selection_owner: [SelectionOwner; 2],
+    pub primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState,
     /// Pointer position at the previous step of a pan drag.
     pub drag_last: Point<f64, Logical>,
     /// Bumped on anything that changes how decorations look, so the damage tracker redraws them.
@@ -520,6 +546,9 @@ impl Uwc {
 
         let ipc = Ipc::new(&loop_handle, &socket_name)?;
 
+        // zwlr-output-management-v1 (kanshi, wdisplays): the manager global.
+        dh.create_global::<Uwc, smithay::reexports::wayland_protocols_wlr::output_management::v1::server::zwlr_output_manager_v1::ZwlrOutputManagerV1, ()>(4, ());
+
         Ok(Uwc {
             start_time: Instant::now(),
             compositor_state: CompositorState::new_v6::<Uwc>(&dh),
@@ -528,6 +557,7 @@ impl Uwc {
             xdg_decoration_state: XdgDecorationState::new::<Uwc>(&dh),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Uwc>(&dh),
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
+            primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh),
             popups: PopupManager::default(),
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
             ipc_rules: Vec::new(),
@@ -548,6 +578,8 @@ impl Uwc {
             text_input: smithay::wayland::text_input::TextInputManagerState::new::<Uwc>(&dh),
             input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |_| true),
             ime_popups: Vec::new(),
+            output_management: Default::default(),
+            output_power: crate::output_power::OutputPower::new(&dh),
             idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Uwc>(&dh),
             idle_inhibitors: 0,
             frames_drawn: 0,
@@ -580,6 +612,7 @@ impl Uwc {
             cursor: (0.0, 0.0).into(),
             drag: None,
             gesture: None,
+            selection_owner: [SelectionOwner::None; 2],
             drag_last: (0.0, 0.0).into(),
             deco_commit: Default::default(),
             redraw: true,
@@ -657,11 +690,13 @@ impl Uwc {
             target: None,
             settled_zoom: 1.0,
             seen_zoom: 1.0,
+            powered: true,
         });
         self.layout();
         if self.monitors.len() == 1 {
             self.cursor = (size.w as f64 / 2.0, size.h as f64 / 2.0).into();
         }
+        crate::output_management::refresh(self);
     }
 
     /// Drop the monitor named `name` (its output went away); windows pinned or fullscreen on it
@@ -699,6 +734,7 @@ impl Uwc {
         self.layout();
         let (w, h) = self.global_size();
         self.cursor = (self.cursor.x.clamp(0.0, w - 1.0), self.cursor.y.clamp(0.0, h - 1.0)).into();
+        crate::output_management::refresh(self);
         self.damage();
     }
 

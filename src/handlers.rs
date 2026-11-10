@@ -1,12 +1,15 @@
 //! Wayland protocol handlers: wl_compositor, xdg-shell (+ decoration), shm, seat, data device, output.
 
+use std::os::unix::io::OwnedFd;
+
 use smithay::{
     backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
     delegate_input_method_manager, delegate_output, delegate_pointer_constraints, delegate_pointer_gestures,
-    delegate_relative_pointer, delegate_seat, delegate_session_lock, delegate_shm, delegate_text_input_manager,
-    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell, delegate_xwayland_shell,
+    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_session_lock, delegate_shm,
+    delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_xwayland_shell,
     desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
     input::{
         pointer::{CursorImageStatus, Focus},
@@ -33,7 +36,8 @@ use smithay::{
             data_device::{
                 set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             },
-            SelectionHandler,
+            primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+            SelectionHandler, SelectionSource, SelectionTarget,
         },
         shell::xdg::{
             decoration::XdgDecorationHandler, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
@@ -400,7 +404,32 @@ impl SeatHandler for Uwc {
 
 impl SelectionHandler for Uwc {
     type SelectionUserData = ();
+
+    // A wayland client took (or cleared) a selection: remember the owner and tell the X server,
+    // so X clients see it.
+    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+        self.selection_owner[crate::state::sel_idx(ty)] =
+            if source.is_some() { crate::state::SelectionOwner::Wayland } else { crate::state::SelectionOwner::None };
+        if let Some(xwm) = self.xwm.as_mut() {
+            let _ = xwm.new_selection(ty, source.map(|s| s.mime_types()));
+        }
+    }
+
+    // A wayland client reads an X11-owned selection: forward the request to the X server.
+    fn send_selection(&mut self, ty: SelectionTarget, mime_type: String, fd: OwnedFd, _seat: Seat<Self>, _: &()) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            let _ = xwm.send_selection(ty, mime_type, fd, self.loop_handle.clone());
+        }
+    }
 }
+
+impl PrimarySelectionHandler for Uwc {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection
+    }
+}
+
+delegate_primary_selection!(Uwc);
 
 impl DataDeviceHandler for Uwc {
     fn data_device_state(&self) -> &DataDeviceState {
