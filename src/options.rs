@@ -197,6 +197,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "pan-momentum-ms" => pan_momentum_ms (0, 10000),
     "edge-pan-size" => edge_pan_size (0, 500),
     "hint-keys" => hint_keys,
+    "per-window-layout" => per_window_layout,
     "hot-zone-size" => hot_zone_size (0, 50),
     "hot-zone-delay-ms" => hot_zone_delay_ms (0, 5000),
     "snap-distance" => snap_distance (0, 200),

@@ -82,6 +82,8 @@ impl Uwc {
                 if let Some(a) = action {
                     self.run_action(&a);
                 }
+                // A layout key (grp:alt_shift_toggle and friends) may have switched the layout.
+                self.refresh_layout();
             }
             InputEvent::PointerMotion { event } => {
                 self.pointer_moved_by(event.delta_x(), event.delta_y(), Event::time_msec(&event));

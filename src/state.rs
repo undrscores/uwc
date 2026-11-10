@@ -501,6 +501,10 @@ pub struct Uwc {
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
     pub fling: Option<Fling>,
+    /// The keyboard layout each window last had (`per-window-layout`).
+    pub window_layouts: std::collections::HashMap<u32, usize>,
+    /// The active keyboard layout: (index, name, count).
+    pub layout: (usize, String, usize),
     pub hot: crate::hotzones::HotState,
     /// Labelled regions of the canvas (frames.rs).
     pub frames: crate::frames::Frames,
@@ -659,6 +663,8 @@ impl Uwc {
             drag: None,
             gesture: None,
             fling: None,
+            window_layouts: Default::default(),
+            layout: (0, String::new(), 1),
             hot: Default::default(),
             frames: Default::default(),
             guides: Default::default(),
@@ -1289,8 +1295,47 @@ impl Uwc {
     }
 
     /// Give a client keyboard focus, optionally raising it (sloppy focus does not).
+    /// Read the keyboard layout in use from xkb into the cache IPC reports: (index, name, how many).
+    /// Called after anything that can change it (a key, `set_layout`, a new keymap).
+    pub fn refresh_layout(&mut self) {
+        let kb = self.keyboard();
+        let info = kb.with_xkb_state(self, |ctx| {
+            let xkb = ctx.xkb().lock().unwrap();
+            let i = xkb.active_layout();
+            (i.0 as usize, xkb.layout_name(i).to_string(), xkb.layouts().count())
+        });
+        if info != self.layout {
+            self.layout = info;
+            self.ipc.dirty = true;
+        }
+    }
+
+    /// Switch to layout `n`, or the next one.
+    pub fn set_layout(&mut self, n: Option<usize>) {
+        let kb = self.keyboard();
+        kb.with_xkb_state(self, |mut ctx| match n {
+            Some(n) => ctx.set_layout(smithay::input::keyboard::Layout(n as u32)),
+            None => ctx.cycle_next_layout(),
+        });
+        self.refresh_layout();
+    }
+
     pub fn set_focus(&mut self, id: Option<u32>, raise: bool) {
         let changed = self.focus != id;
+        let old = self.focus;
+        if changed && self.config.per_window_layout {
+            // Each window keeps the layout it was typed in.
+            let (cur, _, count) = self.layout.clone();
+            if let Some(o) = old {
+                self.window_layouts.insert(o, cur);
+            }
+            if let Some(n) = id {
+                let want = self.window_layouts.get(&n).copied().unwrap_or(0).min(count.saturating_sub(1));
+                if want != cur {
+                    self.set_layout(Some(want));
+                }
+            }
+        }
         self.focus = id;
         if let Some(i) = id.and_then(|id| self.client_index(id)).filter(|_| raise) {
             let c = self.clients.remove(i);
@@ -1868,6 +1913,7 @@ impl Uwc {
             Action::ToggleOverview => self.toggle_overview(),
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::JumpHints => self.hints_toggle(),
+            Action::NextLayout => self.set_layout(None),
             Action::FrameNew => {
                 if let Some(id) = self.focus {
                     self.frame_around(id);
@@ -1961,6 +2007,8 @@ impl Uwc {
             tracing::warn!("keymap: {e:?}");
         }
         kb.change_repeat_info(k.repeat_rate, k.repeat_delay);
+        self.window_layouts.clear();
+        self.refresh_layout();
     }
 
     pub fn spawn(&self, cmd: &str, args: &[String]) {

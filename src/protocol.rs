@@ -40,6 +40,8 @@ pub enum Request {
     Pan(f64, f64),
     PanTo(f64, f64),
     Frame(FrameCmd),
+    /// Switch the keyboard layout: `next` or an index.
+    Layout(Option<usize>),
     /// Panic inside the compositor, to test that it survives (only with UWC_DEBUG_PANIC=1).
     Crash,
     /// The window whose app-id and title best match this text (`#12` = window 12), brought into view.
@@ -85,6 +87,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "frame add|label|move|resize|remove|fit ...",
         "labelled regions of the canvas: add X Y W H [LABEL], label ID TEXT, move ID X Y (its windows go too), resize ID W H, remove ID, fit ID",
     ),
+    ("layout next|N", "switch the keyboard layout (0 is the first of input { keyboard { xkb-layout \"us,de\" } })"),
     ("crash", "panic on purpose to test recovery (only when UWC_DEBUG_PANIC=1 is set in uwc's environment)"),
     (
         "jump QUERY",
@@ -156,6 +159,13 @@ impl Request {
             "panto" => Request::PanTo(num(0)?, num(1)?),
             "fling" => Request::Fling(num(0)?, num(1)?),
             "crash" => none(Request::Crash)?,
+            "layout" => match args.first().copied() {
+                Some("next") => Request::Layout(None),
+                Some(n) => {
+                    Request::Layout(Some(n.parse().map_err(|_| "layout takes `next` or a layout number".to_string())?))
+                }
+                None => return Err("layout takes `next` or a layout number (0 is the first)".into()),
+            },
             "frame" => {
                 let sub = args.first().copied().unwrap_or("");
                 let text = |from: usize| args.get(from..).unwrap_or(&[]).join(" ");
@@ -303,6 +313,13 @@ pub struct Monitor {
 }
 
 #[derive(Serialize)]
+pub struct KeyboardLayout {
+    pub index: usize,
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Serialize)]
 pub struct Frame {
     pub id: u32,
     pub label: String,
@@ -361,6 +378,7 @@ pub enum Event {
         shader_errors: std::collections::BTreeMap<String, String>,
         backend: &'static str,
         keyboard_focus: Option<KeyboardFocus>,
+        keyboard_layout: KeyboardLayout,
         /// Hint mode (`jump-hints`) is up: every key goes to it.
         hints: bool,
         monitors: Vec<Monitor>,
@@ -442,6 +460,7 @@ mod tests {
             "fling",
             "jump",
             "crash",
+            "layout",
             "frame",
             "zoom",
             "view",

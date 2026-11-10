@@ -1850,6 +1850,38 @@ fn hot_zones_fire_once_when_the_pointer_rests_in_a_corner() {
 }
 
 #[test]
+fn the_keyboard_layout_is_reported_switched_and_remembered_per_window() {
+    let mut uwc = Uwc::start(
+        "layout",
+        Some("input { keyboard { xkb-layout \"us,de\" } }\noptions { per-window-layout true\n open-ms 0 }"),
+    );
+    assert!(uwc.state()["config_error"].is_null(), "{}", uwc.state()["config_error"]);
+    let s = uwc.state();
+    assert_eq!((s["keyboard_layout"]["index"].as_u64(), s["keyboard_layout"]["count"].as_u64()), (Some(0), Some(2)));
+    assert!(s["keyboard_layout"]["name"].as_str().unwrap().contains("English"), "{}", s["keyboard_layout"]);
+    uwc.ok("layout next");
+    let s = uwc.state();
+    assert_eq!(s["keyboard_layout"]["index"], 1);
+    assert!(s["keyboard_layout"]["name"].as_str().unwrap().contains("German"), "{}", s["keyboard_layout"]);
+    uwc.ok("layout 0");
+    assert_eq!(uwc.state()["keyboard_layout"]["index"], 0);
+    assert!(uwc.cmd("layout 2").get("error").is_some());
+    assert!(uwc.cmd("layout sideways").get("error").is_some());
+    // Each window keeps the layout it was typed in.
+    let mut c = uwc.connect();
+    let _a = c.window("Writer", 200, 150);
+    let _b = c.window("Coder", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Writer")["id"].as_u64().unwrap(), win(&s, "Coder")["id"].as_u64().unwrap());
+    uwc.ok(&format!("focus {a}"));
+    uwc.ok("layout 1");
+    uwc.ok(&format!("focus {b}"));
+    assert_eq!(uwc.state()["keyboard_layout"]["index"], 0, "a window that never chose gets the first layout");
+    uwc.ok(&format!("focus {a}"));
+    assert_eq!(uwc.state()["keyboard_layout"]["index"], 1, "Writer is back in German");
+}
+
+#[test]
 fn windows_animate_in_moves_and_tag_switches() {
     let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
     let mut c = uwc.connect();

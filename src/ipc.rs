@@ -249,6 +249,11 @@ impl Uwc {
             shader_errors: self.shader_errors.clone(),
             backend: self.backend.name(),
             keyboard_focus: self.keyboard_focus(),
+            keyboard_layout: P::KeyboardLayout {
+                index: self.layout.0,
+                name: self.layout.1.clone(),
+                count: self.layout.2,
+            },
             hints: self.hints_active(),
             monitors,
             cursor: P::Cursor { x: self.cursor.x.round() as i64, y: self.cursor.y.round() as i64, hidden: false },
@@ -398,6 +403,12 @@ impl Uwc {
                         self.frame_fit(id);
                     }
                 }
+            }
+            R::Layout(n) => {
+                if n.is_some_and(|n| n >= self.layout.2) {
+                    return Err(format!("there are {} layouts (0 to {})", self.layout.2, self.layout.2 - 1));
+                }
+                self.set_layout(n);
             }
             R::Crash => {
                 if std::env::var_os("UWC_DEBUG_PANIC").is_none() {

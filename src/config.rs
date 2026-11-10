@@ -86,6 +86,8 @@ pub enum Action {
     ToggleShortcutsInhibit,
     /// Label every window and jump to the one you type (see hints.rs).
     JumpHints,
+    /// Switch to the next keyboard layout.
+    NextLayout,
     /// A frame around the focused window / remove the focused window's frame / fit the view to it
     /// / fit the next or previous frame (frames.rs).
     FrameNew,
@@ -301,6 +303,7 @@ pub struct Config {
     /// `hot-zones { top-left { action; } ... }`.
     pub hot_zones: Vec<(crate::hotzones::Zone, Action)>,
     pub hot_zone_size: f64,
+    pub per_window_layout: bool,
     pub hot_zone_delay_ms: f64,
     /// `tag N { ... }`: what a tag looks like, over the global options (index = tag - 1).
     pub tag_looks: Vec<TagLook>,
@@ -425,6 +428,7 @@ impl Config {
             hooks: Default::default(),
             hot_zones: Vec::new(),
             hot_zone_size: 2.0,
+            per_window_layout: false,
             hot_zone_delay_ms: 250.0,
             tag_looks: vec![TagLook::default(); crate::canvas::TAGCOUNT],
             keyboard: Keyboard::default(),
@@ -847,6 +851,7 @@ fn parse_action(n: &Node) -> Result<Action> {
         "toggle-overview" => Action::ToggleOverview,
         "toggle-shortcuts-inhibit" => Action::ToggleShortcutsInhibit,
         "jump-hints" => Action::JumpHints,
+        "next-layout" => Action::NextLayout,
         "frame-new" => Action::FrameNew,
         "frame-remove" => Action::FrameRemove,
         "frame-fit" => Action::FrameFit,
