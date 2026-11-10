@@ -96,6 +96,9 @@ impl Uwc {
                 tracing::error!("submit: {e}");
             }
             super::send_frame_callbacks(self, &w.output);
+            if std::mem::take(&mut self.animating) {
+                self.redraw = true;
+            }
         }
         self.popups.cleanup();
         w.backend.window().request_redraw();

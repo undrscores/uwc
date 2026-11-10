@@ -64,6 +64,13 @@ impl Ipc {
     }
 }
 
+fn gradient(g: &Option<crate::config::Gradient>) -> Value {
+    match g {
+        Some(g) => json!({"angle": g.angle, "colors": g.colors.iter().map(|c| hex(*c)).collect::<Vec<_>>()}),
+        None => Value::Null,
+    }
+}
+
 fn hex(c: Color) -> String {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!("#{:02x}{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]), b(c[3]))
@@ -253,6 +260,22 @@ impl Uwc {
             "border-color": hex(c.border_color),
             "focus-color": hex(c.focus_color),
             "urgent-color": hex(c.urgent_color),
+            "corner-radius": c.corner_radius,
+            "shadow-size": c.shadow_size,
+            "shadow-offset-x": c.shadow_offset.0,
+            "shadow-offset-y": c.shadow_offset.1,
+            "shadow-color": hex(c.shadow_color),
+            "shadow-spread": c.shadow_spread,
+            "focus-shadow-color": hex(c.focus_shadow_color),
+            "focus-shadow-size": c.focus_shadow_size,
+            "backdrop-color": hex(c.backdrop_color),
+            "opacity": c.opacity,
+            "inactive-opacity": c.inactive_opacity,
+            "inactive-dim": c.inactive_dim,
+            "border-gradient": gradient(&c.border_gradient),
+            "focus-gradient": gradient(&c.focus_gradient),
+            "urgent-gradient": gradient(&c.urgent_gradient),
+            "border-spin-ms": c.border_spin_ms,
             "pan-step": c.pan_step,
             "move-step": c.move_step,
             "zoom-scroll": c.zoom_scroll,
@@ -315,6 +338,24 @@ impl Uwc {
                         None => Err(format!("unknown option `{name}`")),
                     },
                 };
+            }
+            "set" => {
+                // Everything after the command name, as one line of the options block.
+                let rest = line.trim_start().strip_prefix("set").unwrap_or("").trim();
+                if rest.is_empty() {
+                    return Err("set needs an option and a value, e.g. set focus-color \"#ff8800\"".into());
+                }
+                match self.config.set_line(rest) {
+                    Ok(c) => {
+                        self.config = c;
+                        // Like a reload for whoever follows config_rev, without re-reading the file.
+                        self.config_rev += 1;
+                        self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
+                        self.deco_commit.increment();
+                        self.damage();
+                    }
+                    Err(e) => return Err(format!("{e:#}")),
+                }
             }
             "pan" => {
                 let (dx, dy) = (num(0)?, num(1)?);

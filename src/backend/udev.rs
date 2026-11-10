@@ -606,6 +606,10 @@ impl Uwc {
                         false
                     }
                 };
+                if std::mem::take(&mut self.animating) {
+                    // Drawn again once this frame is on screen.
+                    self.redraw = true;
+                }
                 let output = out.output.clone();
                 if queued {
                     super::send_frame_callbacks(self, &output);

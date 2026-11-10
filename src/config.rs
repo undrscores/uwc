@@ -17,6 +17,13 @@ pub const DEFAULT_CONFIG: &str = include_str!("../config.def.kdl");
 
 pub type Color = [f32; 4];
 
+/// A gradient: 2 to 6 colors along `angle` (CSS degrees: 0 = first color at the bottom, 90 = at the left).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    pub colors: Vec<Color>,
+    pub angle: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModKey {
     Super,
@@ -188,6 +195,26 @@ pub struct Config {
     pub border_color: Color,
     pub focus_color: Color,
     pub urgent_color: Color,
+    // Decoration (see config.def.kdl). Sizes are canvas px and scale with zoom.
+    pub corner_radius: f64,
+    pub shadow_size: f64,
+    pub shadow_offset: (f64, f64),
+    pub shadow_color: Color,
+    pub shadow_spread: f64,
+    /// Alpha 0 = the same as shadow_color.
+    pub focus_shadow_color: Color,
+    /// -1 = the same as shadow_size.
+    pub focus_shadow_size: f64,
+    pub backdrop_color: Color,
+    pub opacity: f64,
+    pub inactive_opacity: f64,
+    pub inactive_dim: f64,
+    pub border_gradient: Option<Gradient>,
+    pub focus_gradient: Option<Gradient>,
+    pub urgent_gradient: Option<Gradient>,
+    pub border_spin_ms: f64,
+    /// The `vars` of the file, so IPC `set` can use them too.
+    pub vars: HashMap<String, String>,
     pub pan_step: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
@@ -285,6 +312,22 @@ impl Config {
             border_color: [0.267, 0.267, 0.267, 1.0],
             focus_color: [0.0, 0.333, 0.467, 1.0],
             urgent_color: [1.0, 0.0, 0.0, 1.0],
+            corner_radius: 10.0,
+            shadow_size: 24.0,
+            shadow_offset: (0.0, 6.0),
+            shadow_color: [0.0, 0.0, 0.0, 0.6],
+            shadow_spread: 0.0,
+            focus_shadow_color: [0.0; 4],
+            focus_shadow_size: -1.0,
+            backdrop_color: [0.0; 4],
+            opacity: 1.0,
+            inactive_opacity: 1.0,
+            inactive_dim: 0.0,
+            border_gradient: None,
+            focus_gradient: None,
+            urgent_gradient: None,
+            border_spin_ms: 0.0,
+            vars: HashMap::new(),
             pan_step: 200.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
@@ -302,6 +345,7 @@ impl Config {
             monitors: Vec::new(),
             files,
         };
+        cfg.vars = vars.clone();
         // Options first, so `mod-key` applies to every bind whatever the section order.
         for n in &nodes {
             match n.name.as_str() {
@@ -341,6 +385,12 @@ impl Config {
 
     fn set_option(&mut self, n: &Node, vars: &HashMap<String, String>) -> Result<()> {
         let name = n.name.as_str();
+        match name {
+            "border-gradient" => return parse_gradient(n, vars).map(|g| self.border_gradient = g),
+            "focus-gradient" => return parse_gradient(n, vars).map(|g| self.focus_gradient = g),
+            "urgent-gradient" => return parse_gradient(n, vars).map(|g| self.urgent_gradient = g),
+            _ => {}
+        }
         let v = n.args.first().ok_or_else(|| anyhow!("missing value"))?;
         let boolean = || v.as_bool().ok_or_else(|| anyhow!("expected true or false"));
         let num = || v.as_num().ok_or_else(|| anyhow!("expected a number"));
@@ -365,6 +415,22 @@ impl Config {
             "border-color" => self.border_color = col()?,
             "focus-color" => self.focus_color = col()?,
             "urgent-color" => self.urgent_color = col()?,
+            "corner-radius" => self.corner_radius = range(num()?, 0.0, 500.0)?,
+            "shadow-size" => self.shadow_size = range(num()?, 0.0, 500.0)?,
+            "shadow-offset-x" => self.shadow_offset.0 = range(num()?, -1000.0, 1000.0)?,
+            "shadow-offset-y" => self.shadow_offset.1 = range(num()?, -1000.0, 1000.0)?,
+            "shadow-color" => self.shadow_color = col()?,
+            "shadow-spread" => self.shadow_spread = range(num()?, -500.0, 500.0)?,
+            "focus-shadow-color" => self.focus_shadow_color = col()?,
+            "focus-shadow-size" => {
+                let v = num()?;
+                self.focus_shadow_size = if v < 0.0 { -1.0 } else { range(v, 0.0, 500.0)? };
+            }
+            "backdrop-color" => self.backdrop_color = col()?,
+            "opacity" => self.opacity = range(num()?, 0.0, 1.0)?,
+            "inactive-opacity" => self.inactive_opacity = range(num()?, 0.0, 1.0)?,
+            "inactive-dim" => self.inactive_dim = range(num()?, 0.0, 1.0)?,
+            "border-spin-ms" => self.border_spin_ms = range(num()?, -1e7, 1e7)?,
             "pan-step" => self.pan_step = range(num()?, 1.0, 10000.0)?,
             "move-step" => self.move_step = range(num()?, 1.0, 10000.0)?,
             "zoom-scroll" => self.zoom_scroll = range(num()?, 1.01, 3.0)?,
@@ -377,6 +443,19 @@ impl Config {
             other => bail!("unknown option `{other}`"),
         }
         Ok(())
+    }
+
+    /// IPC `set`: one line of the `options` block (`focus-color "#ff8800"`), applied to a copy so a
+    /// bad value changes nothing. `mod-key` is refused: the binds were built with the old one.
+    pub fn set_line(&self, line: &str) -> Result<Config> {
+        let nodes = kdl::parse(line).map_err(|e| anyhow!("{e}"))?;
+        let [n] = nodes.as_slice() else { bail!("expected one option") };
+        if n.name == "mod-key" {
+            bail!("mod-key can only be changed in the config file");
+        }
+        let mut c = self.clone();
+        c.set_option(n, &self.vars).with_context(|| format!("option `{}`", n.name))?;
+        Ok(c)
     }
 
     fn add_bind(&mut self, n: &Node) -> Result<()> {
@@ -419,6 +498,32 @@ fn range(v: f64, lo: f64, hi: f64) -> Result<f64> {
     } else {
         bail!("{v} is out of range ({lo} to {hi})")
     }
+}
+
+fn parse_gradient(n: &Node, vars: &HashMap<String, String>) -> Result<Option<Gradient>> {
+    let colors = n
+        .args
+        .iter()
+        .map(|v| match v {
+            Val::Str(s) => parse_color(s, vars),
+            _ => Err(anyhow!("gradient colors are strings like \"#rrggbb\"")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // No colors turns the gradient off.
+    if colors.is_empty() {
+        return Ok(None);
+    }
+    if !(2..=6).contains(&colors.len()) {
+        bail!("a gradient has 2 to 6 colors");
+    }
+    let mut angle = 90.0;
+    for (k, v) in &n.props {
+        match k.as_str() {
+            "angle" => angle = range(v.as_num().ok_or_else(|| anyhow!("angle needs a number"))?, -3600.0, 3600.0)?,
+            other => bail!("unknown gradient property `{other}` (angle)"),
+        }
+    }
+    Ok(Some(Gradient { colors, angle }))
 }
 
 fn parse_keyboard(n: &Node, k: &mut Keyboard) -> Result<()> {
@@ -782,6 +887,43 @@ mod tests {
         ] {
             assert!(Config::parse(bad, p).is_err(), "should reject: {bad}");
         }
+    }
+
+    #[test]
+    fn decoration_options() {
+        let c = Config::parse(
+            "vars { a \"#ff0000\"; b \"#0000ff\" }\noptions { corner-radius 12; shadow-size 30; focus-gradient \"$a\" \"$b\" angle=45; inactive-opacity 0.9; inactive-dim 0.2; focus-shadow-size -5 }",
+            Some(Path::new("/x/c.kdl")),
+        )
+        .unwrap();
+        assert_eq!((c.corner_radius, c.shadow_size, c.inactive_opacity, c.inactive_dim), (12.0, 30.0, 0.9, 0.2));
+        let g = c.focus_gradient.as_ref().unwrap();
+        assert_eq!((g.colors.len(), g.angle), (2, 45.0));
+        assert_eq!(c.focus_shadow_size, -1.0, "any negative size means 'same as shadow-size'");
+        // An empty gradient turns it off.
+        let c2 = Config::parse("options { focus-gradient }", Some(Path::new("/x/c.kdl"))).unwrap();
+        assert!(c2.focus_gradient.is_none());
+        for bad in [
+            "options { focus-gradient \"#fff\" }",
+            "options { focus-gradient \"#fff\" \"#000\" spin=1 }",
+            "options { opacity 1.5 }",
+            "options { corner-radius -1 }",
+        ] {
+            assert!(Config::parse(bad, Some(Path::new("/x/c.kdl"))).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn set_line_validates_and_uses_vars() {
+        let c = Config::parse("vars { accent \"#00ff00\" }", Some(Path::new("/x/c.kdl"))).unwrap();
+        let c2 = c.set_line("focus-color \"$accent\"").unwrap();
+        assert_eq!(c2.focus_color, [0.0, 1.0, 0.0, 1.0]);
+        let c3 = c.set_line("border-gradient \"#ff0000\" \"#0000ff\" angle=10").unwrap();
+        assert_eq!(c3.border_gradient.unwrap().angle, 10.0);
+        assert!(c.set_line("mod-key \"Alt\"").is_err());
+        assert!(c.set_line("opacity 7").is_err());
+        assert!(c.set_line("nonsense 1").is_err());
+        assert!(c.set_line("a 1; b 2").is_err());
     }
 
     #[test]

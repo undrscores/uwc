@@ -625,3 +625,34 @@ fn an_exclusive_launcher_takes_the_keyboard_and_gives_it_back() {
     assert_eq!(win(&s, "A")["focused"], true);
     assert_eq!(s["keyboard_focus"]["window"], win(&s, "A")["id"], "the window gets the seat's keyboard back");
 }
+
+#[test]
+fn set_changes_options_live_and_rejects_bad_values() {
+    let mut uwc = Uwc::start("set", Some("vars { accent \"#7aa2f7\" }\noptions { corner-radius 12 }"));
+    let rev = num(&uwc.state()["config_rev"]);
+    uwc.ok("set focus-color \"$accent\"");
+    assert_eq!(uwc.cmd("get focus-color")["value"], "#7aa2f7ff", "vars from the file work in set");
+    uwc.ok("set focus-gradient \"#ff0000\" \"#00ff00\" \"#0000ff\" angle=30");
+    let g = uwc.cmd("get focus-gradient")["value"].clone();
+    assert_eq!(g["angle"], 30.0);
+    assert_eq!(g["colors"].as_array().unwrap().len(), 3);
+    uwc.ok("set inactive-opacity 0.8");
+    assert_eq!(uwc.cmd("get inactive-opacity")["value"], 0.8);
+    assert!(num(&uwc.state()["config_rev"]) > rev, "config_rev tells shells to get again");
+
+    for bad in [
+        "set corner-radius -3",
+        "set opacity 2",
+        "set nonsense 1",
+        "set mod-key \"Alt\"",
+        "set",
+        "set focus-gradient \"#fff\"",
+    ] {
+        assert!(uwc.cmd(bad).get("error").is_some(), "should refuse: {bad}");
+    }
+    assert_eq!(uwc.cmd("get corner-radius")["value"], 12.0, "a refused set changes nothing");
+    // `set` lasts until the next reload, like in uwm.
+    uwc.ok("reload");
+    assert_eq!(uwc.cmd("get inactive-opacity")["value"], 1.0);
+    assert_eq!(uwc.cmd("get focus-gradient")["value"], Value::Null);
+}

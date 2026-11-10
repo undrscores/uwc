@@ -67,6 +67,8 @@ pub struct Client {
     pub mapped: bool,
     /// Ids for the four border rects, stable so the damage tracker can tell frames apart.
     pub border_ids: [Id; 4],
+    /// Ids for the dim, backdrop, border and shadow shader elements.
+    pub deco_ids: [Id; 4],
 }
 
 impl Client {
@@ -187,6 +189,8 @@ pub struct Uwc {
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
     pub redraw: bool,
+    /// Set while drawing a frame that is part of an animation: the backend asks for the next one.
+    pub animating: bool,
     pub ipc: Ipc,
 }
 
@@ -260,6 +264,7 @@ impl Uwc {
             drag_last: (0.0, 0.0).into(),
             deco_commit: Default::default(),
             redraw: true,
+            animating: false,
             ipc,
         })
     }

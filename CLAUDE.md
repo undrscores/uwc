@@ -36,7 +36,14 @@ reason not to; `README.md` has the status table and the roadmap. Not goals: clie
 - Adding an option: a field in `Config`, an arm in `set_option` (with a range if a bad value could break something),
   a line in `config.def.kdl` (documented), an entry in `ipc_options`, and a test. Adding an action: `Action`,
   `parse_action`, `run_action`, a default bind if sensible.
-- Animations (when added) are stepped from the frame handler, never timers.
+- Animations are stepped from the frame handler, never timers: set `animating` while drawing a frame that needs a
+  next one (the border spin does), and the backend asks for it.
+- Riceable is a goal: new visual features are an option in `config.def.kdl` (documented there, uwm's name if uwm has
+  it), settable with IPC `set`, reported by `get`, and tested. Decoration reads `Uwc.config` when drawing, so `set`
+  needs nothing else. Shader elements (`deco.rs`) keep a stable `Id` per window and role and take `deco_commit`;
+  bump it when their look changes without their geometry changing.
+- GLSL must compile on NVIDIA too: GLSL ES 1.00, float literals (`1.0`, not `1`), no implicit int/float mixing, no
+  names that shadow builtins, constant loop bounds, `highp` only under `GL_FRAGMENT_PRECISION_HIGH`.
 
 ## Workflow
 

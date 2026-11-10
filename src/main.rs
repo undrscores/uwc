@@ -5,6 +5,7 @@ mod backend;
 mod canvas;
 mod config;
 mod cursor;
+mod deco;
 mod handlers;
 mod input;
 mod ipc;

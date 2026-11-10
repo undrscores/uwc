@@ -15,6 +15,33 @@ options {
     border-color "#444444"
     focus-color "#005577"
     urgent-color "#ff0000"
+
+    // Window decoration. Sizes are canvas px and scale with zoom.
+    corner-radius 10            // rounded window corners; 0 = square
+    shadow-size 24              // shadow blur distance; 0 = no shadow
+    shadow-offset-x 0
+    shadow-offset-y 6
+    shadow-color "#00000099"    // "#rrggbbaa"
+    shadow-spread 0             // px the shadow grows (negative: shrinks) before it is blurred
+    // A glow: the focused window's shadow can differ. focus-shadow-color with alpha 0 means
+    // "the same as shadow-color", focus-shadow-size -1 "the same as shadow-size". For a glow in the
+    // focus color use  focus-shadow-color "#005577cc"  focus-shadow-size 30  shadow-offset-y 0.
+    focus-shadow-color "#00000000"
+    focus-shadow-size -1
+    // A color painted behind a window's surface, inside the border (shows through translucent
+    // windows). Alpha 0 = none.
+    backdrop-color "#00000000"
+    opacity 1                   // 0-1: focused windows (the surface only, not the border or shadow)
+    inactive-opacity 1          // 0-1: windows that do not have focus
+    inactive-dim 0              // 0-1: how much windows without focus are darkened
+    // Border gradients replace the border / focus color: 2 to 6 colors, angle in CSS degrees
+    // (0 = first color at the bottom, last at the top; 90 = first at the left; the default).
+    // No colors turns it off. Needs border-width > 0.
+    // border-gradient "#444444" "#222222" angle=45
+    // focus-gradient "#00aaff" "#aa00ff" angle=45
+    // urgent-gradient "#ff0000" "#ffaa00" angle=45
+    border-spin-ms 0            // a gradient border turns once around in this many ms (negative: the other way); 0 = still
+    // All of these can be changed live over IPC:  set focus-gradient "#ff0000" "#0000ff" angle=45
     pan-step 200                // canvas px for the pan-view action
     move-step 50                // canvas px for move-window / resize-window
     zoom-scroll 1.1             // zoom factor per scroll notch with Mod held
