@@ -778,8 +778,19 @@ fn windows_animate_in_moves_and_tag_switches() {
     uwc.ok("view 1");
     assert_eq!(uwc.state()["monitors"][0]["animating"], false);
     uwc.ok("set open-ms 0");
-    let _b = c.window("B", 200, 100);
+    let b = c.window("B", 200, 100);
     let s = uwc.wait("B", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(s["monitors"][0]["animating"], false);
+    // Closing: the options are range-checked, and with no renderer (headless) there is no ghost to
+    // fade, so the window is simply gone (the pixels are checked in tests/nested.py).
+    uwc.ok("set close-ms 300");
+    assert!(uwc.cmd("set close-scale 2").get("error").is_some());
+    assert!(uwc.cmd("set close-ms -1").get("error").is_some());
+    b.toplevel.destroy();
+    b.xdg.destroy();
+    b.surface.destroy();
+    c.sync();
+    let s = uwc.wait("B to go", |s| s["windows"].as_array().unwrap().len() == 1);
     assert_eq!(s["monitors"][0]["animating"], false);
 }
 

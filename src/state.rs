@@ -317,6 +317,10 @@ pub struct Uwc {
     pub animating: bool,
     /// When the eased view move last stepped.
     pub anim_stepped: Instant,
+    /// Closed windows still fading out.
+    pub ghosts: Vec<crate::ghost::Ghost>,
+    /// Pictures of windows that were asked to close and have not gone yet, by window id.
+    pub closing: std::collections::HashMap<u32, (crate::ghost::Ghost, Instant)>,
     pub ipc: Ipc,
 }
 
@@ -410,6 +414,8 @@ impl Uwc {
             session_written: None,
             animating: false,
             anim_stepped: Instant::now(),
+            ghosts: Vec::new(),
+            closing: Default::default(),
             ipc,
         })
     }
@@ -634,7 +640,9 @@ impl Uwc {
 
     /// Something is easing (the view or a window).
     pub fn anim_running(&self) -> bool {
-        self.mon.as_ref().is_some_and(|m| m.target.is_some()) || self.clients.iter().any(|c| !c.fx.at_rest())
+        self.mon.as_ref().is_some_and(|m| m.target.is_some())
+            || !self.ghosts.is_empty()
+            || self.clients.iter().any(|c| !c.fx.at_rest())
     }
 
     /// Call before starting an animation when none was running: time counts from now, not from the
@@ -650,7 +658,8 @@ impl Uwc {
         self.anim_stepped = now;
         let view = self.step_view(dt);
         let fx = self.step_fx(dt);
-        view || fx
+        let ghosts = self.step_ghosts(dt);
+        view || fx || ghosts
     }
 
     /// Windows' open, move and tag fades close in on rest, each by the same fraction per time.
@@ -845,6 +854,7 @@ impl Uwc {
     }
 
     pub fn close_client(&mut self, id: u32) {
+        self.snapshot_before_close(id);
         if let Some(i) = self.client_index(id) {
             if let Some(t) = self.clients[i].window.toplevel() {
                 t.send_close();

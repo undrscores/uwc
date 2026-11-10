@@ -8,6 +8,7 @@ mod config;
 mod cursor;
 mod deco;
 mod export;
+mod ghost;
 mod handlers;
 mod input;
 mod ipc;

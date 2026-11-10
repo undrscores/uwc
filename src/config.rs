@@ -216,6 +216,9 @@ pub struct Config {
     pub open_scale: f64,
     /// Windows moved by key or IPC glide for this long (dragging is always instant); 0 = jump.
     pub move_ms: f64,
+    /// A closed window fades out and shrinks to `close_scale` over this long (0 = gone at once).
+    pub close_ms: f64,
+    pub close_scale: f64,
     /// Windows that come into view with a tag switch fade in over this long; 0 = appear at once.
     pub tag_ms: f64,
     pub move_step: f64,
@@ -330,6 +333,8 @@ impl Config {
             open_ms: 160.0,
             open_scale: 0.92,
             move_ms: 140.0,
+            close_ms: 140.0,
+            close_scale: 0.92,
             tag_ms: 140.0,
             move_step: 50.0,
             zoom_scroll: 1.1,

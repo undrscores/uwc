@@ -59,6 +59,8 @@ options {
     pan-step 200                // canvas px for the pan-view action
     open-ms 160                 // a new window fades in and grows from open-scale over this long; 0 = appears at once
     open-scale 0.92             // the size it starts at, 0.1 to 1
+    close-ms 140                // a closed window fades out and shrinks to close-scale over this long; 0 = gone at once
+    close-scale 0.92            // the size it ends at, 0.1 to 1
     move-ms 140                 // windows moved by key or IPC glide for about this long; 0 = jump. Dragging is always instant
     tag-ms 140                  // windows that come into view with a tag switch fade in over this long; 0 = at once
     view-ms 180                 // eased view moves (pan and zoom keys, scroll zoom, center/fit, reveal, bookmarks, home) take about this long; 0 = jump. Dragging is always instant

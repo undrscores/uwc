@@ -12,10 +12,11 @@ use smithay::{
             render_elements,
             solid::SolidColorRenderElement,
             surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+            texture::TextureRenderElement,
             utils::RescaleRenderElement,
             AsRenderElements, Kind,
         },
-        gles::GlesRenderer,
+        gles::{GlesRenderer, GlesTexture},
     },
     utils::{Physical, Point, Rectangle, Scale, Size},
 };
@@ -38,6 +39,7 @@ render_elements! {
     Solid=SolidColorRenderElement,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
     Layer=WaylandSurfaceRenderElement<GlesRenderer>,
+    Ghost=TextureRenderElement<GlesTexture>,
 }
 
 /// How one window looks right now, resolved from the options and its focus.
@@ -95,7 +97,7 @@ impl Uwc {
         let mut out = if with_cursor { self.cursor_elements(renderer, scale) } else { Vec::new() };
         out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
-        let fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true);
+        let fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true, None);
         if !fullscreen.is_empty() {
             out.extend(fullscreen);
             let (w, h) = self.screen_size();
@@ -109,7 +111,8 @@ impl Uwc {
             )));
         }
         out.extend(self.layer_elements(renderer, scale, &[Layer::Top]));
-        out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, false));
+        out.extend(self.ghost_elements(renderer, scale));
+        out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, false, None));
         out.extend(self.layer_elements(renderer, scale, &[Layer::Bottom, Layer::Background]));
         if let Some((program, _)) = background {
             let (w, h) = self.screen_size();
@@ -223,11 +226,17 @@ impl Uwc {
         user: &HashMap<String, GlesPixelProgram>,
         scale: f64,
         fullscreen: bool,
+        only: Option<u32>,
     ) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
         let commit = self.deco_commit;
 
-        for c in self.clients.iter().rev().filter(|c| self.visible(c) && c.fullscreen == fullscreen) {
+        for c in self
+            .clients
+            .iter()
+            .rev()
+            .filter(|c| only.is_none_or(|id| c.id == id) && self.visible(c) && c.fullscreen == fullscreen)
+        {
             // The options with this window's rules applied.
             let deco = self.deco_for(c);
             let o = &deco;

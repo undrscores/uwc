@@ -21,7 +21,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Session restore: views, bookmarks and every window's layout (position or pinned spot, size, tags, scale, minimized, fullscreen) saved to `~/.local/state/uwc/session.json` on quit and every few seconds; windows go back when their apps open again (app-id + title, else app-id); `session-restore`, IPC `session save\|forget` | done |
 | Sharp zoom: windows are asked (fractional-scale-v1, viewporter, wl_surface v6 preferred buffer scale) to render at output scale x zoom once the zoom settles, so zooming in shows real detail; bounded by `zoom-render-scale-min`/`-max` | done |
 | Eased view moves: pan keys, zoom (scroll, keys, reset, IPC `zoom`; about the pointer or the given point), center/fit, reveal, bookmarks, `home` and IPC `pan`/`panto` glide to their target over `view-ms` (0 = jump), built on frame callbacks with exponential smoothing so a new target mid-move just bends the path; dragging stays instant; IPC reports the target and `view_moving` | done |
-| Window animations: a new window fades and grows in (`open-ms`, `open-scale`), moves by key or IPC glide (`move-ms`; dragging stays instant), windows that come into view with a tag switch fade in (`tag-ms`); border, shadow and dim fade with the window; visual only (`Client.fx`, applied in `place`), so IPC positions are the resting ones and `animating` says when everything has settled; `0` turns each off | done |
+| Window animations: a new window fades and grows in (`open-ms`, `open-scale`), a closed one fades and shrinks out (`close-ms`, `close-scale`: a picture of its content, border and shadow is kept, taken when the close is asked for and again as the toplevel is destroyed if it still has its buffer, so a killed or crashed client still fades out after a close request but not otherwise; none on headless), moves by key or IPC glide (`move-ms`; dragging stays instant), windows that come into view with a tag switch fade in (`tag-ms`); border, shadow and dim fade with the window; visual only (`Client.fx`, applied in `place`), so IPC positions are the resting ones and `animating` says when everything has settled; `0` turns each off | done |
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
 | xdg-shell toplevels and popups, xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
@@ -54,9 +54,8 @@ Not yet (roughly in the order to do them):
 
 1. Multiple monitors (the state has one `Monitor`; on hold).
 2. Gestures (`swipe`, `pinch`, touchpad pan/zoom); `theme` and `palette` come with the ricing below.
-3. The rest of the animations (close, which needs the last frame kept after the client is gone; momentum; open, move,
-   tag fade, eased pan and zoom are done), driven from the frame
-   callback, never timers.
+3. Momentum (flick-to-pan); the other animations (eased pan and zoom, open, close, move, tag fade) are done, all driven
+   from the frame callback, never timers.
 4. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.

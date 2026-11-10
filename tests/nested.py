@@ -163,7 +163,7 @@ check("a region off the output fails", rc, 2)
 # Window animations: a new window fades in over open-ms through the real frame loop (a slow one here so a
 # screenshot can catch it), and ends up exactly its own colour; its reported position never moves.
 cmd("set open-ms 3000"); cmd("set background-shader \"\"")
-spawn(["./target/debug/examples/paint","F","300","200","d0d030"], env=wenv); time.sleep(0.7)
+fproc = spawn(["./target/debug/examples/paint","F","300","200","d0d030"], env=wenv); time.sleep(0.7)
 st=cmd("state"); fw=win("F"); vp=st["monitors"][0]["viewport"]
 fx_, fy_ = int((fw["x"]-vp["x"])*vp["zoom"]+fw["width"]*vp["zoom"]/2), int((fw["y"]-vp["y"])*vp["zoom"]+fw["height"]*vp["zoom"]/2)
 mid = px(fx_, fy_)
@@ -171,6 +171,16 @@ check("a new window is still fading in", (st["monitors"][0]["animating"], mid !=
 time.sleep(6)
 check("fade finished: animating off", cmd("state")["monitors"][0]["animating"], False)
 check("and the window is fully its colour", px(fx_, fy_), (0xd0,0xd0,0x30))
+# Closing: the window is gone from IPC at once, but a ghost of it (content, border, shadow) fades out over
+# close-ms; then nothing is left of it.
+cmd("set close-ms 3000"); cmd(f'close {fw["id"]}'); time.sleep(0.5)
+st=cmd("state")
+check("closed window is gone from IPC", any(w["title"]=="F" for w in st["windows"]), False)
+mid = px(fx_, fy_)
+check("its ghost is still fading out (neither the window nor the background)", (st["monitors"][0]["animating"], mid not in ((0xd0,0xd0,0x30), (32,32,32))), (True, True))
+time.sleep(7)
+check("ghost finished: animating off", cmd("state")["monitors"][0]["animating"], False)
+check("and nothing of the window is left", px(fx_, fy_) not in (mid, (0xd0,0xd0,0x30)), True)
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

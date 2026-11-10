@@ -247,6 +247,7 @@ impl XdgShellHandler for Uwc {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
+            self.snapshot_closing(self.clients[i].id);
             let gone = self.clients.remove(i);
             self.export_on_close(gone.id);
             if self.focus == Some(gone.id) {
