@@ -221,23 +221,34 @@ impl Uwc {
             let under = hit.as_ref().and_then(Under::window);
             let bind =
                 self.config.mouse.iter().find(|b| b.button == button && b.mods == mods).map(|b| b.action.clone());
-            match (bind, under) {
-                (Some(Action::DragMove), Some(i)) => {
-                    self.focus_client(Some(self.clients[i].id));
-                    self.begin_move(i);
-                    return;
+            match bind {
+                // Over nothing, a move or resize bind falls through to the click handling below.
+                Some(Action::DragMove) => {
+                    if let Some(i) = under {
+                        self.focus_client(Some(self.clients[i].id));
+                        self.begin_move(i);
+                        return;
+                    }
                 }
-                (Some(Action::DragResize), Some(i)) => {
-                    self.focus_client(Some(self.clients[i].id));
-                    self.begin_resize(i);
-                    return;
+                Some(Action::DragResize) => {
+                    if let Some(i) = under {
+                        self.focus_client(Some(self.clients[i].id));
+                        self.begin_resize(i);
+                        return;
+                    }
                 }
-                (Some(Action::DragPan), _) => {
+                Some(Action::DragPan) => {
                     self.drag = Some(Drag::Pan);
                     self.drag_last = self.cursor;
                     return;
                 }
-                _ => {}
+                // Any other bind runs; the press is ours, so the client never sees it or its release.
+                Some(other) => {
+                    self.run_action(&other);
+                    self.consumed_press = true;
+                    return;
+                }
+                None => {}
             }
             match (&hit, under) {
                 // A click on a layer surface that takes keyboard input gives it the keyboard.
@@ -262,6 +273,9 @@ impl Uwc {
         } else if self.drag.take().is_some() {
             // The press that started the drag never reached a client, so neither does its release.
             self.refresh_pointer();
+            return;
+        } else if std::mem::take(&mut self.consumed_press) {
+            // The press went to a bind, so its release does not reach the client either.
             return;
         }
         let ptr = self.pointer();
