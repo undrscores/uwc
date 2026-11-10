@@ -13,6 +13,7 @@ mod export;
 mod ext_capture;
 mod extras;
 mod handlers;
+mod hints;
 mod idle;
 mod ime;
 mod input;

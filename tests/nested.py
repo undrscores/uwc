@@ -216,6 +216,38 @@ st=cmd("state"); vp1=st["monitors"][0]["viewport"]; a1=win("E")
 check("dragging a window to the edge pans the view", vp1["x"] > vp0["x"] + 200, True)
 check("and the window went with it", a1["x"] - a0["x"] > 200 + (1279 - ax) - 60, True)
 cmd("zoom 1 0 0")
+# Hint mode (jump-hints, Mod+slash): the view zooms out and every window is labelled; every key goes to
+# it; typing a label focuses that window and glides back to the zoom we came from; Escape puts it back.
+cmd("set view-ms 150"); cmd("zoom 1 0 0")
+for w_ in cmd("state")["windows"]:
+    if w_["title"] not in ("E","A","B"): cmd(f"close {w_['id']}")
+time.sleep(0.5)
+cmd(f"restore {A}"); cmd(f"move {win('E')['id']} 100 150"); cmd(f"move {A} 1800 1200"); time.sleep(0.5)
+z0 = cmd("state")["monitors"][0]["viewport"]["zoom"]
+# Labels are badges in the focus colour: count them in a screenshot (borders off, a unique colour).
+def count_color(rgb):
+    subprocess.run(["import","-window","root",SP+"/scen.png"], env=env); im=Image.open(SP+"/scen.png").convert("RGB")
+    return sum(1 for p_ in im.getdata() if p_==rgb)
+cmd("set border-width 0"); cmd('set border-shader ""'); cmd('set focus-color "#00ff66"'); time.sleep(0.4)
+none_before = count_color((0,255,102))
+subprocess.run(["xdotool","keydown","Alt_L","key","slash","keyup","Alt_L"], env=env); time.sleep(0.6)
+st = cmd("state")
+check("hint labels are drawn as badges in the focus colour", (none_before, count_color((0,255,102)) > 600), (0, True))
+check("hint mode is up and the view zoomed out to show every window", (st["hints"], st["monitors"][0]["viewport"]["zoom"] < z0), (True, True))
+# Keys go to hint mode: 'q' is no label (ignored), and nothing reaches a client or a bind.
+subprocess.run(["xdotool","key","q"], env=env); time.sleep(0.3)
+check("a key that is no label is ignored", cmd("state")["hints"], True)
+subprocess.run(["xdotool","key","Escape"], env=env); time.sleep(0.6)
+st = cmd("state")
+check("Escape puts the view back", (st["hints"], st["monitors"][0]["viewport"]["zoom"]), (False, z0))
+subprocess.run(["xdotool","keydown","Alt_L","key","slash","keyup","Alt_L"], env=env); time.sleep(0.6)
+focus_before = cmd("state")["keyboard_focus"]
+subprocess.run(["xdotool","key","d"], env=env); time.sleep(0.8)
+st = cmd("state")
+check("typing a label jumps: hint mode is over", st["hints"], False)
+check("and focuses one of the windows", st["keyboard_focus"] is not None, True)
+time.sleep(0.5)
+check("the view is back at the zoom it came from", cmd("state")["monitors"][0]["viewport"]["zoom"], z0)
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,

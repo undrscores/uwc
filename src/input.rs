@@ -44,6 +44,23 @@ impl Uwc {
                     serial,
                     time,
                     |state, modifiers, handle| {
+                        // Hint mode takes every key, pressed or released, away from binds and clients.
+                        if state.hints_active() && !state.is_locked() {
+                            let sym = handle.modified_sym();
+                            let key = if !pressed {
+                                crate::hints::HintKey::Ignore
+                            } else if sym == smithay::input::keyboard::Keysym::Escape {
+                                crate::hints::HintKey::Cancel
+                            } else if sym == smithay::input::keyboard::Keysym::BackSpace {
+                                crate::hints::HintKey::Backspace
+                            } else {
+                                match char::from_u32(smithay::input::keyboard::xkb::keysym_to_utf32(sym)) {
+                                    Some(c) if c.is_ascii_alphanumeric() => crate::hints::HintKey::Char(c),
+                                    _ => crate::hints::HintKey::Ignore,
+                                }
+                            };
+                            return FilterResult::Intercept(Action::Hint(key));
+                        }
                         if pressed && !state.is_locked() {
                             let m = mods_of(modifiers);
                             // A client holding the shortcuts (a VM) gets every key but the way out.

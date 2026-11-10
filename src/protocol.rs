@@ -21,6 +21,8 @@ pub enum Request {
     GetWindow(u32),
     Pan(f64, f64),
     PanTo(f64, f64),
+    /// The window whose app-id and title best match this text (`#12` = window 12), brought into view.
+    Jump(String),
     /// Start a glide at this velocity in screen px/s (what letting go of a touchpad swipe does).
     Fling(f64, f64),
     Zoom(f64, Option<(f64, f64)>),
@@ -58,6 +60,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("rules", "how many rules are in effect"),
     ("get-window ID", "a window's decoration with its rules applied"),
     ("pan DX DY", "move the view by canvas px"),
+    (
+        "jump QUERY",
+        "focus and reveal the window whose app-id and title best match (fuzzy), on any tag; #ID for a window id",
+    ),
     ("fling VX VY", "glide the view like a released swipe: screen px/s, slowing down over pan-momentum-ms"),
     ("panto X Y", "put canvas point X,Y at the top-left of the screen"),
     ("zoom Z [X Y]", "set the zoom, keeping screen point X,Y (default: the centre) fixed"),
@@ -123,6 +129,12 @@ impl Request {
             "pan" => Request::Pan(num(0)?, num(1)?),
             "panto" => Request::PanTo(num(0)?, num(1)?),
             "fling" => Request::Fling(num(0)?, num(1)?),
+            "jump" => {
+                if args.is_empty() {
+                    return Err("jump needs some text to match, e.g. jump firefox (or #12 for a window id)".into());
+                }
+                Request::Jump(rest())
+            }
             "zoom" => {
                 let z = num(0)?;
                 if z <= 0.0 {
@@ -297,6 +309,8 @@ pub enum Event {
         shader_errors: std::collections::BTreeMap<String, String>,
         backend: &'static str,
         keyboard_focus: Option<KeyboardFocus>,
+        /// Hint mode (`jump-hints`) is up: every key goes to it.
+        hints: bool,
         monitors: Vec<Monitor>,
         cursor: Cursor,
         windows: Vec<Window>,
@@ -373,6 +387,7 @@ mod tests {
             "pan",
             "panto",
             "fling",
+            "jump",
             "zoom",
             "view",
             "toggleview",

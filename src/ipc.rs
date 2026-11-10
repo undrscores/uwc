@@ -249,6 +249,7 @@ impl Uwc {
             shader_errors: self.shader_errors.clone(),
             backend: self.backend.name(),
             keyboard_focus: self.keyboard_focus(),
+            hints: self.hints_active(),
             monitors,
             cursor: P::Cursor { x: self.cursor.x.round() as i64, y: self.cursor.y.round() as i64, hidden: false },
             windows,
@@ -349,6 +350,9 @@ impl Uwc {
                 }
             }
             R::Pan(dx, dy) => self.pan_canvas(dx, dy),
+            R::Jump(q) => {
+                self.jump_to(&q)?;
+            }
             R::Fling(vx, vy) => {
                 self.pan_vel = (vx, vy);
                 self.pan_sampled = std::time::Instant::now();

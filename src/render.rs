@@ -155,6 +155,7 @@ impl Uwc {
         } else {
             Vec::new()
         };
+        out.extend(self.hint_elements(renderer, m, scale));
         out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
         let mut fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, m, true);

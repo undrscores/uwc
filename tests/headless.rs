@@ -1131,6 +1131,7 @@ fn state_shape_and_defaults() {
     assert_eq!(m["tags"][0]["active"], true);
     assert!(s["windows"].as_array().unwrap().is_empty());
     assert_eq!(s["backend"], "headless");
+    assert_eq!(s["hints"], false);
     assert!(uwc.cmd("bogus").get("error").is_some());
     assert!(uwc.cmd("pan x y").get("error").is_some());
 }
@@ -1442,6 +1443,45 @@ fn dragging_a_window_moves_it_and_the_screen_edge_carries_the_view() {
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(vp(&uwc.state()), a, "the view stopped when the drag ended");
     assert_eq!(vy0, vp(&uwc.state()).1);
+}
+
+#[test]
+fn jump_finds_a_window_on_any_tag_and_brings_it_into_view() {
+    let mut uwc = Uwc::start("jump", None);
+    let mut c = uwc.connect();
+    let _a = c.window("Alpha notes", 200, 150);
+    let _b = c.window("Beta build log", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Alpha notes")["id"].as_u64().unwrap(), win(&s, "Beta build log")["id"].as_u64().unwrap());
+    // B is far away on the canvas.
+    uwc.ok(&format!("move {b} 5000 4000"));
+    uwc.ok(&format!("move {a} 100 100"));
+    uwc.ok("view 1");
+    uwc.ok(&format!("focus {a}"));
+    uwc.wait("windows to settle", |s| s["monitors"][0]["animating"] == false);
+    // Fuzzy, case-insensitive, over app-id and title: "bbl" is B's initials-ish subsequence.
+    uwc.ok("jump bbl");
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], b);
+    // The view went to it: it is within the screen.
+    uwc.wait("the view to settle", |s| s["monitors"][0]["view_moving"] == false);
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let wb = win(&s, "Beta build log");
+    let sx = num(&wb["x"]) - num(&vp["x"]);
+    assert!((0.0..1000.0).contains(&sx), "B is on screen at {sx}");
+    // Back to A by window id, and a miss is an error that changes nothing.
+    uwc.ok(&format!("jump #{a}"));
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], a);
+    assert!(uwc.cmd("jump zzzzqq").get("error").is_some());
+    assert!(uwc.cmd("jump").get("error").is_some());
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], a);
+    // A minimized window comes back where you are.
+    uwc.ok(&format!("minimize {b}"));
+    uwc.ok("jump beta");
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], b);
+    assert_eq!(win(&s, "Beta build log")["minimized"], false);
 }
 
 #[test]

@@ -490,6 +490,8 @@ pub struct Uwc {
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
     pub fling: Option<Fling>,
+    /// Hint mode (`jump-hints`) while it is up.
+    pub hints: Option<crate::hints::Hints>,
     /// `drag_motion` is running (see `pointer_motion_to`).
     pub in_drag_motion: bool,
     /// The recent speed of a pan gesture (screen px/s) and when it was last sampled.
@@ -641,6 +643,7 @@ impl Uwc {
             drag: None,
             gesture: None,
             fling: None,
+            hints: None,
             in_drag_motion: false,
             pan_vel: (0.0, 0.0),
             pan_sampled: Instant::now(),
@@ -1508,6 +1511,7 @@ impl Uwc {
     // ---- tags ---------------------------------------------------------------------------
 
     pub fn set_tagset(&mut self, tags: u32) {
+        self.hints_cancel();
         let tags = tags & ALLTAGS;
         if tags == 0 {
             return;
@@ -1814,6 +1818,8 @@ impl Uwc {
             }
             Action::ToggleOverview => self.toggle_overview(),
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
+            Action::JumpHints => self.hints_toggle(),
+            Action::Hint(k) => self.hint_key(k.clone()),
             Action::ToggleFullscreen => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let (id, on) = (self.clients[i].id, !self.clients[i].fullscreen);

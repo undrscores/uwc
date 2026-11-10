@@ -84,6 +84,10 @@ pub enum Action {
     ToggleOverview,
     /// Take the keyboard back from a client that inhibited the shortcuts (works while inhibited).
     ToggleShortcutsInhibit,
+    /// Label every window and jump to the one you type (see hints.rs).
+    JumpHints,
+    /// A key typed while hint mode is up; never in a config.
+    Hint(crate::hints::HintKey),
     ToggleFullscreen,
     TogglePin,
     MinimizeWindow,
@@ -215,6 +219,8 @@ pub struct Config {
     pub view_ms: f64,
     pub pan_momentum_ms: f64,
     pub edge_pan_size: f64,
+    pub hint_keys: String,
+    pub hint_scale: f64,
     pub edge_pan_speed: f64,
     /// A new window fades in and grows from `open_scale` over this long (0 = appears at once).
     pub open_ms: f64,
@@ -338,6 +344,8 @@ impl Config {
             view_ms: 180.0,
             pan_momentum_ms: 600.0,
             edge_pan_size: 12.0,
+            hint_keys: "asdfghjkl".into(),
+            hint_scale: 3.0,
             edge_pan_speed: 900.0,
             open_ms: 160.0,
             open_scale: 0.92,
@@ -758,6 +766,7 @@ fn parse_action(n: &Node) -> Result<Action> {
         "fit-window" => Action::FitWindow,
         "toggle-overview" => Action::ToggleOverview,
         "toggle-shortcuts-inhibit" => Action::ToggleShortcutsInhibit,
+        "jump-hints" => Action::JumpHints,
         "toggle-fullscreen" => Action::ToggleFullscreen,
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,
