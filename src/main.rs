@@ -3,9 +3,11 @@
 
 mod backend;
 mod canvas;
+mod capture;
 mod config;
 mod cursor;
 mod deco;
+mod export;
 mod handlers;
 mod input;
 mod ipc;
@@ -13,6 +15,7 @@ mod kdl;
 mod layer;
 mod options;
 mod protocol;
+mod protocols;
 mod render;
 mod rules;
 mod scale;

@@ -150,6 +150,24 @@ fn num(v: &Value) -> f64 {
 
 // ---- a minimal Wayland client ------------------------------------------------------------
 
+mod hyprland {
+    #![allow(dead_code, non_camel_case_types, unused_unsafe, unused_variables, non_upper_case_globals)]
+    #![allow(non_snake_case, unused_imports, missing_docs, clippy::all)]
+    use wayland_client;
+    use wayland_client::protocol::*;
+    use wayland_protocols_wlr::foreign_toplevel::v1::client::*;
+    pub mod __interfaces {
+        use wayland_client::protocol::__interfaces::*;
+        use wayland_protocols_wlr::foreign_toplevel::v1::client::__interfaces::*;
+        wayland_scanner::generate_interfaces!("protocols/hyprland-toplevel-export-v1.xml");
+    }
+    use self::__interfaces::*;
+    wayland_scanner::generate_client_code!("protocols/hyprland-toplevel-export-v1.xml");
+}
+use hyprland::{
+    hyprland_toplevel_export_frame_v1 as export_frame, hyprland_toplevel_export_manager_v1 as export_manager,
+};
+
 struct App {
     compositor: wl_compositor::WlCompositor,
     shm: wl_shm::WlShm,
@@ -164,6 +182,11 @@ struct App {
     frac: Option<u32>,
     /// wlr-foreign-toplevel: handles in announcement order and what was said about each.
     tl: Vec<tl_handle::ZwlrForeignToplevelHandleV1>,
+    /// hyprland-toplevel-export: the last frame's buffer offer, and how it ended.
+    export_buffer: Option<(u32, u32, u32, u32)>,
+    export_done: bool,
+    export_failed: bool,
+    export_ready: bool,
     tl_info: std::collections::HashMap<wayland_client::backend::ObjectId, TlInfo>,
     buffer_scale: Option<i32>,
     closed: Vec<String>,
@@ -229,6 +252,10 @@ impl Client {
             ws_group_outputs: 0,
             frac: None,
             tl: vec![],
+            export_buffer: None,
+            export_done: false,
+            export_failed: false,
+            export_ready: false,
             tl_info: Default::default(),
             buffer_scale: None,
             closed: vec![],
@@ -436,6 +463,28 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
+noop!(export_manager::HyprlandToplevelExportManagerV1);
+
+impl Dispatch<export_frame::HyprlandToplevelExportFrameV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &export_frame::HyprlandToplevelExportFrameV1,
+        e: export_frame::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            export_frame::Event::Buffer { format, width, height, stride } => {
+                app.export_buffer = Some((format.into(), width, height, stride))
+            }
+            export_frame::Event::BufferDone => app.export_done = true,
+            export_frame::Event::Failed => app.export_failed = true,
+            export_frame::Event::Ready { .. } => app.export_ready = true,
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<tl_manager::ZwlrForeignToplevelManagerV1, ()> for App {
     fn event(
@@ -1416,4 +1465,30 @@ fn taskbars_list_and_control_windows() {
     c.sync();
     assert_eq!(c.tl("C").1.title, "C");
     let _ = b;
+}
+
+#[test]
+fn window_previews_offer_the_window_and_fail_cleanly_without_a_renderer() {
+    let mut uwc = Uwc::start("export", None);
+    let mut c = uwc.connect();
+    let _a = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A")["id"].as_u64().unwrap() as u32;
+    let qh = c.queue.handle();
+    let m: export_manager::HyprlandToplevelExportManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+
+    let frame = m.capture_toplevel(0, a, &qh, ());
+    c.sync();
+    // ARGB8888 (0) at the window's size, stride 4 per pixel, then buffer_done (v2).
+    assert_eq!(c.app.export_buffer, Some((0, 300, 200, 1200)));
+    assert!(c.app.export_done);
+    let buf = c.buffer("cap", 300, 200);
+    frame.copy(&buf, 1);
+    c.sync();
+    assert!(c.app.export_failed && !c.app.export_ready, "headless has no renderer: failed, not a hang");
+
+    c.app.export_failed = false;
+    let _f2 = m.capture_toplevel(0, 9999, &qh, ());
+    c.sync();
+    assert!(c.app.export_failed, "an unknown window fails at once");
 }

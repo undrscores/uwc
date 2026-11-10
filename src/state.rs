@@ -79,6 +79,8 @@ pub struct Client {
     pub open: crate::rules::Open,
     /// The window's own scale on the canvas (1 = normal), on top of the view's zoom.
     pub scale: f64,
+    /// Counts the window's commits (new content), for captures that wait for damage.
+    pub commits: u64,
     /// The render scale it was last told (fractional scale / preferred buffer scale).
     pub sent_scale: Option<f64>,
     /// Ids for the four border rects, stable so the damage tracker can tell frames apart.
@@ -205,6 +207,7 @@ pub struct Uwc {
     pub ipc_rules: Vec<crate::rules::Rule>,
     pub workspaces: crate::workspace::WorkspaceState,
     pub toplevels: crate::toplevels::ForeignToplevels,
+    pub export: crate::export::ToplevelExport,
     /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
     pub layer_focus: Option<WlSurface>,
     pub dmabuf_state: DmabufState,
@@ -312,6 +315,7 @@ impl Uwc {
             ipc_rules: Vec::new(),
             workspaces: crate::workspace::WorkspaceState::new(&dh),
             toplevels: crate::toplevels::ForeignToplevels::new(&dh),
+            export: crate::export::ToplevelExport::new(&dh),
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
             syncobj_state: None,

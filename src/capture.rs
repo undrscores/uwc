@@ -1,0 +1,126 @@
+//! Drawing into a client's buffer, for the capture protocols (window previews, screenshots): render
+//! elements into an offscreen texture with the backend's renderer, read it back, copy it into the
+//! client's shm buffer. Only shm buffers are offered (every capture client supports them); a
+//! headless uwc has no renderer, so captures there fail cleanly.
+
+use smithay::{
+    backend::{
+        allocator::Fourcc,
+        renderer::{
+            damage::OutputDamageTracker,
+            element::{surface::WaylandSurfaceRenderElement, AsRenderElements, RenderElement},
+            gles::{GlesRenderer, GlesTexture},
+            Bind, ExportMem, Offscreen, TextureMapping,
+        },
+    },
+    reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_shm},
+    utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform},
+    wayland::shm::with_buffer_contents_mut,
+};
+
+use crate::{backend::Backend, state::Uwc};
+
+/// The shm format captures are offered in (ARGB8888, which every client supports).
+pub const FORMAT: wl_shm::Format = wl_shm::Format::Argb8888;
+
+/// A time for `ready` events: CLOCK_MONOTONIC as (seconds, nanoseconds).
+pub fn now() -> (u64, u32) {
+    let t = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
+    let d: std::time::Duration = t.into();
+    (d.as_secs(), d.subsec_nanos())
+}
+
+/// Whether `buffer` is an shm buffer a capture of `size` can be written into.
+pub fn check_buffer(buffer: &WlBuffer, size: Size<i32, Physical>) -> Result<(), String> {
+    with_buffer_contents_mut(buffer, |_, len, d| {
+        if !matches!(d.format, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888) {
+            return Err(format!("buffer format {:?}, expected Argb8888 or Xrgb8888", d.format));
+        }
+        if d.width != size.w || d.height != size.h {
+            return Err(format!("buffer is {}x{}, expected {}x{}", d.width, d.height, size.w, size.h));
+        }
+        if d.stride < size.w * 4 || (d.offset as usize + (d.stride * d.height) as usize) > len {
+            return Err("buffer stride or size too small".into());
+        }
+        Ok(())
+    })
+    .map_err(|_| "not an shm buffer".to_string())?
+}
+
+impl Uwc {
+    /// Run `f` with the backend's renderer, if this backend has one.
+    pub fn with_renderer<T>(&mut self, f: impl FnOnce(&mut Uwc, &mut GlesRenderer) -> T) -> Option<T> {
+        // Check before taking: a failed match must not leave the backend taken.
+        if !matches!(self.backend, Backend::Winit(_) | Backend::Udev(_)) {
+            return None;
+        }
+        let mut backend = std::mem::take(&mut self.backend);
+        let out = match &mut backend {
+            Backend::Winit(w) => Some(f(self, w.backend.renderer())),
+            Backend::Udev(u) => u.renderer_mut().map(|r| f(self, r)),
+            _ => None,
+        };
+        self.backend = backend;
+        out
+    }
+
+    /// The pixel size a capture of window `id` has: its geometry at the output scale.
+    pub fn window_capture_size(&self, id: u32) -> Option<Size<i32, Physical>> {
+        let c = &self.clients[self.client_index(id)?];
+        let s = c.size().to_f64().to_physical(self.output_scale()).to_i32_round();
+        (c.mapped && s.w > 0 && s.h > 0).then_some(s)
+    }
+
+    /// Draw window `id` alone (its surfaces, no decoration, unzoomed, at the output scale) into `buffer`.
+    pub fn capture_window(&mut self, id: u32, buffer: &WlBuffer) -> Result<(), String> {
+        let size = self.window_capture_size(id).ok_or("the window is gone or has no size")?;
+        check_buffer(buffer, size)?;
+        let scale = self.output_scale();
+        let res = self.with_renderer(|state, r| {
+            let Some(i) = state.client_index(id) else { return Err("the window is gone".to_string()) };
+            let c = &state.clients[i];
+            // The geometry's top-left at 0,0 (the surface may start further out, e.g. client shadows).
+            let g = c.window.geometry().loc.to_f64().to_physical(scale);
+            let at: Point<i32, Physical> = Point::<f64, Physical>::from((-g.x, -g.y)).to_i32_round();
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                AsRenderElements::<GlesRenderer>::render_elements(&c.window, r, at, Scale::from(scale), 1.0);
+            render_to_shm(r, &elements, size, scale, buffer)
+        });
+        res.unwrap_or_else(|| Err("this backend cannot render (headless)".into()))
+    }
+}
+
+/// Render `elements` (front to back) at `size` into the shm `buffer` (already checked).
+pub fn render_to_shm<E: RenderElement<GlesRenderer>>(
+    r: &mut GlesRenderer,
+    elements: &[E],
+    size: Size<i32, Physical>,
+    scale: f64,
+    buffer: &WlBuffer,
+) -> Result<(), String> {
+    let bsize: Size<i32, Buffer> = (size.w, size.h).into();
+    let mut tex: GlesTexture =
+        r.create_buffer(Fourcc::Abgr8888, bsize).map_err(|e| format!("offscreen buffer: {e}"))?;
+    let mapping = {
+        let mut fb = r.bind(&mut tex).map_err(|e| format!("bind: {e}"))?;
+        let mut tracker = OutputDamageTracker::new(size, scale, Transform::Normal);
+        tracker.render_output(r, &mut fb, 0, elements, [0.0, 0.0, 0.0, 0.0]).map_err(|e| format!("render: {e:?}"))?;
+        r.copy_framebuffer(&fb, Rectangle::from_size(bsize), Fourcc::Argb8888).map_err(|e| format!("read back: {e}"))?
+    };
+    let flipped = mapping.flipped();
+    let pixels = r.map_texture(&mapping).map_err(|e| format!("map: {e}"))?;
+    let row = (size.w * 4) as usize;
+    with_buffer_contents_mut(buffer, |ptr, len, d| {
+        for y in 0..size.h as usize {
+            // GL reads bottom-up; the client gets the picture the right way up.
+            let src_y = if flipped { size.h as usize - 1 - y } else { y };
+            let dst = d.offset as usize + y * d.stride as usize;
+            if dst + row > len {
+                break;
+            }
+            // Safety: the shm pool is mapped for `len` bytes and we stay inside it.
+            unsafe { std::ptr::copy_nonoverlapping(pixels[src_y * row..].as_ptr(), ptr.add(dst), row) };
+        }
+    })
+    .map_err(|_| "not an shm buffer".to_string())
+}

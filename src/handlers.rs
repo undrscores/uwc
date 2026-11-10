@@ -68,6 +68,7 @@ impl CompositorHandler for Uwc {
 
         if let Some(i) = self.client_by_surface(&root) {
             self.clients[i].window.on_commit();
+            self.clients[i].commits += 1;
             let toplevel = self.clients[i].window.toplevel().unwrap().clone();
             let sent = with_states(&root, |s| {
                 s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap().initial_configure_sent
@@ -80,6 +81,8 @@ impl CompositorHandler for Uwc {
                 self.map_client(i);
             }
             self.ipc.dirty = true;
+            let id = self.clients[i].id;
+            self.export_on_commit(id);
         }
 
         self.layer_commit(&root);
@@ -207,6 +210,7 @@ impl XdgShellHandler for Uwc {
             open: Default::default(),
             scale: 1.0,
             sent_scale: None,
+            commits: 0,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         });
@@ -231,6 +235,7 @@ impl XdgShellHandler for Uwc {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
             let gone = self.clients.remove(i);
+            self.export_on_close(gone.id);
             if self.focus == Some(gone.id) {
                 self.focus = None;
                 let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
