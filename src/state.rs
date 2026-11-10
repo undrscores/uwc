@@ -204,6 +204,7 @@ pub struct Uwc {
     /// Rules added over IPC (`rule { ... }`), until the next reload.
     pub ipc_rules: Vec<crate::rules::Rule>,
     pub workspaces: crate::workspace::WorkspaceState,
+    pub toplevels: crate::toplevels::ForeignToplevels,
     /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
     pub layer_focus: Option<WlSurface>,
     pub dmabuf_state: DmabufState,
@@ -310,6 +311,7 @@ impl Uwc {
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
             ipc_rules: Vec::new(),
             workspaces: crate::workspace::WorkspaceState::new(&dh),
+            toplevels: crate::toplevels::ForeignToplevels::new(&dh),
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
             syncobj_state: None,

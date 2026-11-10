@@ -19,6 +19,7 @@ mod scale;
 mod session;
 mod state;
 mod sync;
+mod toplevels;
 mod workspace;
 
 use std::{path::PathBuf, time::Duration};
@@ -213,6 +214,7 @@ fn run() -> Result<()> {
         state.udev_render();
         state.sync_scales();
         state.workspace_refresh();
+        state.toplevels_refresh();
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();
     })?;
