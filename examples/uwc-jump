@@ -1,0 +1,27 @@
+#!/bin/sh
+# Pick a window from a dmenu-style launcher and jump to it, on any tag, wherever it is on the canvas.
+#
+#   uwc-jump                 # uses $UWC_MENU, else the first of fuzzel, wofi, rofi, bemenu that is installed
+#   bind in config.kdl:      Mod+Slash { spawn "uwc-jump"; }     (the built-in `jump-hints` labels what is on screen)
+#
+# Needs jq. `uwc msg jump #ID` focuses and reveals a window by id; `uwc msg jump QUERY` fuzzy-matches text.
+set -eu
+
+if [ -n "${UWC_MENU:-}" ]; then
+    menu=$UWC_MENU
+elif command -v fuzzel >/dev/null; then
+    menu="fuzzel --dmenu"
+elif command -v wofi >/dev/null; then
+    menu="wofi --dmenu"
+elif command -v rofi >/dev/null; then
+    menu="rofi -dmenu -i"
+elif command -v bemenu >/dev/null; then
+    menu="bemenu"
+else
+    echo "uwc-jump: set UWC_MENU to a dmenu-style command (fuzzel --dmenu, wofi --dmenu, rofi -dmenu, bemenu)" >&2
+    exit 1
+fi
+
+choice=$(uwc msg state | jq -r '.windows[] | "\(.id)\t\(.app_id)\t\(.title)"' | $menu) || exit 0
+id=${choice%%	*}
+[ -n "$id" ] && exec uwc msg jump "#$id"

@@ -21,7 +21,7 @@ import atexit
 atexit.register(lambda: [p.kill() for p in reversed(pids)])  # also when a check crashes
 def spawn(args, **kw):
     p=subprocess.Popen(args, env=kw.get("env",env), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); pids.append(p); return p
-open(SP+"/scen.kdl","w").write('options { mod-key "Alt"\n border-width 0\n corner-radius 0\n shadow-size 0\n warp-cursor false\n root-color "#202020" }\n')
+open(SP+"/scen.kdl","w").write('tag 2 { root-color "#003366" }\noptions { mod-key "Alt"\n border-width 0\n corner-radius 0\n shadow-size 0\n warp-cursor false\n root-color "#202020" }\n')
 spawn(["Xvfb",DISPLAY,"-screen","0","1280x720x24"]); time.sleep(1.5)
 uwc_log=open(SP+"/uwc.log","w")
 uwc_proc=subprocess.Popen(["./target/debug/uwc","-c",SP+"/scen.kdl"], env=env, stdout=uwc_log, stderr=uwc_log); pids.append(uwc_proc); time.sleep(3)
@@ -216,6 +216,75 @@ st=cmd("state"); vp1=st["monitors"][0]["viewport"]; a1=win("E")
 check("dragging a window to the edge pans the view", vp1["x"] > vp0["x"] + 200, True)
 check("and the window went with it", a1["x"] - a0["x"] > 200 + (1279 - ax) - 60, True)
 cmd("zoom 1 0 0")
+# Hint mode (jump-hints, Mod+slash): the view zooms out and every window is labelled; every key goes to
+# it; typing a label focuses that window and glides back to the zoom we came from; Escape puts it back.
+cmd("set view-ms 150"); cmd("zoom 1 0 0")
+for w_ in cmd("state")["windows"]:
+    if w_["title"] not in ("E","A","B"): cmd(f"close {w_['id']}")
+time.sleep(0.5)
+cmd(f"restore {A}"); cmd(f"move {win('E')['id']} 100 150"); cmd(f"move {A} 1800 1200"); time.sleep(0.5)
+z0 = cmd("state")["monitors"][0]["viewport"]["zoom"]
+# Labels are badges in the focus colour: count them in a screenshot (borders off, a unique colour).
+def count_color(rgb):
+    subprocess.run(["import","-window","root",SP+"/scen.png"], env=env); im=Image.open(SP+"/scen.png").convert("RGB")
+    return sum(1 for p_ in im.getdata() if p_==rgb)
+cmd("set border-width 0"); cmd('set border-shader ""'); cmd('set focus-color "#00ff66"'); time.sleep(0.4)
+none_before = count_color((0,255,102))
+subprocess.run(["xdotool","keydown","Alt_L","key","slash","keyup","Alt_L"], env=env); time.sleep(0.6)
+st = cmd("state")
+check("hint labels are drawn as badges in the focus colour", (none_before, count_color((0,255,102)) > 600), (0, True))
+check("hint mode is up and the view zoomed out to show every window", (st["hints"], st["monitors"][0]["viewport"]["zoom"] < z0), (True, True))
+# Keys go to hint mode: 'q' is no label (ignored), and nothing reaches a client or a bind.
+subprocess.run(["xdotool","key","q"], env=env); time.sleep(0.3)
+check("a key that is no label is ignored", cmd("state")["hints"], True)
+subprocess.run(["xdotool","key","Escape"], env=env); time.sleep(0.6)
+st = cmd("state")
+check("Escape puts the view back", (st["hints"], st["monitors"][0]["viewport"]["zoom"]), (False, z0))
+subprocess.run(["xdotool","keydown","Alt_L","key","slash","keyup","Alt_L"], env=env); time.sleep(0.6)
+focus_before = cmd("state")["keyboard_focus"]
+subprocess.run(["xdotool","key","d"], env=env); time.sleep(0.8)
+st = cmd("state")
+check("typing a label jumps: hint mode is over", st["hints"], False)
+check("and focuses one of the windows", st["keyboard_focus"] is not None, True)
+time.sleep(0.5)
+check("the view is back at the zoom it came from", cmd("state")["monitors"][0]["viewport"]["zoom"], z0)
+# Frames: a labelled region drawn behind the windows (fill, border, title strip, label badge in the frame colour).
+cmd('set frame-color "#ff00ff"'); cmd("set frame-opacity 0.3"); cmd("set frame-border-width 4"); cmd("set frame-label-scale 3")
+cmd("zoom 1 0 0"); time.sleep(0.4)
+st = cmd("state"); vp = st["monitors"][0]["viewport"]
+cmd(f"move {win('E')['id']} {vp['x']+250} {vp['y']+200}"); time.sleep(0.4)
+e = win("E")
+fx, fy = e["x"]-80, e["y"]-80
+cmd(f"frame add {fx} {fy} {e['width']+160} {e['height']+160} zone"); time.sleep(0.5)
+sx, sy = int((fx-vp["x"])*vp["zoom"]), int((fy-vp["y"])*vp["zoom"])
+magenta = lambda p_: p_[0] > 200 and p_[2] > 200 and p_[1] < 60
+check("the frame's border is drawn", magenta(px(sx+1, sy+e["height"]+100)), True)
+inside = px(sx+30, sy+100)
+check("its inside is tinted (between the canvas and the frame colour)", inside[0] > 40 and inside[1] < 60 and inside[2] > 40, True)
+check("its label badge is drawn in the frame colour", count_color((255,0,255)) > 600, True)
+ex, ey = int((e["x"]-vp["x"])*vp["zoom"])+150, int((e["y"]-vp["y"])*vp["zoom"])+100
+check("a window inside is drawn over the frame, untinted", px(ex, ey), (0x30,0xd0,0xd0))
+cmd(f"frame remove {cmd('state')['frames'][0]['id']}"); time.sleep(0.4)
+check("removing the frame removes its drawing", px(sx+1, sy+e["height"]+100), (32,32,32))
+# Snap guides: dragging a window within snap-distance of a frame's edge snaps flush and draws a guide line.
+cmd('set snap-color "#ff6ac1"'); cmd("set snap-distance 8"); cmd("zoom 1 0 0"); time.sleep(0.4)
+st = cmd("state"); vp = st["monitors"][0]["viewport"]; e = win("E")
+cmd(f"frame add {e['x']+400} {e['y']-60} 300 300 snap"); time.sleep(0.3)
+ecx, ecy = int(e["x"]-vp["x"])+150, int(e["y"]-vp["y"])+100
+subprocess.run(["xdotool","keydown","Alt_L","mousemove",str(ecx),str(ecy),"mousedown","1"], env=env); time.sleep(0.3)
+subprocess.run(["xdotool","mousemove",str(ecx+150),str(ecy)], env=env); time.sleep(0.3)
+subprocess.run(["xdotool","mousemove",str(ecx+397),str(ecy)], env=env); time.sleep(0.5)
+snapped = count_color((255,106,193))
+subprocess.run(["xdotool","mouseup","1","keyup","Alt_L"], env=env); time.sleep(0.4)
+check("a guide line is drawn while snapped", snapped > 100, True)
+check("the window snapped flush with the frame's left edge", win("E")["x"], e["x"]+400)
+check("the guide goes when the drag ends", count_color((255,106,193)), 0)
+cmd(f"frame remove {cmd('state')['frames'][0]['id']}")
+# Per-tag looks: tag 2 has its own colour behind the canvas.
+cmd("view 2"); time.sleep(0.5)
+check("tag 2 has its own root colour", px(640, 400), (0,0x33,0x66))
+cmd("view 1"); time.sleep(0.5)
+check("and tag 1 has the global one again", px(1270, 700), (32,32,32))
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,

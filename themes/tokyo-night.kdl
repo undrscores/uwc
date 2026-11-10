@@ -1,0 +1,14 @@
+// Tokyo Night. Use it with:   include "THEMES_DIR/tokyo-night.kdl"
+// (THEMES_DIR is share/uwc/themes where uwc is installed; or copy this file next to your config).
+// Put the include before your own options so they win, and tweak from there: everything here is an
+// ordinary option, documented in config.def.kdl.
+options {
+    root-color "#1a1b26"
+    border-color "#3b4261"
+    focus-gradient "#7aa2f7" "#bb9af7"
+    urgent-color "#f7768e"
+    shadow-color "#00000088"
+    frame-color "#7aa2f7"
+    snap-color "#bb9af7"
+    fullscreen-bg "#000000"
+}

@@ -35,6 +35,7 @@ rustPlatform.buildRustPackage {
     install -m 644 uwc-portals.conf $out/share/xdg-desktop-portal/uwc-portals.conf
     install -m 644 config.def.kdl $out/share/uwc/config.def.kdl
     cp -r shaders $out/share/uwc/shaders
+    cp -r themes $out/share/uwc/themes
   '';
 
   # EGL and GLES are opened with dlopen, so they have to be findable at run time; Xwayland is

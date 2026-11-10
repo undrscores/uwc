@@ -84,6 +84,19 @@ pub enum Action {
     ToggleOverview,
     /// Take the keyboard back from a client that inhibited the shortcuts (works while inhibited).
     ToggleShortcutsInhibit,
+    /// Label every window and jump to the one you type (see hints.rs).
+    JumpHints,
+    /// Switch to the next keyboard layout.
+    NextLayout,
+    /// A frame around the focused window / remove the focused window's frame / fit the view to it
+    /// / fit the next or previous frame (frames.rs).
+    FrameNew,
+    FrameRemove,
+    FrameFit,
+    FrameNext,
+    FramePrevious,
+    /// A key typed while hint mode is up; never in a config.
+    Hint(crate::hints::HintKey),
     ToggleFullscreen,
     TogglePin,
     MinimizeWindow,
@@ -98,6 +111,31 @@ pub enum Action {
     DragResize,
     DragPan,
     SwitchVt(i32),
+}
+
+/// A tag's own look: the colour behind the canvas and a background shader. None = the global option.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TagLook {
+    pub root_color: Option<Color>,
+    pub background_shader: Option<String>,
+}
+
+fn parse_tag_look(n: &Node, vars: &HashMap<String, String>) -> Result<(usize, TagLook)> {
+    let t =
+        n.args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("`tag` needs a number, e.g. tag 2 {{ ... }}"))?;
+    if t.fract() != 0.0 || t < 1.0 || t > crate::canvas::TAGCOUNT as f64 {
+        bail!("tag must be 1 to {}", crate::canvas::TAGCOUNT);
+    }
+    let mut look = TagLook::default();
+    for k in &n.kids {
+        let arg = k.arg_str(0).ok_or_else(|| anyhow!("`{}` needs a value in quotes (line {})", k.name, k.line))?;
+        match k.name.as_str() {
+            "root-color" => look.root_color = Some(parse_color(arg, vars)?),
+            "background-shader" => look.background_shader = Some(arg.to_string()),
+            other => bail!("unknown tag option `{other}` (line {}); known: root-color, background-shader", k.line),
+        }
+    }
+    Ok((t as usize - 1, look))
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +253,15 @@ pub struct Config {
     pub view_ms: f64,
     pub pan_momentum_ms: f64,
     pub edge_pan_size: f64,
+    pub hint_keys: String,
+    pub frame_color: Color,
+    pub snap_distance: f64,
+    pub snap_grid: f64,
+    pub snap_color: Color,
+    pub frame_opacity: f64,
+    pub frame_label_scale: f64,
+    pub frame_border_width: f64,
+    pub hint_scale: f64,
     pub edge_pan_speed: f64,
     /// A new window fades in and grows from `open_scale` over this long (0 = appears at once).
     pub open_ms: f64,
@@ -252,6 +299,14 @@ pub struct Config {
     pub dir: PathBuf,
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
+    pub hooks: crate::hooks::Hooks,
+    /// `hot-zones { top-left { action; } ... }`.
+    pub hot_zones: Vec<(crate::hotzones::Zone, Action)>,
+    pub hot_zone_size: f64,
+    pub per_window_layout: bool,
+    pub hot_zone_delay_ms: f64,
+    /// `tag N { ... }`: what a tag looks like, over the global options (index = tag - 1).
+    pub tag_looks: Vec<TagLook>,
     pub keyboard: Keyboard,
     pub touchpad: Pointer,
     pub mouse_input: Pointer,
@@ -338,6 +393,15 @@ impl Config {
             view_ms: 180.0,
             pan_momentum_ms: 600.0,
             edge_pan_size: 12.0,
+            hint_keys: "asdfghjkl".into(),
+            frame_color: [0.478, 0.635, 0.969, 1.0],
+            snap_distance: 8.0,
+            snap_grid: 0.0,
+            snap_color: [1.0, 0.416, 0.757, 1.0],
+            frame_opacity: 0.08,
+            frame_label_scale: 2.0,
+            frame_border_width: 2.0,
+            hint_scale: 3.0,
             edge_pan_speed: 900.0,
             open_ms: 160.0,
             open_scale: 0.92,
@@ -361,6 +425,12 @@ impl Config {
             dir: path.and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
             keys: Vec::new(),
             mouse: Vec::new(),
+            hooks: Default::default(),
+            hot_zones: Vec::new(),
+            hot_zone_size: 2.0,
+            per_window_layout: false,
+            hot_zone_delay_ms: 250.0,
+            tag_looks: vec![TagLook::default(); crate::canvas::TAGCOUNT],
             keyboard: Keyboard::default(),
             touchpad: Pointer::default(),
             mouse_input: Pointer::default(),
@@ -372,6 +442,27 @@ impl Config {
         for n in &nodes {
             match n.name.as_str() {
                 "vars" | "include" | "binds" => {}
+                "hot-zones" => {
+                    for z in &n.kids {
+                        let zone = crate::hotzones::Zone::parse(&z.name).ok_or_else(|| {
+                            anyhow!("unknown hot zone `{}` (line {}); known: top-left, top-right, bottom-left, bottom-right, top, bottom, left, right", z.name, z.line)
+                        })?;
+                        let act = z.kids.first().ok_or_else(|| {
+                            anyhow!("hot zone `{}` needs an action in braces (line {})", z.name, z.line)
+                        })?;
+                        let action =
+                            parse_action(act).with_context(|| format!("hot zone `{}` (line {})", z.name, z.line))?;
+                        cfg.hot_zones.retain(|(h, _)| *h != zone);
+                        cfg.hot_zones.push((zone, action));
+                    }
+                }
+                "tag" => {
+                    let (i, look) = parse_tag_look(n, &vars).with_context(|| format!("tag (line {})", n.line))?;
+                    cfg.tag_looks[i] = look;
+                }
+                "hooks" => {
+                    cfg.hooks = crate::hooks::Hooks::parse(n).with_context(|| format!("hooks (line {})", n.line))?
+                }
                 "rule" => {
                     let r = crate::rules::Rule::parse(n, &vars).with_context(|| format!("rule (line {})", n.line))?;
                     cfg.rules.push(r);
@@ -403,6 +494,7 @@ impl Config {
         }
         // Shader files are watched like includes: saving one reloads the config, which recompiles it.
         let mut shaders: Vec<String> = vec![cfg.background_shader.clone(), cfg.deco.border_shader.clone()];
+        shaders.extend(cfg.tag_looks.iter().filter_map(|l| l.background_shader.clone()));
         for n in nodes.iter().filter(|n| n.name == "rule") {
             shaders.extend(
                 n.kids.iter().filter(|k| k.name == "border-shader").filter_map(|k| k.arg_str(0).map(str::to_string)),
@@ -758,6 +850,13 @@ fn parse_action(n: &Node) -> Result<Action> {
         "fit-window" => Action::FitWindow,
         "toggle-overview" => Action::ToggleOverview,
         "toggle-shortcuts-inhibit" => Action::ToggleShortcutsInhibit,
+        "jump-hints" => Action::JumpHints,
+        "next-layout" => Action::NextLayout,
+        "frame-new" => Action::FrameNew,
+        "frame-remove" => Action::FrameRemove,
+        "frame-fit" => Action::FrameFit,
+        "frame-next" => Action::FrameNext,
+        "frame-previous" => Action::FramePrevious,
         "toggle-fullscreen" => Action::ToggleFullscreen,
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,
@@ -810,6 +909,45 @@ mod tests {
         assert_eq!(c.deco.border_width, 3);
         assert!(!c.sloppy_focus);
         assert!((c.deco.focus_color[0] - 1.0).abs() < 1e-6 && (c.deco.focus_color[1] - 0.533).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_shipped_themes_are_valid_configs() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let mut n = 0;
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            let text = std::fs::read_to_string(&p).unwrap();
+            let c = Config::parse(&text, Some(&p)).unwrap_or_else(|e| panic!("{}: {e:#}", p.display()));
+            assert!(c.deco.focus_gradient.is_some(), "{} sets a focus gradient", p.display());
+            n += 1;
+        }
+        assert!(n >= 4, "themes are shipped");
+        // And they work through `include`, under the user's own options.
+        let tmp = std::env::temp_dir().join(format!("uwc-theme-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let inc = format!("include \"{}/nord.kdl\"\noptions {{ corner-radius 3 }}", dir.display());
+        let c = Config::parse(&inc, Some(&tmp.join("c.kdl"))).unwrap();
+        assert_eq!(c.deco.corner_radius, 3.0);
+        assert!(c.deco.focus_gradient.is_some());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tags_can_have_their_own_look() {
+        let p = Some(Path::new("/x/c.kdl"));
+        let c = Config::parse(
+            "options { root-color \"#112233\" }\ntag 2 { root-color \"#445566\"\n background-shader \"w.glsl\" }",
+            p,
+        )
+        .unwrap();
+        assert_eq!(c.tag_looks[1].background_shader.as_deref(), Some("w.glsl"));
+        assert!((c.tag_looks[1].root_color.unwrap()[0] - 0x44 as f32 / 255.0).abs() < 1e-3);
+        assert_eq!(c.tag_looks[0], TagLook::default(), "other tags use the global options");
+        assert!(c.files.iter().any(|f| f.ends_with("w.glsl")), "its shader is watched for changes");
+        for bad in ["tag 0 { }", "tag 10 { }", "tag { }", "tag 1 { sparkle \"x\" }", "tag 1 { root-color \"red\" }"] {
+            assert!(Config::parse(bad, p).is_err(), "{bad}");
+        }
     }
 
     #[test]

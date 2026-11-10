@@ -18,9 +18,14 @@ IPC, improved where uwm was awkward.
   re-render at the zoomed size instead of being stretched. Panning never resizes or refocuses a window.
 - **Tags, not just workspaces.** Nine tags, each with its own canvas, viewport and zoom; view, toggle and send windows
   to any combination.
+- **Snaps.** Dragged windows snap to the edges and centres of their neighbours, with guide lines.
+- **Frames.** Label a region of the canvas (`Mod+B`), drag it by its title strip and its windows go with it, and
+  jump the view from frame to frame with `Mod+]` and `Mod+[`: lay a canvas out into places.
+- **Find any window.** `Mod+/` labels every window and jumps to the one you type; `uwc msg jump firefox` fuzzy-finds by
+  app-id and title on any tag, and `examples/uwc-jump` does it from a launcher.
 - **Everything floats.** Windows can also have their own scale on the canvas, be pinned to the screen, minimized to a
   scratchpad, or go fullscreen.
-- **Rice it.** Rounded corners, gradient borders, shadows, focus glow, opacity and dimming, animations (open, close,
+- **Rice it.** (A tag can have its own wallpaper shader and colour.) Rounded corners, gradient borders, shadows, focus glow, opacity and dimming, animations (open, close,
   move, tag switch, eased pan and zoom, touchpad momentum), and your own GLSL for borders and the background.
   Window rules, `include`, `vars` and live reload. No client-side decorations and no built-in bar: bring your own.
 - **Input.** Keyboard, mouse (Mod+drag move, resize and pan), touchpad gestures, touchscreens, tablets, XKB layouts and
@@ -29,8 +34,11 @@ IPC, improved where uwm was awkward.
 - **Plays well with the rest of the desktop.** layer-shell bars and launchers, foreign-toplevel and ext-workspace for
   taskbars, Quickshell window previews, screen capture and portal screen sharing, session lock, idle notify and
   inhibit, clipboard managers, virtual keyboard and pointer, Xwayland.
-- **Scriptable.** A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
+- **Hot corners.** Any action when the pointer rests in a screen corner or edge.
+- **Scriptable.** `hooks { }` runs a command on window open, close, focus, tag change or urgency. A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
   move and focus windows, pan and zoom.
+- **Doesn't fall over.** `uwc doctor` checks your seat, GPU and libraries before the first run; a bug in a handler is
+  logged and survived instead of taking every window down.
 - **Session restore.** Window positions, sizes, tags and views come back when the apps do.
 
 ## Installation
@@ -58,6 +66,8 @@ session: uwc opens as a window.
 | `Mod+Shift+H/J/K/L` | move the window; `Mod+Ctrl+H/J/K/L` resize it |
 | `Mod+Alt+H/J/K/L` | pan the view |
 | `Mod+O` | overview: fit every window on the screen |
+| `Mod+/` | jump: label every window, type a label to go there |
+| `Mod+B`, `Mod+Shift+B` | frame around the focused window, remove it; `Mod+]` / `Mod+[` fit the next / previous frame |
 | `Mod+minus`, `Mod+equal`, `Mod+Shift+0` | zoom out, zoom in, reset zoom |
 | `Mod+1..9` | view tag; `Mod+Shift+1..9` send the window to a tag; `Mod+Ctrl+1..9` toggle a tag |
 | `Mod+E`, `Mod+Shift+Space` | fullscreen, pin to the screen |
@@ -85,7 +95,7 @@ rule {
 }
 ```
 
-Start your bar, notification daemon and wallpaper from an executable `~/.config/uwc/startup`. Check a config with
+Themes ship in [`themes/`](themes) (`include "/usr/share/uwc/themes/nord.kdl"` before your own options). Start your bar, notification daemon and wallpaper from an executable `~/.config/uwc/startup`. Check a config with
 `uwc -t`. Use `uwc msg --help` for the control socket, for example `uwc msg state`, `uwc msg set focus-color "#ff8800"`
 or `uwc msg subscribe`. Your own shaders are documented in `config.def.kdl`, with examples in [`shaders/`](shaders).
 

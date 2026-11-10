@@ -87,6 +87,7 @@ impl Uwc {
             .arg(screens)
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
+            .env("UWC_DEBUG_PANIC", "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Some(c) = config {
@@ -1131,6 +1132,7 @@ fn state_shape_and_defaults() {
     assert_eq!(m["tags"][0]["active"], true);
     assert!(s["windows"].as_array().unwrap().is_empty());
     assert_eq!(s["backend"], "headless");
+    assert_eq!(s["hints"], false);
     assert!(uwc.cmd("bogus").get("error").is_some());
     assert!(uwc.cmd("pan x y").get("error").is_some());
 }
@@ -1442,6 +1444,441 @@ fn dragging_a_window_moves_it_and_the_screen_edge_carries_the_view() {
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(vp(&uwc.state()), a, "the view stopped when the drag ended");
     assert_eq!(vy0, vp(&uwc.state()).1);
+}
+
+#[test]
+fn jump_finds_a_window_on_any_tag_and_brings_it_into_view() {
+    let mut uwc = Uwc::start("jump", None);
+    let mut c = uwc.connect();
+    let _a = c.window("Alpha notes", 200, 150);
+    let _b = c.window("Beta build log", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Alpha notes")["id"].as_u64().unwrap(), win(&s, "Beta build log")["id"].as_u64().unwrap());
+    // B is far away on the canvas.
+    uwc.ok(&format!("move {b} 5000 4000"));
+    uwc.ok(&format!("move {a} 100 100"));
+    uwc.ok("view 1");
+    uwc.ok(&format!("focus {a}"));
+    uwc.wait("windows to settle", |s| s["monitors"][0]["animating"] == false);
+    // Fuzzy, case-insensitive, over app-id and title: "bbl" is B's initials-ish subsequence.
+    uwc.ok("jump bbl");
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], b);
+    // The view went to it: it is within the screen.
+    uwc.wait("the view to settle", |s| s["monitors"][0]["view_moving"] == false);
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let wb = win(&s, "Beta build log");
+    let sx = num(&wb["x"]) - num(&vp["x"]);
+    assert!((0.0..1000.0).contains(&sx), "B is on screen at {sx}");
+    // Back to A by window id, and a miss is an error that changes nothing.
+    uwc.ok(&format!("jump #{a}"));
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], a);
+    assert!(uwc.cmd("jump zzzzqq").get("error").is_some());
+    assert!(uwc.cmd("jump").get("error").is_some());
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], a);
+    // A minimized window comes back where you are.
+    uwc.ok(&format!("minimize {b}"));
+    uwc.ok("jump beta");
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], b);
+    assert_eq!(win(&s, "Beta build log")["minimized"], false);
+}
+
+#[test]
+fn a_panic_in_a_handler_does_not_take_the_session_down() {
+    let mut uwc = Uwc::start("panic", None);
+    let mut c = uwc.connect();
+    let _w = c.window("Survivor", 200, 150);
+    let id = win(&uwc.state(), "Survivor")["id"].as_u64().unwrap();
+    let before = uwc.state()["windows"].as_array().unwrap().len();
+    let sock = |u: &Uwc| {
+        std::fs::read_dir(&u.dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().ends_with(".sock"))
+            .map(|e| e.path())
+    };
+    // The panic happens while this very request is handled, so the reply never comes.
+    writeln!(uwc.ipc, "crash").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc is still running");
+    // A fresh connection works, the window is still there and the wayland client is still connected.
+    let s = UnixStream::connect(sock(&uwc).unwrap()).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    uwc.reader = BufReader::new(s.try_clone().unwrap());
+    uwc.ipc = s;
+    assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), before);
+    uwc.ok(&format!("focus {id}"));
+    c.sync();
+    // Three in a row mean something is badly wrong: the session is saved and uwc exits non-zero.
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        if let Some(Ok(mut s)) = sock(&uwc).map(UnixStream::connect) {
+            let _ = writeln!(s, "crash");
+            held.push(s);
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let start = Instant::now();
+    let status = loop {
+        if let Some(st) = uwc.child.try_wait().unwrap() {
+            break st;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "uwc should have given up");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success());
+}
+
+#[test]
+fn doctor_reports_problems_and_exits_nonzero() {
+    let dir = std::env::temp_dir().join(format!("uwc-test-{}-doctor", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad = dir.join("bad.kdl");
+    std::fs::write(&bad, "options { corner-radius \"wide\" }").unwrap();
+    // No runtime dir and a config that does not parse: both are failures with a way out.
+    let out = Command::new(env!("CARGO_BIN_EXE_uwc"))
+        .args(["doctor", "-c", bad.to_str().unwrap()])
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("FAIL  XDG_RUNTIME_DIR is not set"), "{text}");
+    assert!(text.contains("FAIL  config:"), "{text}");
+    assert!(text.contains("-> "), "every problem says what to do: {text}");
+    assert!(text.trim_end().ends_with("warnings") || text.contains(" failed, "), "{text}");
+    // It changes nothing and does not need a compositor.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn frames_are_regions_that_carry_their_windows() {
+    let mut uwc = Uwc::start("frames", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
+    let mut c = uwc.connect();
+    let _a = c.window("Inside", 200, 150);
+    let _b = c.window("Outside", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Inside")["id"].as_u64().unwrap(), win(&s, "Outside")["id"].as_u64().unwrap());
+    uwc.ok(&format!("move {a} 1000 1000"));
+    uwc.ok(&format!("move {b} 3000 3000"));
+    // A frame around where A is: it holds A (its centre is inside) and not B.
+    uwc.ok("frame add 900 900 500 400 mail and notes");
+    let s = uwc.state();
+    let f = &s["frames"][0];
+    assert_eq!((f["label"].as_str().unwrap(), num(&f["x"]), num(&f["width"])), ("mail and notes", 900.0, 500.0));
+    assert_eq!(f["windows"], serde_json::json!([a]));
+    let id = f["id"].as_u64().unwrap();
+    // Moving the frame moves its windows, and only them.
+    uwc.ok(&format!("frame move {id} 1900 1500"));
+    let s = uwc.state();
+    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (1900.0, 1500.0));
+    assert_eq!((num(&win(&s, "Inside")["x"]), num(&win(&s, "Inside")["y"])), (2000.0, 1600.0));
+    assert_eq!((num(&win(&s, "Outside")["x"]), num(&win(&s, "Outside")["y"])), (3000.0, 3000.0));
+    // Relabel, resize (never below a minimum), fit the view to it.
+    uwc.ok(&format!("frame label {id} build"));
+    uwc.ok(&format!("frame resize {id} 10 10"));
+    let s = uwc.state();
+    assert_eq!(s["frames"][0]["label"], "build");
+    assert!(num(&s["frames"][0]["width"]) >= 80.0);
+    uwc.ok(&format!("frame resize {id} 600 400"));
+    uwc.ok(&format!("frame fit {id}"));
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let (vx, vy, z) = (num(&vp["x"]), num(&vp["y"]), num(&vp["zoom"]));
+    assert!(vx < 1900.0 + 300.0 && vx + 1000.0 / z > 1900.0 + 300.0, "the frame's centre is in view: {vp}");
+    assert!(vy < 1500.0 + 200.0 && vy + 600.0 / z > 1500.0 + 200.0, "{vp}");
+    // Errors name the problem; a frame is on its tags only.
+    assert!(uwc.cmd("frame move 99 0 0").get("error").is_some());
+    assert!(uwc.cmd("frame").get("error").is_some());
+    uwc.ok("view 2");
+    assert_eq!(uwc.state()["frames"].as_array().unwrap().len(), 1, "still listed, but drawn on its tag only");
+    uwc.ok(&format!("frame remove {id}"));
+    assert!(uwc.state()["frames"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_frame_is_dragged_by_its_title_strip_and_resized_by_its_corner() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("framedrag", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _w = c.window("Held", 150, 100);
+    let id = win(&uwc.state(), "Held")["id"].as_u64().unwrap();
+    uwc.ok(&format!("move {id} 200 200"));
+    uwc.ok("frame add 150 150 400 300 zone");
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let (vx, vy) = (num(&vp["x"]), num(&vp["y"]));
+    let pos = |x: f64, y: f64| ((x - vx) as u32, (y - vy) as u32);
+    // The strip is the top 22 px of the frame (label scale 2 x 11): press at (160, 160), drag by +100, +50.
+    let (sx, sy) = pos(160.0, 160.0);
+    p.motion_absolute(0, sx, sy, 1000, 600);
+    p.frame();
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.motion(2, 100.0, 50.0);
+    p.frame();
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (250.0, 200.0), "{}", s["frames"]);
+    assert_eq!((num(&win(&s, "Held")["x"]), num(&win(&s, "Held")["y"])), (300.0, 250.0), "its window went along");
+    // The bottom-right corner resizes: press 4 px inside it, drag by +60, +40.
+    let (cx, cy) = pos(250.0 + 400.0 - 4.0, 200.0 + 300.0 - 4.0);
+    p.motion_absolute(4, cx, cy, 1000, 600);
+    p.frame();
+    p.button(5, 0x110, ButtonState::Pressed);
+    p.motion(6, 60.0, 40.0);
+    p.frame();
+    p.button(7, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!((num(&s["frames"][0]["width"]), num(&s["frames"][0]["height"])), (460.0, 340.0), "{}", s["frames"]);
+    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (250.0, 200.0));
+}
+
+#[test]
+fn dragged_windows_snap_to_other_windows_and_to_a_grid() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc =
+        Uwc::start("snap", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }\nbinds { MouseRight { drag-move; } }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _a = c.window("Anchor", 200, 150);
+    let _b = c.window("Mover", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Anchor")["id"].as_u64().unwrap(), win(&s, "Mover")["id"].as_u64().unwrap());
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let at = |uwc: &mut Uwc, who: &str| {
+        let s = uwc.state();
+        let w = win(&s, who);
+        (num(&w["x"]), num(&w["y"]))
+    };
+    // Put the mover at (500, 300) and drag it by (dx, dy) from its centre.
+    let drag = |uwc: &mut Uwc, c: &mut Client, dx: f64, dy: f64| {
+        uwc.ok(&format!("move {b} 500 300"));
+        let s = uwc.state();
+        let vp = &s["monitors"][0]["viewport"];
+        let (px, py) = ((500.0 - num(&vp["x"]) + 100.0) as u32, (300.0 - num(&vp["y"]) + 75.0) as u32);
+        p.motion_absolute(0, px, py, 1000, 600);
+        p.frame();
+        p.button(1, 0x111, ButtonState::Pressed);
+        p.motion(2, dx, dy);
+        p.frame();
+        p.button(3, 0x111, ButtonState::Released);
+        p.frame();
+        c.sync();
+    };
+    uwc.ok(&format!("move {a} 100 100"));
+    // Within 8 px of the anchor's right edge (300) and top (100): both snap flush.
+    drag(&mut uwc, &mut c, 305.0 - 500.0, 103.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (300.0, 100.0));
+    // Its own right edge to the anchor's left edge (100): 100 - 200 = -100 for its x.
+    drag(&mut uwc, &mut c, -97.0 - 500.0, 250.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover").0, -100.0);
+    // Out of range: left alone.
+    drag(&mut uwc, &mut c, 320.0 - 500.0, 130.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (320.0, 130.0));
+    // snap-distance 0 turns window snapping off, and the grid then rounds.
+    uwc.ok("set snap-distance 0");
+    drag(&mut uwc, &mut c, 305.0 - 500.0, 103.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (305.0, 103.0));
+    uwc.ok("set snap-grid 50");
+    drag(&mut uwc, &mut c, 277.0 - 500.0, 331.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (300.0, 350.0));
+}
+
+#[test]
+fn dragging_a_window_under_another_moves_that_window() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start(
+        "dragunder",
+        Some("options { open-ms 0\n move-ms 0\n view-ms 0\n snap-distance 0 }\nbinds {\nMouseRight { drag-move; }\nMouseMiddle { drag-resize; }\n}"),
+    );
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _a = c.window("Below", 200, 150);
+    let _b = c.window("Above", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Below")["id"].as_u64().unwrap(), win(&s, "Above")["id"].as_u64().unwrap());
+    uwc.ok(&format!("move {a} 100 100"));
+    uwc.ok(&format!("move {b} 600 100"));
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], b, "Above is on top and focused");
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let (px, py) = ((200.0 - num(&vp["x"])) as u32, (175.0 - num(&vp["y"])) as u32);
+    // Press on the lower window: focusing it raises it (the window list is reordered), and it is that
+    // window that moves, not whichever took its place in the list.
+    p.motion_absolute(0, px, py, 1000, 600);
+    p.frame();
+    p.button(1, 0x111, ButtonState::Pressed);
+    p.motion(2, 30.0, 20.0);
+    p.frame();
+    p.button(3, 0x111, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], a);
+    assert_eq!((num(&win(&s, "Below")["x"]), num(&win(&s, "Below")["y"])), (130.0, 120.0));
+    assert_eq!((num(&win(&s, "Above")["x"]), num(&win(&s, "Above")["y"])), (600.0, 100.0), "the other one stayed");
+    // The same for a resize drag started on a window that is not on top.
+    let (px, py) = ((600.0 + 100.0 - num(&vp["x"])) as u32, (100.0 + 75.0 - num(&vp["y"])) as u32);
+    c.app.asked = None;
+    p.motion_absolute(4, px, py, 1000, 600);
+    p.frame();
+    p.button(5, 0x112, ButtonState::Pressed);
+    p.motion(6, 40.0, 30.0);
+    p.frame();
+    p.button(7, 0x112, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], b);
+    // The client is asked for the new size (this test client does not redraw at it).
+    assert_eq!(c.app.asked, Some((240, 180)), "{}", s["windows"]);
+}
+
+#[test]
+fn hooks_run_commands_with_the_event_in_their_environment() {
+    let log = std::env::temp_dir().join(format!("uwc-test-{}-hooks.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let l = log.display();
+    let line =
+        r#"printf '%s|%s|%s|%s\n' $UWC_EVENT $UWC_APP_ID $UWC_TITLE $UWC_TAGSET >> LOG"#.replace("LOG", &l.to_string());
+    let cfg = format!(
+        "hooks {{\n window-open \"{line}\"\n window-close \"{line}\"\n focus \"{line}\"\n tag-change \"{line}\"\n}}\n"
+    );
+    let mut uwc = Uwc::start("hooks", Some(&cfg));
+    assert!(uwc.state()["config_error"].is_null(), "{}", uwc.state()["config_error"]);
+    let mut c = uwc.connect();
+    let w = c.window("Hooked", 200, 150);
+    let read = || std::fs::read_to_string(&log).unwrap_or_default();
+    let wait_for = |want: &str| {
+        let start = Instant::now();
+        while !read().lines().any(|l| l == want) {
+            assert!(start.elapsed() < Duration::from_secs(5), "waiting for {want:?}, have:\n{}", read());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for("window-open|uwc.test|Hooked|1");
+    wait_for("focus|uwc.test|Hooked|1");
+    uwc.ok("view 2");
+    wait_for("tag-change|2||");
+    uwc.ok("view 1");
+    wait_for("tag-change|1||");
+    w.toplevel.destroy();
+    w.xdg.destroy();
+    w.surface.destroy();
+    c.sync();
+    wait_for("window-close|uwc.test|Hooked|1");
+    // A bad hook name is a config error, not silence.
+    let bad_cfg = std::env::temp_dir().join(format!("uwc-test-{}-hooks-bad.kdl", std::process::id()));
+    std::fs::write(&bad_cfg, "hooks { sunrise \"x\" }").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_uwc")).args(["-t", "-c", bad_cfg.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown hook `sunrise`"), "{:?}", out);
+    let _ = std::fs::remove_file(&bad_cfg);
+    let _ = std::fs::remove_file(&log);
+}
+
+#[test]
+fn hot_zones_fire_once_when_the_pointer_rests_in_a_corner() {
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start(
+        "hot",
+        Some("options { hot-zone-delay-ms 150 }\nhot-zones {\n top-left { view-tag 2; }\n bottom-right { view-tag 3; }\n}"),
+    );
+    assert!(uwc.state()["config_error"].is_null());
+    let c = uwc.connect();
+    let qh = c.queue.handle();
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let mut c = c;
+    let active = |uwc: &mut Uwc| {
+        let s = uwc.state();
+        s["monitors"][0]["tags"].as_array().unwrap().iter().position(|t| t["active"] == true).unwrap() + 1
+    };
+    p.motion_absolute(0, 500, 300, 1000, 600);
+    p.frame();
+    c.sync();
+    assert_eq!(active(&mut uwc), 1);
+    // Passing through the corner without resting does nothing.
+    p.motion_absolute(1, 0, 0, 1000, 600);
+    p.frame();
+    p.motion_absolute(2, 500, 300, 1000, 600);
+    p.frame();
+    c.sync();
+    std::thread::sleep(Duration::from_millis(350));
+    assert_eq!(active(&mut uwc), 1, "no dwell, no action");
+    // Resting in it fires.
+    p.motion_absolute(3, 0, 0, 1000, 600);
+    p.frame();
+    c.sync();
+    uwc.wait("the top-left zone to fire", |s| s["monitors"][0]["tags"][1]["active"] == true);
+    // Staying does not fire again; going to the other corner fires that one.
+    p.motion_absolute(4, 999, 599, 1000, 600);
+    p.frame();
+    c.sync();
+    uwc.wait("the bottom-right zone to fire", |s| s["monitors"][0]["tags"][2]["active"] == true);
+    // Bad zone names and actions are config errors.
+    for bad in ["hot-zones { middle { zoom-reset; } }", "hot-zones { left { } }", "hot-zones { left { sing; } }"] {
+        let f = std::env::temp_dir().join(format!("uwc-test-{}-hot.kdl", std::process::id()));
+        std::fs::write(&f, bad).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_uwc")).args(["-t", "-c", f.to_str().unwrap()]).output().unwrap();
+        assert!(!out.status.success(), "{bad}");
+        let _ = std::fs::remove_file(&f);
+    }
+}
+
+#[test]
+fn the_keyboard_layout_is_reported_switched_and_remembered_per_window() {
+    let mut uwc = Uwc::start(
+        "layout",
+        Some("input { keyboard { xkb-layout \"us,de\" } }\noptions { per-window-layout true\n open-ms 0 }"),
+    );
+    assert!(uwc.state()["config_error"].is_null(), "{}", uwc.state()["config_error"]);
+    let s = uwc.state();
+    assert_eq!((s["keyboard_layout"]["index"].as_u64(), s["keyboard_layout"]["count"].as_u64()), (Some(0), Some(2)));
+    assert!(s["keyboard_layout"]["name"].as_str().unwrap().contains("English"), "{}", s["keyboard_layout"]);
+    uwc.ok("layout next");
+    let s = uwc.state();
+    assert_eq!(s["keyboard_layout"]["index"], 1);
+    assert!(s["keyboard_layout"]["name"].as_str().unwrap().contains("German"), "{}", s["keyboard_layout"]);
+    uwc.ok("layout 0");
+    assert_eq!(uwc.state()["keyboard_layout"]["index"], 0);
+    assert!(uwc.cmd("layout 2").get("error").is_some());
+    assert!(uwc.cmd("layout sideways").get("error").is_some());
+    // Each window keeps the layout it was typed in.
+    let mut c = uwc.connect();
+    let _a = c.window("Writer", 200, 150);
+    let _b = c.window("Coder", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Writer")["id"].as_u64().unwrap(), win(&s, "Coder")["id"].as_u64().unwrap());
+    uwc.ok(&format!("focus {a}"));
+    uwc.ok("layout 1");
+    uwc.ok(&format!("focus {b}"));
+    assert_eq!(uwc.state()["keyboard_layout"]["index"], 0, "a window that never chose gets the first layout");
+    uwc.ok(&format!("focus {a}"));
+    assert_eq!(uwc.state()["keyboard_layout"]["index"], 1, "Writer is back in German");
 }
 
 #[test]
@@ -2218,6 +2655,7 @@ fn the_canvas_comes_back_after_a_restart() {
         uwc.ok("bookmark save 2");
         uwc.ok("view 3");
         uwc.ok("panto 500 -200");
+        uwc.ok("frame add 100 100 600 400 notes");
         uwc.ok("session save");
         assert!(file.exists());
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -2236,6 +2674,7 @@ fn the_canvas_comes_back_after_a_restart() {
     assert_eq!(m["tags"][2]["active"], true, "the tags in view come back");
     assert_eq!((num(&m["viewport"]["x"]), num(&m["viewport"]["y"])), (500.0, -200.0), "and their views");
     assert_eq!(m["tags"][0]["bookmarks"][0]["n"], 2, "and the bookmarks");
+    assert_eq!(s["frames"][0]["label"], "notes", "and the frames");
 
     let mut c = uwc.connect();
     let _a = c.window("A", 640, 480);

@@ -46,6 +46,16 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | keyboard-shortcuts-inhibit (VMs, remote desktop): an inhibitor on the focused surface takes every key; `Mod+Shift+Escape` (`toggle-shortcuts-inhibit`) takes them back and is the one bind that still runs | done |
 | Dialogs: a toplevel with an xdg parent (or X11 transient-for) opens centred over its parent, on its tags and scale, pinned where the parent is pinned, instead of somewhere in the middle of the view | done |
 | Touchscreens: a touch on a window or layer surface goes to its client (and focuses it like a click); on empty canvas one finger drags the view, two pan and pinch-zoom it. Graphics tablets act as an absolute mouse (pen = pointer, tip = left button; no pressure or tilt yet) | done, untested on hardware |
+| Jump to a window: `jump-hints` (Mod+Slash) zooms out, labels every window from the home row (`hint-keys`, `hint-scale`; pixel-font badges, no font stack) and glides to the one you type at the zoom you came from; IPC `jump QUERY` fuzzy-matches app-id and title on any tag (`#ID` for an id), restoring minimized windows; `examples/uwc-jump` feeds it from fuzzel, wofi, rofi or bemenu | done |
+| `uwc doctor`: checks the runtime dir, seat access (logind, elogind or seatd), GPUs and drivers, the NVIDIA modesetting and driver version, input devices, the libraries uwc loads, Xwayland, portals and that the config's spawn binds exist; prints what to fix; exit status 1 on a failure | done |
+| Panic recovery: a panic in any handler is logged with its backtrace, the half-done state (drags, gestures, hint mode, touches) is dropped and the session carries on; the session file is saved at once, and three panics in ten seconds (or one while drawing) save it and exit | done |
+| Frames: labelled regions of a tag's canvas drawn behind the windows (tinted fill, border, title strip, pixel-font label; `frame-color`, `frame-opacity`, `frame-label-scale`, `frame-border-width`). Drag the title strip to move a frame with the windows whose centre is inside it, the bottom-right corner to resize; `frame-new` (Mod+B) around the focused window, `frame-remove`, `frame-fit`, `frame-next`/`frame-previous` fit the view to a frame; IPC `frame add\|label\|move\|resize\|remove\|fit`, listed with their windows in the snapshot; saved with the session | done |
+| Snapping: dragging a window snaps its edges and centre lines to other windows and frames within `snap-distance` screen px (Ctrl drags freely), optionally to a grid (`snap-grid`, canvas px), with guide lines in `snap-color` | done |
+| Event hooks: `hooks { window-open, window-close, focus, tag-change, urgent }` run a command through `sh -c` with `UWC_EVENT`, `UWC_WINDOW_ID`, `UWC_APP_ID`, `UWC_TITLE`, `UWC_TAGS` and `UWC_TAGSET` in its environment; unknown hook names are config errors | done |
+| Per-tag looks: `tag N { root-color "#..."; background-shader "file.glsl" }` gives a tag its own colour behind the canvas and its own background shader (watched for changes like the others) | done |
+| Hot zones: `hot-zones { top-left { action; } ... left { } }` runs any bind action when the pointer rests (`hot-zone-delay-ms`) in a screen corner or edge (`hot-zone-size` deep, once per visit, not during a drag or lock) | done |
+| Themes: `themes/` ships Tokyo Night, Gruvbox dark, Catppuccin Mocha and Nord as ordinary config files (colours, focus gradient, frame and snap colours); `include` one before your own options (installed under `share/uwc/themes`) | done |
+| Keyboard layout: the snapshot reports the active layout (`keyboard_layout`: index, name, count) for bars; `next-layout` (Mod+Space) and IPC `layout next\|N` switch it, XKB layout-toggle options are noticed too; `per-window-layout` remembers one per window | done |
 | Edge pan: dragging a window against a screen edge pans the view that way with the window under the pointer (`edge-pan-size`, `edge-pan-speed`) | done |
 | Momentum: let go of a three-finger swipe or a touch drag while moving and the view glides on (`pan-momentum-ms`, IPC `fling VX VY`) | done |
 | Screen capture for portals: ext-foreign-toplevel-list, ext-image-capture-source, ext-image-copy-capture (outputs and windows, shm, `paint_cursors`); with wlr-screencopy this is what xdg-desktop-portal-wlr, OBS and browsers' screen sharing use. `uwc-portals.conf` (installed by `make install`) picks the wlr portal for ScreenCast and Screenshot | done, no dmabuf yet |
@@ -62,15 +72,16 @@ canvas), but the machine this was written on has no GPU or seat, so the udev pat
 
 Not yet (roughly in the order to do them):
 
-0. **Run it on real hardware** (the udev backend, NVIDIA, a portal for screen sharing, touch and tablet devices): the
-   protocols above are tested against headless and nested runs only.
-1. The rest of the animations (open, move, tag fade, the close fade, eased pan and zoom and momentum are done), driven
-   from the frame callback, never timers.
-2. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
-   rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
-   themes (which set `grid`) are rejected as a whole.
-3. Protocols still missing: tablet-v2 (pressure, tilt), presentation-time, security-context (Flatpak), alpha-modifier,
-   fifo/commit-timing, a dmabuf path for capture, xdg-toplevel-icon.
-4. Multi-GPU (output-management, clipboard bridging for Xwayland, animated cursors, DPMS/output
-   power, popup grabs, xdg-activation, idle-inhibit/idle-notify, session-lock, pointer constraints,
-   Xwayland and IME are done).
+0. **Run it on real hardware**: the udev backend, NVIDIA, a portal for screen sharing, touch and tablet devices.
+   Everything above is tested against headless and nested runs only.
+1. **A dmabuf path for screen capture** (ext-image-copy-capture offers shm only). It needs the renderer's DRM node and
+   a GPU to test, so it waits for item 0.
+2. **tablet-v2** (pressure and tilt reach clients; pens act as a mouse today). Needs a tablet to test.
+3. **Blur** (and ext-background-effect for bars), the headline missing visual effect: it needs a render pass that
+   captures what is behind a window, blurs it and draws it under the window. The canvas grid is covered by `snap-grid`
+   and the example shaders; uwm's themes (which set `grid`) are still rejected as a whole.
+4. Protocols still missing: presentation-time, fifo/commit-timing (a client waiting on a fifo barrier stalls unless it
+   is signalled every frame, so it has to be done properly), security-context (Flatpak; only worth it together with
+   restricting privileged globals), alpha-modifier, xdg-toplevel-icon.
+5. A minimap or overview strip for Quickshell (the window previews it needs already work), and `focus-ms` fades.
+6. Multi-GPU.

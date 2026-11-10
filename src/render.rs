@@ -142,7 +142,7 @@ impl Uwc {
                 user.insert(path, p);
             }
         }
-        let background = self.config.background_shader.clone();
+        let background = self.tag_look().1;
         let background = self.user_shader(renderer, UserShader::Background, &background);
         animated |= background.as_ref().is_some_and(|b| b.1);
         if animated {
@@ -155,6 +155,8 @@ impl Uwc {
         } else {
             Vec::new()
         };
+        out.extend(self.hint_elements(renderer, m, scale));
+        out.extend(self.guide_elements(m, scale));
         out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
         let mut fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, m, true);
@@ -174,6 +176,7 @@ impl Uwc {
         out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Top]));
         out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, m, false));
         out.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, m, false));
+        out.extend(self.region_elements(renderer, m, scale));
         out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Bottom, Layer::Background]));
         if let Some((program, _)) = background {
             let (w, h) = self.screen_size();

@@ -46,6 +46,16 @@ pub struct SavedWindow {
     pub fs_mon: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub label: String,
+    pub tags: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SavedView {
     pub x: f64,
@@ -85,6 +95,8 @@ pub struct Session {
     #[serde(default)]
     pub bookmarks: Vec<Vec<Option<SavedView>>>,
     pub windows: Vec<SavedWindow>,
+    #[serde(default)]
+    pub frames: Vec<SavedFrame>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -172,6 +184,19 @@ impl Uwc {
             viewports: Vec::new(),
             bookmarks: Vec::new(),
             windows,
+            frames: self
+                .frames
+                .list
+                .iter()
+                .map(|f| SavedFrame {
+                    x: f.rect.loc.x,
+                    y: f.rect.loc.y,
+                    width: f.rect.size.w,
+                    height: f.rect.size.h,
+                    label: f.label.clone(),
+                    tags: f.tags,
+                })
+                .collect(),
         }
     }
 
@@ -236,6 +261,10 @@ impl Uwc {
         }
         tracing::info!("session: {} remembered windows from {}", s.windows.len(), path.display());
         self.session_pool = s.windows;
+        for f in &s.frames {
+            let rect = smithay::utils::Rectangle::new((f.x, f.y).into(), (f.width, f.height).into());
+            self.frame_add(rect, &f.label, f.tags & crate::canvas::ALLTAGS);
+        }
         self.session_written = Some(text);
         self.damage();
     }
@@ -296,6 +325,7 @@ mod tests {
             viewports: Vec::new(),
             bookmarks: Vec::new(),
             windows: vec![w("foot", "a")],
+            frames: vec![SavedFrame { x: 1.0, y: 2.0, width: 300.0, height: 200.0, label: "mail".into(), tags: 1 }],
         };
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);

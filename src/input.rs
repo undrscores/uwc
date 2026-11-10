@@ -44,6 +44,23 @@ impl Uwc {
                     serial,
                     time,
                     |state, modifiers, handle| {
+                        // Hint mode takes every key, pressed or released, away from binds and clients.
+                        if state.hints_active() && !state.is_locked() {
+                            let sym = handle.modified_sym();
+                            let key = if !pressed {
+                                crate::hints::HintKey::Ignore
+                            } else if sym == smithay::input::keyboard::Keysym::Escape {
+                                crate::hints::HintKey::Cancel
+                            } else if sym == smithay::input::keyboard::Keysym::BackSpace {
+                                crate::hints::HintKey::Backspace
+                            } else {
+                                match char::from_u32(smithay::input::keyboard::xkb::keysym_to_utf32(sym)) {
+                                    Some(c) if c.is_ascii_alphanumeric() => crate::hints::HintKey::Char(c),
+                                    _ => crate::hints::HintKey::Ignore,
+                                }
+                            };
+                            return FilterResult::Intercept(Action::Hint(key));
+                        }
                         if pressed && !state.is_locked() {
                             let m = mods_of(modifiers);
                             // A client holding the shortcuts (a VM) gets every key but the way out.
@@ -65,6 +82,8 @@ impl Uwc {
                 if let Some(a) = action {
                     self.run_action(&a);
                 }
+                // A layout key (grp:alt_shift_toggle and friends) may have switched the layout.
+                self.refresh_layout();
             }
             InputEvent::PointerMotion { event } => {
                 self.pointer_moved_by(event.delta_x(), event.delta_y(), Event::time_msec(&event));
@@ -306,6 +325,7 @@ impl Uwc {
                 }
             }
         }
+        self.hot_zone_check();
         self.ipc.dirty = true;
     }
 
@@ -370,12 +390,27 @@ impl Uwc {
                         self.clients[i].pin = Some((orig.x + dx, orig.y + dy).into());
                         self.refresh_pointer();
                     }
-                    _ => self.move_client(id, orig.x + dx, orig.y + dy),
+                    _ => {
+                        let (x, y, guides) = self.snap_move(id, orig.x + dx, orig.y + dy);
+                        if guides != self.guides.list {
+                            self.guides.list = guides;
+                            self.deco_commit.increment();
+                        }
+                        self.move_client(id, x, y)
+                    }
                 }
             }
             Drag::Resize { id, start, orig } => {
                 let (dx, dy) = delta(start, zooms(self, id).1);
                 self.resize_client(id, orig.w + dx as i32, orig.h + dy as i32)
+            }
+            Drag::FrameMove { id, start, orig } => {
+                let z = self.viewport().zoom;
+                self.frame_drag_to(id, ((pos.x - start.x) / z, (pos.y - start.y) / z), orig);
+            }
+            Drag::FrameResize { id, start, orig } => {
+                let z = self.viewport().zoom;
+                self.frame_resize(id, orig.w + (pos.x - start.x) / z, orig.h + (pos.y - start.y) / z);
             }
             Drag::Pan => {
                 let (dx, dy) = (pos.x - self.drag_last.x, pos.y - self.drag_last.y);
@@ -431,17 +466,22 @@ impl Uwc {
                 self.config.mouse.iter().find(|b| b.button == button && b.mods == mods).map(|b| b.action.clone());
             match bind {
                 // Over nothing, a move or resize bind falls through to the click handling below.
+                // Focusing raises the window, which reorders `clients`: find it again by id.
                 Some(Action::DragMove) => {
-                    if let Some(i) = under {
-                        self.focus_client(Some(self.clients[i].id));
-                        self.begin_move(i);
+                    if let Some(id) = under.map(|i| self.clients[i].id) {
+                        self.focus_client(Some(id));
+                        if let Some(i) = self.client_index(id) {
+                            self.begin_move(i);
+                        }
                         return;
                     }
                 }
                 Some(Action::DragResize) => {
-                    if let Some(i) = under {
-                        self.focus_client(Some(self.clients[i].id));
-                        self.begin_resize(i);
+                    if let Some(id) = under.map(|i| self.clients[i].id) {
+                        self.focus_client(Some(id));
+                        if let Some(i) = self.client_index(id) {
+                            self.begin_resize(i);
+                        }
                         return;
                     }
                 }
@@ -470,6 +510,15 @@ impl Uwc {
                     }
                     self.focus_client(Some(self.clients[i].id));
                 }
+                // A frame's title strip moves it (with its windows), its corner resizes it.
+                (None, None) if button == BTN_LEFT && self.frame_hit(self.cursor).is_some() => {
+                    match self.frame_hit(self.cursor) {
+                        Some((id, crate::frames::FrameHit::Strip)) => self.frame_begin_move(id),
+                        Some((id, crate::frames::FrameHit::Corner)) => self.frame_begin_resize(id),
+                        None => {}
+                    }
+                    return;
+                }
                 // Dragging empty canvas pans it.
                 (None, None) if button == BTN_LEFT => {
                     self.drag = Some(Drag::Pan);
@@ -479,6 +528,11 @@ impl Uwc {
                 _ => {}
             }
         } else if self.drag.take().is_some() {
+            // The alignment lines go with the drag.
+            if !std::mem::take(&mut self.guides.list).is_empty() {
+                self.deco_commit.increment();
+                self.damage();
+            }
             // The press that started the drag never reached a client, so neither does its release.
             self.refresh_pointer();
             return;

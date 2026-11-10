@@ -72,7 +72,7 @@ impl Uwc {
         let size = self.output_pixels(mon);
         let scale = self.output_scale_of(mon);
         // The root color is the real output's clear color, not an element: the picture needs it too.
-        let clear = self.config.root_color;
+        let clear = self.tag_look().0;
         let res = self.with_renderer(|state, r| {
             let elements = state.scene_elements(r, mon, cursor);
             capture::render_region_to_shm(r, &elements, size, region, scale, clear, buffer)

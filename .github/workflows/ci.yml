@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main, unstable]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libinput-dev libudev-dev \
+            libgbm-dev libseat-dev libegl-dev libgles-dev libdrm-dev \
+            xvfb xdotool imagemagick python3-pil libgl1-mesa-dri libegl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy (warning-free)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --examples
+      - name: Unit and headless end-to-end tests
+        run: cargo test
+      - name: Nested rendering and input tests (Xvfb, software GL)
+        run: python3 tests/nested.py
+
+  nix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - name: Build the package
+        run: nix build .#uwc -L

@@ -80,7 +80,7 @@ impl Uwc {
             let damage = match w.backend.bind() {
                 Ok((renderer, mut fb)) => {
                     let elements = self.frame_elements(renderer, 0);
-                    match w.tracker.render_output(renderer, &mut fb, age, &elements, self.config.root_color) {
+                    match w.tracker.render_output(renderer, &mut fb, age, &elements, self.tag_look().0) {
                         Ok(r) => {
                             if r.damage.is_some_and(|d| !d.is_empty()) {
                                 self.frames_drawn += 1;

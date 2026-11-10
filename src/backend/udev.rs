@@ -597,29 +597,25 @@ impl Uwc {
                 }
                 let m = self.mon_by_output(&out.output).unwrap_or(0);
                 let elements = self.frame_elements(&mut gpu.renderer, m);
-                let queued = match out.drm_output.render_frame(
-                    &mut gpu.renderer,
-                    &elements,
-                    self.config.root_color,
-                    frame_flags,
-                ) {
-                    Ok(r) if !r.is_empty => match out.drm_output.queue_frame(()) {
-                        Ok(()) => {
-                            out.pending = true;
-                            self.frames_drawn += 1;
-                            true
-                        }
+                let queued =
+                    match out.drm_output.render_frame(&mut gpu.renderer, &elements, self.tag_look().0, frame_flags) {
+                        Ok(r) if !r.is_empty => match out.drm_output.queue_frame(()) {
+                            Ok(()) => {
+                                out.pending = true;
+                                self.frames_drawn += 1;
+                                true
+                            }
+                            Err(e) => {
+                                tracing::warn!("queue frame: {e}");
+                                false
+                            }
+                        },
+                        Ok(_) => false,
                         Err(e) => {
-                            tracing::warn!("queue frame: {e}");
+                            tracing::warn!("render: {e}");
                             false
                         }
-                    },
-                    Ok(_) => false,
-                    Err(e) => {
-                        tracing::warn!("render: {e}");
-                        false
-                    }
-                };
+                    };
                 let output = out.output.clone();
                 if queued {
                     super::send_frame_callbacks(self, &output);

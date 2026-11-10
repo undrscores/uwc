@@ -300,6 +300,17 @@ pub enum Drag {
         orig: Size<i32, Logical>,
     },
     Pan,
+    /// Dragging a frame by its title strip; the windows it carries are in `frames.carrying`.
+    FrameMove {
+        id: u32,
+        start: Point<f64, Logical>,
+        orig: Point<f64, Logical>,
+    },
+    FrameResize {
+        id: u32,
+        start: Point<f64, Logical>,
+        orig: Size<f64, Logical>,
+    },
 }
 
 /// Where a window is drawn: its geometry's top-left on the screen (logical px), and screen px per
@@ -490,6 +501,17 @@ pub struct Uwc {
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
     pub fling: Option<Fling>,
+    /// The keyboard layout each window last had (`per-window-layout`).
+    pub window_layouts: std::collections::HashMap<u32, usize>,
+    /// The active keyboard layout: (index, name, count).
+    pub layout: (usize, String, usize),
+    pub hot: crate::hotzones::HotState,
+    /// Labelled regions of the canvas (frames.rs).
+    pub frames: crate::frames::Frames,
+    /// Alignment lines drawn while a window is dragged (snap.rs).
+    pub guides: crate::snap::Guides,
+    /// Hint mode (`jump-hints`) while it is up.
+    pub hints: Option<crate::hints::Hints>,
     /// `drag_motion` is running (see `pointer_motion_to`).
     pub in_drag_motion: bool,
     /// The recent speed of a pan gesture (screen px/s) and when it was last sampled.
@@ -641,6 +663,12 @@ impl Uwc {
             drag: None,
             gesture: None,
             fling: None,
+            window_layouts: Default::default(),
+            layout: (0, String::new(), 1),
+            hot: Default::default(),
+            frames: Default::default(),
+            guides: Default::default(),
+            hints: None,
             in_drag_motion: false,
             pan_vel: (0.0, 0.0),
             pan_sampled: Instant::now(),
@@ -1267,11 +1295,54 @@ impl Uwc {
     }
 
     /// Give a client keyboard focus, optionally raising it (sloppy focus does not).
+    /// Read the keyboard layout in use from xkb into the cache IPC reports: (index, name, how many).
+    /// Called after anything that can change it (a key, `set_layout`, a new keymap).
+    pub fn refresh_layout(&mut self) {
+        let kb = self.keyboard();
+        let info = kb.with_xkb_state(self, |ctx| {
+            let xkb = ctx.xkb().lock().unwrap();
+            let i = xkb.active_layout();
+            (i.0 as usize, xkb.layout_name(i).to_string(), xkb.layouts().count())
+        });
+        if info != self.layout {
+            self.layout = info;
+            self.ipc.dirty = true;
+        }
+    }
+
+    /// Switch to layout `n`, or the next one.
+    pub fn set_layout(&mut self, n: Option<usize>) {
+        let kb = self.keyboard();
+        kb.with_xkb_state(self, |mut ctx| match n {
+            Some(n) => ctx.set_layout(smithay::input::keyboard::Layout(n as u32)),
+            None => ctx.cycle_next_layout(),
+        });
+        self.refresh_layout();
+    }
+
     pub fn set_focus(&mut self, id: Option<u32>, raise: bool) {
+        let changed = self.focus != id;
+        let old = self.focus;
+        if changed && self.config.per_window_layout {
+            // Each window keeps the layout it was typed in.
+            let (cur, _, count) = self.layout.clone();
+            if let Some(o) = old {
+                self.window_layouts.insert(o, cur);
+            }
+            if let Some(n) = id {
+                let want = self.window_layouts.get(&n).copied().unwrap_or(0).min(count.saturating_sub(1));
+                if want != cur {
+                    self.set_layout(Some(want));
+                }
+            }
+        }
         self.focus = id;
         if let Some(i) = id.and_then(|id| self.client_index(id)).filter(|_| raise) {
             let c = self.clients.remove(i);
             self.clients.push(c);
+        }
+        if changed && id.is_some() {
+            self.run_hook(crate::hooks::Hook::Focus, id.and_then(|id| self.client_index(id)));
         }
         // Being focused answers the attention request (xdg-activation) that flagged it.
         if let Some(i) = id.and_then(|id| self.client_index(id)) {
@@ -1412,6 +1483,9 @@ impl Uwc {
     /// Take a client out of the list: keep its last frame for the fade-out, hand focus to what
     /// is left on top, and end a drag it was part of.
     pub fn remove_client(&mut self, i: usize) {
+        if self.clients[i].ever_mapped {
+            self.run_hook(crate::hooks::Hook::WindowClose, Some(i));
+        }
         // Keep the last frame to fade out over close-ms: the one captured when the close was
         // asked for, else one captured now if the surface is still alive (skipped without a
         // renderer, so closing stays instant headless).
@@ -1507,7 +1581,30 @@ impl Uwc {
 
     // ---- tags ---------------------------------------------------------------------------
 
+    /// After a panic in a handler: drop what was half done (drags, gestures, hint mode, held
+    /// touches) so the next event starts clean, and redraw.
+    pub fn recover_after_panic(&mut self) {
+        self.drag = None;
+        self.gesture = None;
+        self.fling = None;
+        self.in_drag_motion = false;
+        self.consumed_press = false;
+        self.hints_cancel();
+        self.touch_cancel();
+        self.damage();
+    }
+
+    /// The look of the tag in view (its own, over the global options).
+    pub fn tag_look(&self) -> (crate::config::Color, String) {
+        let l = &self.config.tag_looks[lowest_tag(self.tagset)];
+        (
+            l.root_color.unwrap_or(self.config.root_color),
+            l.background_shader.clone().unwrap_or_else(|| self.config.background_shader.clone()),
+        )
+    }
+
     pub fn set_tagset(&mut self, tags: u32) {
+        self.hints_cancel();
         let tags = tags & ALLTAGS;
         if tags == 0 {
             return;
@@ -1523,6 +1620,7 @@ impl Uwc {
             for m in &mut self.monitors {
                 m.overview = None;
             }
+            self.run_hook(crate::hooks::Hook::TagChange, None);
         }
         // Windows that just came into view fade in.
         if self.config.tag_ms > 0.0 {
@@ -1814,6 +1912,26 @@ impl Uwc {
             }
             Action::ToggleOverview => self.toggle_overview(),
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
+            Action::JumpHints => self.hints_toggle(),
+            Action::NextLayout => self.set_layout(None),
+            Action::FrameNew => {
+                if let Some(id) = self.focus {
+                    self.frame_around(id);
+                }
+            }
+            Action::FrameRemove => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_remove(f);
+                }
+            }
+            Action::FrameFit => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_fit(f);
+                }
+            }
+            Action::FrameNext => self.frame_cycle(true),
+            Action::FramePrevious => self.frame_cycle(false),
+            Action::Hint(k) => self.hint_key(k.clone()),
             Action::ToggleFullscreen => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let (id, on) = (self.clients[i].id, !self.clients[i].fullscreen);
@@ -1889,6 +2007,8 @@ impl Uwc {
             tracing::warn!("keymap: {e:?}");
         }
         kb.change_repeat_info(k.repeat_rate, k.repeat_delay);
+        self.window_layouts.clear();
+        self.refresh_layout();
     }
 
     pub fn spawn(&self, cmd: &str, args: &[String]) {

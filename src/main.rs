@@ -9,10 +9,15 @@ mod config;
 mod constraints;
 mod cursor;
 mod deco;
+mod doctor;
 mod export;
 mod ext_capture;
 mod extras;
+mod frames;
 mod handlers;
+mod hints;
+mod hooks;
+mod hotzones;
 mod idle;
 mod ime;
 mod input;
@@ -30,6 +35,7 @@ mod scale;
 mod screencopy;
 mod session;
 mod sessionlock;
+mod snap;
 mod state;
 mod sync;
 mod toplevels;
@@ -54,6 +60,7 @@ use crate::{config::Config, state::Uwc};
 
 const USAGE: &str = "usage: uwc [-c FILE] [-s CMD] [-t] [--backend udev|winit] [--headless [WxH]]
        uwc msg [-p] COMMAND...   talk to a running uwc (`uwc msg --help` lists the commands)
+       uwc doctor [-c FILE]      check what a real session needs (seat, GPU, NVIDIA, libraries) and say what to fix
   -c, --config FILE   config file (default: $UWC_CONFIG, else ~/.config/uwc/config.kdl)
   -s CMD              run CMD (through sh) once the compositor is up
   -t, --check-config  validate the config and exit
@@ -130,6 +137,9 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    if argv.first().map(String::as_str) == Some("doctor") {
+        std::process::exit(if doctor::main(&argv[1..]) { 0 } else { 1 });
     }
     if let Err(e) = run() {
         // One readable line: this is what someone starting a session from a TTY sees.
@@ -236,21 +246,63 @@ fn run() -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    event_loop.run(None, &mut state, |state| {
-        state.udev_render();
-        state.sync_scales();
-        state.workspace_refresh();
-        state.toplevels_refresh();
-        state.screencopy_flush();
-        state.ext_toplevels_refresh();
-        state.ext_capture_flush();
-        state.ipc_flush();
-        let _ = state.display_handle.flush_clients();
-    })?;
+    set_panic_hook();
+    let served = serve(&mut event_loop, &mut state);
     if let Err(e) = state.session_save(true) {
         tracing::warn!("saving the session: {e:#}");
     }
-    Ok(())
+    served
+}
+
+/// A panic is logged with its backtrace (the default hook would print only to stderr, and only a
+/// backtrace when RUST_BACKTRACE is set), so `~/.local/state/uwc.log` says what happened.
+fn set_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::error!("panic: {info}\n{bt}");
+    }));
+}
+
+/// Run the event loop, and survive a bug: a panic in any handler is logged, the transient state
+/// (drags, gestures, hint mode) is dropped and the loop carries on, so one bad request does not
+/// take every window with it. Three panics within ten seconds, or a backend left taken (a panic
+/// while drawing), mean the state cannot be trusted: the session is saved and uwc exits.
+fn serve(event_loop: &mut EventLoop<Uwc>, state: &mut Uwc) -> Result<()> {
+    let mut recent: Vec<std::time::Instant> = Vec::new();
+    loop {
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            event_loop.run(None, &mut *state, |state| {
+                state.udev_render();
+                state.sync_scales();
+                state.workspace_refresh();
+                state.toplevels_refresh();
+                state.screencopy_flush();
+                state.ext_toplevels_refresh();
+                state.ext_capture_flush();
+                state.ipc_flush();
+                let _ = state.display_handle.flush_clients();
+            })
+        }));
+        let payload = match ran {
+            Ok(r) => return r.map_err(Into::into),
+            Err(p) => p,
+        };
+        let what = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".into());
+        recent.retain(|t| t.elapsed() < Duration::from_secs(10));
+        recent.push(std::time::Instant::now());
+        if let Err(e) = state.session_save(true) {
+            tracing::warn!("saving the session: {e:#}");
+        }
+        if matches!(state.backend, backend::Backend::None) || recent.len() >= 3 {
+            bail!("giving up after a panic the state cannot be trusted after: {what}");
+        }
+        tracing::error!("recovered from a panic ({what}); {} in the last 10 s", recent.len());
+        state.recover_after_panic();
+    }
 }
 
 /// `uwc msg`: send one command to the running compositor and print the reply (one JSON line; `-p`

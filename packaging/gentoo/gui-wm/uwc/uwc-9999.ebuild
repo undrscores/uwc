@@ -70,7 +70,7 @@ src_install() {
 	# The built-in config doubles as the documentation: copy it to ~/.config/uwc/config.kdl.
 	insinto /usr/share/uwc
 	doins config.def.kdl
-	doins -r shaders
+	doins -r shaders themes
 
 	dodoc README.md INSTALL.md
 }
