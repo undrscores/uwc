@@ -55,6 +55,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | keyboard-shortcuts-inhibit (VMs, remote desktop): an inhibitor on the focused surface takes every key; `Mod+Shift+Escape` (`toggle-shortcuts-inhibit`) takes them back and is the one bind that still runs | done |
 | Dialogs: a toplevel with an xdg parent (or X11 transient-for) opens centred over its parent, on its tags and scale, pinned where the parent is pinned, instead of somewhere in the middle of the view | done |
 | Touchscreens: a touch on a window or layer surface goes to its client (and focuses it like a click); on empty canvas one finger drags the view, two pan and pinch-zoom it. Graphics tablets act as an absolute mouse (pen = pointer, tip = left button; no pressure or tilt yet) | done, untested on hardware |
+| Edge pan: dragging a window against a screen edge pans the view that way with the window under the pointer (`edge-pan-size`, `edge-pan-speed`) | done |
 | Momentum: let go of a three-finger swipe or a touch drag while moving and the view glides on (`pan-momentum-ms`, IPC `fling VX VY`) | done |
 | Screen capture for portals: ext-foreign-toplevel-list, ext-image-capture-source, ext-image-copy-capture (outputs and windows, shm, `paint_cursors`); with wlr-screencopy this is what xdg-desktop-portal-wlr, OBS and browsers' screen sharing use. `uwc-portals.conf` (installed by `make install`) picks the wlr portal for ScreenCast and Screenshot | done, no dmabuf yet |
 

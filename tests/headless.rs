@@ -1389,6 +1389,62 @@ fn a_released_swipe_glides_on_and_slows_down() {
 }
 
 #[test]
+fn dragging_a_window_moves_it_and_the_screen_edge_carries_the_view() {
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    // A plain right-button drag-move bind, so the test needs no keyboard modifiers.
+    let mut uwc =
+        Uwc::start("drag", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }\nbinds { MouseRight { drag-move; } }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _w = c.window("D", 200, 150);
+    let id = win(&uwc.state(), "D")["id"].as_u64().unwrap();
+    uwc.cmd(&format!("move {id} 100 100"));
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let right = wayland_client::protocol::wl_pointer::ButtonState::Pressed;
+    let vp = |s: &Value| (num(&s["monitors"][0]["viewport"]["x"]), num(&s["monitors"][0]["viewport"]["y"]));
+    let s = uwc.state();
+    let (vx0, vy0) = vp(&s);
+    let (px, py) = ((100.0 - vx0 + 50.0) as u32, (100.0 - vy0 + 50.0) as u32);
+    p.motion_absolute(0, px, py, 1000, 600);
+    p.frame();
+    p.button(1, 0x111, right);
+    p.motion(2, 120.0, 40.0);
+    p.frame();
+    c.sync();
+    let w = |uwc: &mut Uwc| {
+        let s = uwc.state();
+        let d = win(&s, "D");
+        (num(&d["x"]), num(&d["y"]))
+    };
+    // The window followed the pointer: this used to overflow the stack and kill the compositor.
+    assert_eq!(w(&mut uwc), (220.0, 140.0));
+    // Against the right edge the view pans that way and the window stays under the pointer.
+    p.motion_absolute(3, 999, 140, 1000, 600);
+    p.frame();
+    c.sync();
+    let (before, _) = w(&mut uwc);
+    uwc.wait("the view to pan", |s| num(&s["monitors"][0]["viewport"]["x"]) > vx0 + 100.0);
+    let s = uwc.state();
+    let (after, _) = w(&mut uwc);
+    assert!(after > before + 100.0, "the window moved with the view: {before} -> {after}");
+    // ... in step: it is still under the pointer (at the same screen position).
+    let on_screen = after - num(&s["monitors"][0]["viewport"]["x"]);
+    assert!((0.0..1000.0).contains(&on_screen), "{on_screen}");
+    p.button(4, 0x111, wayland_client::protocol::wl_pointer::ButtonState::Released);
+    p.frame();
+    c.sync();
+    // Released: the view stops.
+    std::thread::sleep(Duration::from_millis(150));
+    let a = vp(&uwc.state());
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(vp(&uwc.state()), a, "the view stopped when the drag ended");
+    assert_eq!(vy0, vp(&uwc.state()).1);
+}
+
+#[test]
 fn windows_animate_in_moves_and_tag_switches() {
     let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
     let mut c = uwc.connect();

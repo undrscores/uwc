@@ -214,6 +214,8 @@ pub struct Config {
     /// How long eased view moves (pan keys, centre, fit, bookmarks, home) take; 0 = jump.
     pub view_ms: f64,
     pub pan_momentum_ms: f64,
+    pub edge_pan_size: f64,
+    pub edge_pan_speed: f64,
     /// A new window fades in and grows from `open_scale` over this long (0 = appears at once).
     pub open_ms: f64,
     pub open_scale: f64,
@@ -335,6 +337,8 @@ impl Config {
             pan_step: 200.0,
             view_ms: 180.0,
             pan_momentum_ms: 600.0,
+            edge_pan_size: 12.0,
+            edge_pan_speed: 900.0,
             open_ms: 160.0,
             open_scale: 0.92,
             move_ms: 140.0,

@@ -322,7 +322,12 @@ impl Uwc {
             return;
         }
         if let Some(drag) = self.drag {
-            self.drag_motion(drag, pos);
+            // Moving a window refreshes the pointer, which lands here again: only the outermost
+            // call applies the drag (without this, any drag-move overflowed the stack).
+            if !std::mem::replace(&mut self.in_drag_motion, true) {
+                self.drag_motion(drag, pos);
+                self.in_drag_motion = false;
+            }
             return;
         }
         // Canvas windows live in canvas px; pinned and fullscreen windows and layer surfaces in screen

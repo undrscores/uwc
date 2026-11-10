@@ -490,6 +490,8 @@ pub struct Uwc {
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
     pub fling: Option<Fling>,
+    /// `drag_motion` is running (see `pointer_motion_to`).
+    pub in_drag_motion: bool,
     /// The recent speed of a pan gesture (screen px/s) and when it was last sampled.
     pub pan_vel: (f64, f64),
     pub pan_sampled: Instant,
@@ -639,6 +641,7 @@ impl Uwc {
             drag: None,
             gesture: None,
             fling: None,
+            in_drag_motion: false,
             pan_vel: (0.0, 0.0),
             pan_sampled: Instant::now(),
             touch: Default::default(),
@@ -1026,6 +1029,7 @@ impl Uwc {
     /// Something is easing (a view, a window, or a closing window fading out).
     pub fn anim_running(&self) -> bool {
         self.fling.is_some()
+            || self.edge_pan_velocity().is_some()
             || self.monitors.iter().any(|m| m.target.is_some())
             || self.clients.iter().any(|c| !c.fx.at_rest())
             || !self.ghosts.is_empty()
@@ -1042,10 +1046,42 @@ impl Uwc {
         let now = Instant::now();
         let dt = now.duration_since(self.anim_stepped).as_secs_f64().min(0.05);
         self.anim_stepped = now;
-        let view = self.step_view(dt) | self.step_fling(dt);
+        let view = self.step_view(dt) | self.step_fling(dt) | self.step_edge_pan(dt);
         let fx = self.step_fx(dt);
         let ghosts = self.step_ghosts(dt);
         view || fx || ghosts
+    }
+
+    /// While a canvas window is dragged with the pointer against a screen edge: the view's velocity.
+    fn edge_pan_velocity(&self) -> Option<(f64, f64)> {
+        let Some(Drag::Move { id, .. }) = self.drag else { return None };
+        let i = self.client_index(id)?;
+        if self.clients[i].pin.is_some() || self.clients[i].fullscreen {
+            return None;
+        }
+        let v = crate::canvas::edge_pan_velocity(
+            (self.cursor.x, self.cursor.y),
+            self.global_size(),
+            self.config.edge_pan_size,
+            self.config.edge_pan_speed,
+        );
+        (v != (0.0, 0.0)).then_some(v)
+    }
+
+    /// Dragging a window against a screen edge carries the view along: the view pans towards the
+    /// edge and the window stays under the pointer.
+    fn step_edge_pan(&mut self, dt: f64) -> bool {
+        let Some((vx, vy)) = self.edge_pan_velocity() else { return false };
+        let z = self.viewport().zoom;
+        let (dx, dy) = (vx * dt / z, vy * dt / z);
+        self.with_viewport(|v, _| v.pan_canvas(dx, dy));
+        if let Some(Drag::Move { orig, .. }) = &mut self.drag {
+            orig.x += dx;
+            orig.y += dy;
+        }
+        // Re-apply the drag at the unchanged pointer position: the window follows the view.
+        self.pointer_motion_to(self.cursor, 0);
+        true
     }
 
     /// A pan gesture moved the view by `(dx, dy)` screen px: remember how fast.
