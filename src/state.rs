@@ -77,6 +77,10 @@ pub struct Client {
     pub minimized: u32,
     /// What the rules' `open { }` blocks said, decided at the first configure, used when it maps.
     pub open: crate::rules::Open,
+    /// The window's own scale on the canvas (1 = normal), on top of the view's zoom.
+    pub scale: f64,
+    /// The render scale it was last told (fractional scale / preferred buffer scale).
+    pub sent_scale: Option<f64>,
     /// Ids for the four border rects, stable so the damage tracker can tell frames apart.
     pub border_ids: [Id; 4],
     /// Ids for the dim, backdrop, border and shadow shader elements.
@@ -88,9 +92,10 @@ impl Client {
         self.window.geometry().size
     }
 
+    /// The window's footprint on the canvas: its size times its own scale.
     pub fn rect(&self) -> Rectangle<f64, Logical> {
         let s = self.size();
-        Rectangle::new(self.canvas, (s.w as f64, s.h as f64).into())
+        Rectangle::new(self.canvas, (s.w as f64 * self.scale, s.h as f64 * self.scale).into())
     }
 
     pub fn surface(&self) -> &WlSurface {
@@ -230,8 +235,28 @@ pub struct Uwc {
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
     pub redraw: bool,
+    /// The zoom windows render for: follows the view's zoom once it has stayed put (`zoom-settle-ms`).
+    pub settled_zoom: f64,
+    /// The zoom seen last turn, and a counter so only the last zoom change of a burst settles.
+    pub seen_zoom: f64,
+    pub scale_gen: u64,
+    #[allow(dead_code)] // held so the globals stay alive
+    pub fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState,
+    #[allow(dead_code)]
+    pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
     /// Counts minimize calls, so the newest minimized window comes back first.
     pub minimize_stamp: u32,
+    /// Compiled user shaders by kind and file (None: it failed), and why the failed ones failed
+    /// (by the path as written in the config). Cleared when the config is applied.
+    pub user_shaders: std::collections::HashMap<
+        (crate::deco::UserShader, std::path::PathBuf),
+        Option<(smithay::backend::renderer::gles::GlesPixelProgram, bool)>,
+    >,
+    pub shader_errors: std::collections::BTreeMap<String, String>,
+    pub background_id: Id,
+    /// Remembered windows no window has claimed yet (session restore), and the last text written.
+    pub session_pool: Vec<crate::session::SavedWindow>,
+    pub session_written: Option<String>,
     /// The rect behind a fullscreen window (`fullscreen-bg`).
     pub fullscreen_bg_id: Id,
     /// Set while drawing a frame that is part of an animation: the backend asks for the next one.
@@ -275,7 +300,7 @@ impl Uwc {
 
         Ok(Uwc {
             start_time: Instant::now(),
-            compositor_state: CompositorState::new::<Uwc>(&dh),
+            compositor_state: CompositorState::new_v6::<Uwc>(&dh),
             xdg_shell_state: XdgShellState::new::<Uwc>(&dh),
             shm_state: ShmState::new::<Uwc>(&dh, vec![]),
             xdg_decoration_state: XdgDecorationState::new::<Uwc>(&dh),
@@ -294,7 +319,7 @@ impl Uwc {
             cursor_theme: crate::cursor::CursorTheme::new(&config.cursor_theme, config.cursor_size),
             seat_state,
             seat,
-            display_handle: dh,
+            display_handle: dh.clone(),
             loop_handle,
             loop_signal,
             socket_name,
@@ -312,7 +337,17 @@ impl Uwc {
             deco_commit: Default::default(),
             redraw: true,
             minimize_stamp: 0,
+            settled_zoom: 1.0,
+            seen_zoom: 1.0,
+            scale_gen: 0,
+            fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Uwc>(&dh),
+            viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Uwc>(&dh),
             fullscreen_bg_id: Id::new(),
+            user_shaders: Default::default(),
+            shader_errors: Default::default(),
+            background_id: Id::new(),
+            session_pool: Vec::new(),
+            session_written: None,
             animating: false,
             ipc,
         })
@@ -390,11 +425,51 @@ impl Uwc {
         if c.fullscreen {
             return Place { origin: (0.0, 0.0).into(), zoom: 1.0, on_canvas: false };
         }
+        // Pinned windows ignore the view's zoom but keep their own scale.
         if let Some(p) = c.pin {
-            return Place { origin: p, zoom: 1.0, on_canvas: false };
+            return Place { origin: p, zoom: c.scale, on_canvas: false };
         }
         let vp = self.viewport();
-        Place { origin: vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), zoom: vp.zoom, on_canvas: true }
+        Place { origin: vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), zoom: vp.zoom * c.scale, on_canvas: true }
+    }
+
+    /// Scale a window on the canvas by `factor` (its own scale, 0.1 to 4), keeping screen point
+    /// `anchor` over the same spot of the window (default: its centre).
+    pub fn scale_window(&mut self, id: u32, factor: f64, anchor: Option<Point<f64, Logical>>) {
+        self.set_window_scale(id, self.client_index(id).map(|i| self.clients[i].scale * factor).unwrap_or(1.0), anchor);
+    }
+
+    pub fn set_window_scale(&mut self, id: u32, scale: f64, anchor: Option<Point<f64, Logical>>) {
+        let Some(i) = self.client_index(id) else { return };
+        if self.clients[i].fullscreen || !scale.is_finite() {
+            return;
+        }
+        let new = scale.clamp(0.1, 4.0);
+        let old = self.clients[i].scale;
+        let pl = self.place(&self.clients[i]);
+        let size = self.clients[i].size();
+        let anchor = anchor.unwrap_or_else(|| {
+            (pl.origin.x + size.w as f64 * pl.zoom / 2.0, pl.origin.y + size.h as f64 * pl.zoom / 2.0).into()
+        });
+        // Screen origin so the anchor stays put: origin' = anchor - (anchor - origin) * new / old.
+        let r = new / old;
+        let origin: Point<f64, Logical> =
+            (anchor.x - (anchor.x - pl.origin.x) * r, anchor.y - (anchor.y - pl.origin.y) * r).into();
+        let c = &mut self.clients[i];
+        c.scale = new;
+        if c.pin.is_some() {
+            c.pin = Some(origin);
+        } else {
+            c.canvas = self
+                .mon
+                .as_ref()
+                .map(|m| m.viewport())
+                .unwrap_or_default()
+                .screen_to_canvas((origin.x, origin.y))
+                .into();
+        }
+        self.refresh_pointer();
+        self.damage();
     }
 
     /// Apply `f` to the viewport in use, then re-send the pointer position so what is under
@@ -864,6 +939,16 @@ impl Uwc {
                 }
             }
             Action::RestoreWindow => self.restore_newest(),
+            Action::ScaleWindow(f) => {
+                if let Some(id) = self.focus {
+                    self.scale_window(id, *f, None);
+                }
+            }
+            Action::ScaleWindowReset => {
+                if let Some(id) = self.focus {
+                    self.set_window_scale(id, 1.0, None);
+                }
+            }
             Action::BookmarkSave(n) => self.bookmark_save(*n),
             Action::BookmarkGoto(n) => {
                 self.bookmark_goto(*n);
@@ -938,6 +1023,9 @@ impl Uwc {
             Ok(c) => {
                 self.config = c;
                 self.ipc_rules.clear();
+                // Shader files may have changed (saving one is what reloaded the config).
+                self.user_shaders.clear();
+                self.shader_errors.clear();
                 self.apply_input_config();
                 self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
                 self.backend.config_changed(&self.config);

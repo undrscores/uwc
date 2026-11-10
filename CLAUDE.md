@@ -13,6 +13,8 @@ uwm is awkward (the user said it need not be 1:1); `README.md` has the status ta
 - `cargo test` runs the unit tests (canvas maths, KDL parser, config) and `tests/headless.rs`: each test spawns
   `uwc --headless` in its own `XDG_RUNTIME_DIR`, connects real Wayland clients (wayland-client) and reads state
   through the IPC socket. Add a check when fixing a bug. Never `pkill` by name; kill test processes by PID.
+- Tests must not touch the user's files: headless tests and `tests/nested.py` point `XDG_RUNTIME_DIR` and
+  `XDG_STATE_HOME` (the session file) at temp dirs; keep it that way for anything new that writes state.
 - `tests/nested.py` checks drawing and real pointer input: uwc nested in Xvfb with software GL, `examples/paint`
   clients, `xdotool` moving the X pointer, pixels read from `import -window root` screenshots, focus read over IPC
   (needs Xvfb, xdotool, ImageMagick, python3-pil). Run it after touching rendering, stacking or hit-testing, and
@@ -39,8 +41,12 @@ uwm is awkward (the user said it need not be 1:1); `README.md` has the status ta
   changes reveal (`reveal`/`focus_and_reveal`); mouse clicks and sloppy focus do not.
 - Anything that needs a new frame calls `damage()` (sets `redraw`, marks IPC dirty). IPC subscribers get one snapshot
   per event-loop turn (`ipc_flush`).
-- Adding an option: a field in `Config`, an arm in `set_option` (with a range if a bad value could break something),
-  a line in `config.def.kdl` (documented), an entry in `ipc_options`, and a test. Adding an action: `Action`,
+- Adding an option: a field (in `rules::Deco` if it is about how a window looks, else `Config`) and one line in a
+  table in `options.rs` (name, field, range); that gives parsing, range checks, `set` and `get`. Then document it in
+  `config.def.kdl` (a test fails until you do). A new value type implements `OptValue`.
+- Adding an IPC command: a `Request` variant, its parsing in `Request::parse`, a line in `COMMANDS` (a test checks),
+  and its arm in `Uwc::ipc_exec`. Replies are `protocol` types, never hand-built JSON.
+- Adding an action: `Action`,
   `parse_action`, `run_action`, a default bind if sensible.
 - Animations are stepped from the frame handler, never timers: set `animating` while drawing a frame that needs a
   next one (the border spin does), and the backend asks for it.

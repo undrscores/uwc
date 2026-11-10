@@ -13,9 +13,12 @@ import socket, json, subprocess, time, os, glob, sys, tempfile
 from PIL import Image
 SP=tempfile.mkdtemp(prefix="uwc-nested-"); RD=SP+"/run"; os.makedirs(RD); os.chmod(RD,0o700)
 DISPLAY=next(f":{n}" for n in range(90, 200) if not os.path.exists(f"/tmp/.X11-unix/X{n}"))
-env=dict(os.environ, DISPLAY=DISPLAY, XDG_RUNTIME_DIR=RD, LIBGL_ALWAYS_SOFTWARE="1", RUST_LOG="error")
+# XDG_STATE_HOME: the session file must not touch the real one.
+env=dict(os.environ, DISPLAY=DISPLAY, XDG_RUNTIME_DIR=RD, XDG_STATE_HOME=SP+"/state", LIBGL_ALWAYS_SOFTWARE="1", RUST_LOG="error")
 env.pop("WAYLAND_DISPLAY", None)
 pids=[]
+import atexit
+atexit.register(lambda: [p.kill() for p in reversed(pids)])  # also when a check crashes
 def spawn(args, **kw):
     p=subprocess.Popen(args, env=kw.get("env",env), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); pids.append(p); return p
 open(SP+"/scen.kdl","w").write('options { border-width 0\n corner-radius 0\n shadow-size 0\n warp-cursor false\n root-color "#202020" }\n')
@@ -58,6 +61,48 @@ cur, kf = move(100,100); check("hover fullscreen A", kf, {"window": A})
 cur, kf = move(900,250); check("pinned B hidden under fullscreen takes no pointer", kf, {"window": A})
 cmd(f"unfullscreen {A}"); time.sleep(0.5)
 check("bar back on top", color(px(600,10)), "bar")
+# Sharp zoom: a client that re-renders at its fractional scale shows 1 px stripes at 1 screen px when
+# zoomed 2x, once the zoom settled (stretched, they would be 2 px wide: half the transitions).
+cmd(f"minimize {A}"); cmd("home")
+spawn(["./target/debug/examples/paint","--stripes","S","300","200"], env=wenv); time.sleep(0.8)
+S = win("S")["id"]; cmd(f"move {S} 50 50"); cmd("zoom 2 0 0")
+time.sleep(0.8)  # zoom-settle-ms 200, then the client redraws
+subprocess.run(["import","-window","root",SP+"/scen.png"], env=env)
+row = [Image.open(SP+"/scen.png").convert("L").getpixel((x, 300)) for x in range(200, 240)]
+flips = sum(1 for a, b in zip(row, row[1:]) if (a < 128) != (b < 128))
+check("zoomed 2x stripes stay 1 px (sharp)", flips >= 35, True)
+cmd("zoom 1 0 0")
+# Per-window scale: S (canvas 50,50 300x200) at half size around its centre (200,150) covers
+# 125..275 x 100..200 on screen, and the pointer hits it there and only there.
+cmd(f"window-scale {S} 0.5"); time.sleep(0.4)
+check("scaled window drawn inside its footprint", color(px(200,150)) != "root", True)
+check("and not beyond it", color(px(290,190)), "root")
+cur, kf = move(260,190); check("hover the scaled window", kf, {"window": S})
+cur, kf = move(290,190); check("just outside it keeps focus", kf, {"window": S})
+cmd(f"focus {B}"); cur, kf = move(290,190); check("outside the footprint does not focus it", kf, {"window": B})
+# User shaders: a background and a border from GLSL files, a broken one falling back with the
+# compiler's message over IPC, the bundled examples compiling, and an animated one animating.
+open(SP+"/green.glsl","w").write("vec4 background(vec2 p, vec2 size, float time, vec2 view, float zoom) { return vec4(0.1, 0.8, 0.2, 1.0); }\n")
+open(SP+"/magenta.glsl","w").write("vec4 border(vec2 p, vec2 size, float time, vec4 color, float focused) { return vec4(1.0, 0.0, 1.0, 1.0); }\n")
+open(SP+"/broken.glsl","w").write("vec4 background(vec2 p, vec2 size, float time, vec2 view, float zoom) {\n  return vec4(oops);\n}\n")
+cmd(f'set background-shader "{SP}/green.glsl"'); time.sleep(0.4)
+r,g,b = px(1200,650); check("background shader fills empty canvas", (g > 150 and r < 80 and b < 100), True)
+cmd("set border-width 8"); cmd("set corner-radius 0"); cmd(f'set border-shader "{SP}/magenta.glsl"'); time.sleep(0.4)
+# S: footprint 125..275 x 100..200 at scale 0.5, so its border is 4 px outside: x 121..125.
+r,g,b = px(123,150); check("border shader draws the ring", (r > 200 and g < 60 and b > 200), True)
+cmd(f'set background-shader "{SP}/broken.glsl"'); time.sleep(0.4)
+errs = cmd("state")["shader_errors"]
+msg = errs.get(f"{SP}/broken.glsl", "")
+check("broken shader reported with the compiler's message", "oops" in msg or "undeclared" in msg.lower(), True)
+print("   (compiler said:", msg.strip()[:100] + ")")
+check("broken shader falls back to root-color", color(px(1200,650)), "root")
+for name in ["dots", "aurora"]:
+    cmd(f'set background-shader "{os.getcwd()}/shaders/{name}.glsl"'); time.sleep(0.4)
+    check(f"bundled {name}.glsl compiles", cmd("state")["shader_errors"], {})
+cmd(f'set border-shader "{os.getcwd()}/shaders/neon.glsl"'); time.sleep(0.4)
+check("bundled neon.glsl compiles", cmd("state")["shader_errors"], {})
+a = px(123,150); time.sleep(0.6); b2 = px(123,150)
+check("an animated border keeps moving", a != b2, True)
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

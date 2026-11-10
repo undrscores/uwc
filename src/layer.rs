@@ -246,18 +246,23 @@ impl Uwc {
     }
 
     /// For IPC: the layer surfaces on the output.
-    pub fn layer_info(&self) -> Vec<serde_json::Value> {
+    pub fn layer_info(&self) -> Vec<crate::protocol::Layer> {
         let Some(o) = self.output() else { return vec![] };
         let map = layer_map_for_output(&o);
         map.layers()
             .filter_map(|l| {
                 let g = map.layer_geometry(l)?;
-                Some(serde_json::json!({
-                    "namespace": l.namespace(),
-                    "layer": layer_name(l.layer()),
-                    "x": g.loc.x, "y": g.loc.y, "width": g.size.w, "height": g.size.h,
-                    "keyboard": self.layer_focus.as_ref() == Some(l.wl_surface()),
-                }))
+                Some(crate::protocol::Layer {
+                    namespace: l.namespace().to_string(),
+                    layer: layer_name(l.layer()),
+                    rect: crate::protocol::Rect {
+                        x: g.loc.x as i64,
+                        y: g.loc.y as i64,
+                        width: g.size.w as i64,
+                        height: g.size.h as i64,
+                    },
+                    keyboard: self.layer_focus.as_ref() == Some(l.wl_surface()),
+                })
             })
             .collect()
     }

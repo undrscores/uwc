@@ -80,9 +80,13 @@ impl Uwc {
                         .or_else(|| event.amount_v120(Axis::Vertical).map(|v| v / 120.0 * 15.0))
                         .unwrap_or(0.0);
                     if dy != 0.0 {
-                        // Scrolling up (negative) zooms in.
+                        // Scrolling up (negative) zooms in. With Ctrl too, only the window under the pointer.
                         let f = self.config.zoom_scroll.powf(-(dy / 15.0).clamp(-5.0, 5.0));
-                        self.zoom_by(f);
+                        let under = self.under(self.cursor).and_then(|u| u.window()).map(|i| self.clients[i].id);
+                        match under {
+                            Some(id) if mods.ctrl => self.scale_window(id, f, Some(self.cursor)),
+                            _ => self.zoom_by(f),
+                        }
                     }
                     return;
                 }
@@ -153,14 +157,21 @@ impl Uwc {
     }
 
     fn drag_motion(&mut self, drag: Drag, pos: Point<f64, Logical>) {
-        // A screen delta in the dragged window's own px (canvas px under zoom, screen px if pinned).
-        let delta = |s: &Uwc, id: u32, start: Point<f64, Logical>| -> (f64, f64) {
-            let z = s.client_index(id).map(|i| s.place(&s.clients[i]).zoom).unwrap_or(1.0);
-            ((pos.x - start.x) / z, (pos.y - start.y) / z)
+        // The screen delta divided by `z`.
+        let delta = |start: Point<f64, Logical>, z: f64| ((pos.x - start.x) / z, (pos.y - start.y) / z);
+        // A move is in canvas px (screen px for a pinned window); a resize in the window's own px.
+        let zooms = |s: &Uwc, id: u32| -> (f64, f64) {
+            match s.client_index(id) {
+                Some(i) => {
+                    let pl = s.place(&s.clients[i]);
+                    (pl.zoom / s.clients[i].scale, pl.zoom)
+                }
+                None => (1.0, 1.0),
+            }
         };
         match drag {
             Drag::Move { id, start, orig } => {
-                let (dx, dy) = delta(self, id, start);
+                let (dx, dy) = delta(start, zooms(self, id).0);
                 match self.client_index(id) {
                     Some(i) if self.clients[i].pin.is_some() => {
                         self.clients[i].pin = Some((orig.x + dx, orig.y + dy).into());
@@ -170,7 +181,7 @@ impl Uwc {
                 }
             }
             Drag::Resize { id, start, orig } => {
-                let (dx, dy) = delta(self, id, start);
+                let (dx, dy) = delta(start, zooms(self, id).1);
                 self.resize_client(id, orig.w + dx as i32, orig.h + dy as i32)
             }
             Drag::Pan => {

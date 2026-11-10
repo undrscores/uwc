@@ -105,7 +105,13 @@ impl Uwc {
         let (app_id, title) = (c.app_id(), c.title());
         let f = self.facts(c, &app_id, &title);
         let rules: Vec<&crate::rules::Rule> = self.config.rules.iter().chain(&self.ipc_rules).collect();
-        let open = crate::rules::resolve_open(&rules, &f);
+        let mut open = crate::rules::resolve_open(&rules, &f);
+        // Where it was last time wins over the rules (session restore).
+        if self.config.session_restore {
+            if let Some(saved) = crate::session::take(&mut self.session_pool, &app_id, &title) {
+                saved.apply(&mut open);
+            }
+        }
         let screen = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
         let c = &mut self.clients[i];
         if let Some(t) = c.window.toplevel() {
@@ -139,6 +145,7 @@ impl Uwc {
         let centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
         let c = &mut self.clients[i];
         c.mapped = true;
+        c.scale = open.scale.unwrap_or(1.0);
         c.tags = open.tags.unwrap_or(self.mon.as_ref().map(|m| m.tagset).unwrap_or(1));
         if open.pinned && !c.fullscreen {
             // A pinned window's position is a screen position.
@@ -198,6 +205,8 @@ impl XdgShellHandler for Uwc {
             prev_size: None,
             minimized: 0,
             open: Default::default(),
+            scale: 1.0,
+            sent_scale: None,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         });

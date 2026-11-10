@@ -19,8 +19,12 @@ use smithay::{
     utils::{Physical, Point, Rectangle, Scale, Size},
 };
 
+use std::collections::HashMap;
+
+use smithay::backend::renderer::gles::GlesPixelProgram;
+
 use crate::{
-    deco::{spin_degrees, Paint, RoundedElement, ShaderElement, Shaders},
+    deco::{compile_user, spin_degrees, uses_time, Paint, RoundedElement, ShaderElement, Shaders, UserShader, GL_LOG},
     rules::Deco,
     state::{Client, Uwc},
 };
@@ -56,10 +60,33 @@ impl Uwc {
             self.animating = true;
         }
         let shaders = Shaders::get(renderer);
+        // User border shaders the visible windows use, compiled (once) before drawing.
+        let mut user: HashMap<String, GlesPixelProgram> = HashMap::new();
+        let wanted: Vec<String> = self
+            .clients
+            .iter()
+            .filter(|c| self.visible(c) && !c.fullscreen)
+            .map(|c| self.deco_for(c).border_shader)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut animated = false;
+        for path in wanted {
+            if let Some((p, anim)) = self.user_shader(renderer, UserShader::Border, &path) {
+                animated |= anim;
+                user.insert(path, p);
+            }
+        }
+        let background = self.config.background_shader.clone();
+        let background = self.user_shader(renderer, UserShader::Background, &background);
+        animated |= background.as_ref().is_some_and(|b| b.1);
+        if animated {
+            self.deco_commit.increment();
+            self.animating = true;
+        }
         let mut out = self.cursor_elements(renderer, scale);
         out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
-        let fullscreen = self.render_elements(renderer, shaders.as_ref(), scale, true);
+        let fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true);
         if !fullscreen.is_empty() {
             out.extend(fullscreen);
             let (w, h) = self.screen_size();
@@ -73,9 +100,61 @@ impl Uwc {
             )));
         }
         out.extend(self.layer_elements(renderer, scale, &[Layer::Top]));
-        out.extend(self.render_elements(renderer, shaders.as_ref(), scale, false));
+        out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, false));
         out.extend(self.layer_elements(renderer, scale, &[Layer::Bottom, Layer::Background]));
+        if let Some((program, _)) = background {
+            let (w, h) = self.screen_size();
+            let vp = self.viewport();
+            out.push(UwcElement::from(ShaderElement::user_background(
+                &program,
+                &self.background_id,
+                self.deco_commit,
+                Rectangle::from_size(Size::from(((w * scale).round() as i32, (h * scale).round() as i32))),
+                self.start_time.elapsed().as_secs_f64(),
+                (vp.x, vp.y),
+                vp.zoom * scale,
+            )));
+        }
         out
+    }
+
+    /// A user shader file, compiled once per config (`None` if it is unset or does not compile;
+    /// then the reason is in `shader_errors`). The bool: it uses its time parameter.
+    fn user_shader(&mut self, r: &mut GlesRenderer, kind: UserShader, file: &str) -> Option<(GlesPixelProgram, bool)> {
+        if file.is_empty() {
+            return None;
+        }
+        let path = crate::config::resolve(file, &self.config.dir);
+        let key = (kind, path.clone());
+        if let Some(v) = self.user_shaders.get(&key) {
+            return v.clone();
+        }
+        let res = match std::fs::read_to_string(&path) {
+            Err(e) => Err(format!("{}: {e}", path.display())),
+            Ok(src) => {
+                if let Ok(mut log) = GL_LOG.lock() {
+                    *log = None;
+                }
+                match compile_user(r, kind, &src) {
+                    Ok(p) => Ok((p, uses_time(kind, &src))),
+                    Err(e) => Err(GL_LOG.lock().ok().and_then(|mut l| l.take()).unwrap_or_else(|| e.to_string())),
+                }
+            }
+        };
+        let v = match res {
+            Ok(p) => {
+                self.shader_errors.remove(file);
+                Some(p)
+            }
+            Err(msg) => {
+                tracing::warn!("shader {file}: {msg}");
+                self.shader_errors.insert(file.to_string(), msg);
+                None
+            }
+        };
+        self.ipc.dirty = true;
+        self.user_shaders.insert(key, v.clone());
+        v
     }
 
     /// Some visible window shows a gradient border that turns (rules can turn it on per window).
@@ -98,7 +177,7 @@ impl Uwc {
         };
         let (shadow_size, shadow_color) = if focused {
             (
-                if o.focus_shadow_size < 0.0 { o.shadow_size } else { o.focus_shadow_size },
+                o.focus_shadow_size.unwrap_or(o.shadow_size),
                 if o.focus_shadow_color[3] == 0.0 { o.shadow_color } else { o.focus_shadow_color },
             )
         } else {
@@ -119,6 +198,7 @@ impl Uwc {
         &self,
         renderer: &mut GlesRenderer,
         shaders: Option<&Shaders>,
+        user: &HashMap<String, GlesPixelProgram>,
         scale: f64,
         fullscreen: bool,
     ) -> Vec<UwcElement> {
@@ -216,20 +296,27 @@ impl Uwc {
                 )));
             }
             if bw > 0.0 {
-                out.push(UwcElement::from(ShaderElement::rounded_box(
-                    s,
-                    border_id,
-                    commit,
-                    outer.to_i32_round(),
-                    radius,
-                    bw,
-                    &look.border,
-                )));
+                out.push(UwcElement::from(match user.get(&o.border_shader) {
+                    Some(program) => ShaderElement::user_box(
+                        program,
+                        border_id,
+                        commit,
+                        outer.to_i32_round(),
+                        radius,
+                        bw,
+                        &look.border,
+                        self.start_time.elapsed().as_secs_f64(),
+                        self.focus == Some(c.id),
+                    ),
+                    None => {
+                        ShaderElement::rounded_box(s, border_id, commit, outer.to_i32_round(), radius, bw, &look.border)
+                    }
+                }));
             }
             if look.shadow_size > 0.0 && look.shadow_color[3] > 0.0 {
                 let spread = o.shadow_spread * k;
                 let caster = Rectangle::new(
-                    (outer.loc.x - spread + o.shadow_offset.0 * k, outer.loc.y - spread + o.shadow_offset.1 * k).into(),
+                    (outer.loc.x - spread + o.shadow_offset_x * k, outer.loc.y - spread + o.shadow_offset_y * k).into(),
                     Size::from(((outer.size.w + 2.0 * spread).max(1.0), (outer.size.h + 2.0 * spread).max(1.0))),
                 );
                 let size = look.shadow_size * k;

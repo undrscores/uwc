@@ -42,11 +42,36 @@ options {
     // focus-gradient "#00aaff" "#aa00ff" angle=45
     // urgent-gradient "#ff0000" "#ffaa00" angle=45
     border-spin-ms 0            // a gradient border turns once around in this many ms (negative: the other way); 0 = still
+    // Your own GLSL (ES 1.00) instead of the built-in drawing; "" = none. Paths are relative to this file
+    // (or absolute, or "~/"). A file is reloaded when saved; one that does not compile falls back to
+    // the built-in look, and the compiler's message is in the log and in the IPC state (shader_errors).
+    // A shader that uses `time` is redrawn every frame. See shaders/ in the source for examples.
+    //   border-shader: vec4 border(vec2 p, vec2 size, float time, vec4 color, float focused)
+    //     p and size in px of the border's box; color is what uwc would paint there (border/focus color
+    //     or gradient); focused is 0 or 1. Return a color (not premultiplied); uwc keeps it to the ring.
+    //     Rules can set it per window.
+    border-shader ""
+    //   background-shader: vec4 background(vec2 p, vec2 size, float time, vec2 view, float zoom)
+    //     p and size in px of the output; the canvas point under p is view + p / zoom, so patterns can
+    //     pan and zoom with the canvas. Drawn behind everything (root-color shows through alpha).
+    background-shader ""
     // All of these can be changed live over IPC:  set focus-gradient "#ff0000" "#0000ff" angle=45
     pan-step 200                // canvas px for the pan-view action
     move-step 50                // canvas px for move-window / resize-window
     zoom-scroll 1.1             // zoom factor per scroll notch with Mod held
+    // Sharp zoom: windows are asked to render at output scale x zoom (fractional scale), so zooming in
+    // shows more detail instead of stretched pixels. They are asked once the zoom has stayed put for
+    // zoom-settle-ms. The zoom factor they render for is kept between zoom-render-scale-min (below 1:
+    // zoomed-out windows render smaller and cheaper, but are briefly soft when you zoom back in) and
+    // zoom-render-scale-max (above it, they are stretched; each step up costs memory).
+    zoom-settle-ms 200
+    zoom-render-scale-min 1
+    zoom-render-scale-max 3
     new-window-offset 32        // each new window on a tag is offset by this much from the last
+    // Remember the canvas across restarts: each tag's view and bookmarks, and where every window was
+    // (by app-id and title; it goes back there when its app opens again, over rules' open { }).
+    // Saved in ~/.local/state/uwc/session.json on quit and every few seconds. IPC: session save|forget.
+    session-restore true
     // Pointer image: the xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
     // Programs started afterwards inherit them through XCURSOR_THEME / XCURSOR_SIZE.
     cursor-theme ""
@@ -102,6 +127,7 @@ options {
 //       position 3000 0    canvas px of its top-left corner (screen px when it also opens pinned)
 //       pinned / fullscreen / minimized    (minimized: it starts hidden, a scratchpad)
 //       focus false        it does not take the keyboard
+//       scale 0.5          its own scale on the canvas (also scale-window / Mod+Ctrl+scroll)
 // - any decoration option (border-width, border-color, focus-color, focus-gradient, corner-radius,
 //   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, border-spin-ms,
 //   urgent-*): it applies to these windows live, and follows their state (e.g. match focused=false).
@@ -151,6 +177,11 @@ binds {
     Mod+minus { zoom 0.8; }
     Mod+equal { zoom 1.25; }
     Mod+Shift+0 { zoom-reset; }
+    // A window's own scale on the canvas (it stays sharp and usable); Mod+Ctrl+scroll scales the one
+    // under the pointer.
+    Mod+Ctrl+minus { scale-window 0.8; }
+    Mod+Ctrl+equal { scale-window 1.25; }
+    Mod+Ctrl+0 { scale-window-reset; }
     Mod+Alt+H { pan-view "left"; }
     Mod+Alt+L { pan-view "right"; }
     Mod+Alt+K { pan-view "up"; }

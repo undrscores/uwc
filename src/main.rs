@@ -11,8 +11,12 @@ mod input;
 mod ipc;
 mod kdl;
 mod layer;
+mod options;
+mod protocol;
 mod render;
 mod rules;
+mod scale;
+mod session;
 mod state;
 mod sync;
 mod workspace;
@@ -32,6 +36,7 @@ use smithay::reexports::{
 use crate::{config::Config, state::Uwc};
 
 const USAGE: &str = "usage: uwc [-c FILE] [-s CMD] [-t] [--backend udev|winit] [--headless [WxH]]
+       uwc msg [-p] COMMAND...   talk to a running uwc (`uwc msg --help` lists the commands)
   -c, --config FILE   config file (default: $UWC_CONFIG, else ~/.config/uwc/config.kdl)
   -s CMD              run CMD (through sh) once the compositor is up
   -t, --check-config  validate the config and exit
@@ -96,6 +101,14 @@ fn parse_args() -> Result<Args> {
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("msg") {
+        if let Err(e) = msg(&argv[1..]) {
+            eprintln!("uwc msg: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(e) = run() {
         // One readable line: this is what someone starting a session from a TTY sees.
         eprintln!("uwc: {e:#}");
@@ -104,9 +117,14 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with(GlLog)
+            .init();
+    }
     let args = parse_args()?;
     let path = config::config_path(args.config.as_deref());
 
@@ -139,6 +157,7 @@ fn run() -> Result<()> {
         BackendKind::Udev => backend::udev::init(&mut state, &handle)?,
     }
     tracing::info!("backend: {}", state.backend.name());
+    state.session_load();
 
     // SIGINT/SIGTERM end the session cleanly (the socket file is removed on drop).
     let signal = event_loop.get_signal();
@@ -180,13 +199,108 @@ fn run() -> Result<()> {
         state.spawn("sh", &["-c".to_string(), cmd.clone()]);
     }
 
+    // The session is written every few seconds when it changed, so a crash loses little.
+    handle
+        .insert_source(Timer::from_duration(Duration::from_secs(5)), |_, _, state| {
+            if let Err(e) = state.session_save(false) {
+                tracing::warn!("saving the session: {e:#}");
+            }
+            TimeoutAction::ToDuration(Duration::from_secs(5))
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     event_loop.run(None, &mut state, |state| {
         state.udev_render();
+        state.sync_scales();
         state.workspace_refresh();
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();
     })?;
+    if let Err(e) = state.session_save(true) {
+        tracing::warn!("saving the session: {e:#}");
+    }
     Ok(())
+}
+
+/// `uwc msg`: send one command to the running compositor and print the reply (one JSON line; `-p`
+/// pretty). `subscribe` keeps printing. An error reply goes to stderr with exit status 1.
+fn msg(args: &[String]) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let (pretty, args) = match args.first().map(String::as_str) {
+        Some("-p" | "--pretty") => (true, &args[1..]),
+        _ => (false, args),
+    };
+    if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
+        println!("usage: uwc msg [-p] COMMAND...\n\ncommands:");
+        for (c, what) in protocol::COMMANDS {
+            println!("  {c:<36} {what}");
+        }
+        return Ok(());
+    }
+    let line = args.join(" ");
+    // Check it here so a typo is reported without a round trip.
+    let req = protocol::Request::parse(&line).map_err(|e| anyhow::anyhow!(e))?;
+    let path = match std::env::var_os("UWC_SOCKET") {
+        Some(p) => PathBuf::from(p),
+        None => {
+            // The newest uwc socket in the runtime dir.
+            let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+            std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with("uwc-") && n.ends_with(".sock")
+                })
+                .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+                .map(|e| e.path())
+                .context("no running uwc found (UWC_SOCKET is not set and there is no uwc-*.sock)")?
+        }
+    };
+    let mut s = std::os::unix::net::UnixStream::connect(&path).with_context(|| format!("{}", path.display()))?;
+    writeln!(s, "{line}")?;
+    let mut lines = BufReader::new(s).lines();
+    loop {
+        let Some(l) = lines.next() else { bail!("uwc closed the connection") };
+        let v: serde_json::Value = serde_json::from_str(&l?)?;
+        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+            bail!("{e}");
+        }
+        let out = if pretty { serde_json::to_string_pretty(&v)? } else { v.to_string() };
+        let mut stdout = std::io::stdout().lock();
+        // A closed pipe (`uwc msg subscribe | head`) ends quietly.
+        if writeln!(stdout, "{out}").and_then(|_| stdout.flush()).is_err() {
+            return Ok(());
+        }
+        if req != protocol::Request::Subscribe {
+            return Ok(());
+        }
+    }
+}
+
+/// Keeps the last `[GL]` compiler message smithay logs (see `deco::GL_LOG`).
+struct GlLog;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GlLog {
+    fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(Option<String>);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                if f.name() == "message" {
+                    self.0 = Some(format!("{v:?}"));
+                }
+            }
+        }
+        if !e.metadata().target().starts_with("smithay::backend::renderer::gles") {
+            return;
+        }
+        let mut m = Message(None);
+        e.record(&mut m);
+        if let Some(msg) = m.0.filter(|m| m.starts_with("[GL]")) {
+            if let Ok(mut log) = deco::GL_LOG.lock() {
+                *log = Some(msg.trim_start_matches("[GL]").trim().to_string());
+            }
+        }
+    }
 }
 
 /// Modification times of the config files; a change means reload.

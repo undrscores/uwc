@@ -86,6 +86,9 @@ pub enum Action {
     TogglePin,
     MinimizeWindow,
     RestoreWindow,
+    /// Multiply the focused window's own scale.
+    ScaleWindow(f64),
+    ScaleWindowReset,
     /// 0-based slot.
     BookmarkSave(usize),
     BookmarkGoto(usize),
@@ -208,6 +211,11 @@ pub struct Config {
     pub pan_step: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
+    /// Zoom is told to clients only after it stayed put this long.
+    pub zoom_settle_ms: f64,
+    /// Bounds of the zoom factor clients are asked to render for.
+    pub zoom_render_scale_min: f64,
+    pub zoom_render_scale_max: f64,
     pub new_window_offset: i32,
     /// xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
     pub cursor_theme: String,
@@ -218,6 +226,12 @@ pub struct Config {
     pub direct_scanout: bool,
     /// Real session only: offer linux-drm-syncobj-v1 when the GPU supports it.
     pub explicit_sync: bool,
+    /// A GLSL file drawing the background behind everything ("" = root-color).
+    pub background_shader: String,
+    /// Remember the canvas (views, window layouts) across restarts.
+    pub session_restore: bool,
+    /// Where relative paths in the config (shaders) are resolved from.
+    pub dir: PathBuf,
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
     pub keyboard: Keyboard,
@@ -305,12 +319,18 @@ impl Config {
             pan_step: 200.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
+            zoom_settle_ms: 200.0,
+            zoom_render_scale_min: 1.0,
+            zoom_render_scale_max: 3.0,
             new_window_offset: 32,
             cursor_theme: String::new(),
             cursor_size: 24,
             hardware_cursor: true,
             direct_scanout: true,
             explicit_sync: true,
+            background_shader: String::new(),
+            session_restore: true,
+            dir: path.and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
             keys: Vec::new(),
             mouse: Vec::new(),
             keyboard: Keyboard::default(),
@@ -353,6 +373,19 @@ impl Config {
                 other => bail!("unknown section `{other}` (line {})", n.line),
             }
         }
+        // Shader files are watched like includes: saving one reloads the config, which recompiles it.
+        let mut shaders: Vec<String> = vec![cfg.background_shader.clone(), cfg.deco.border_shader.clone()];
+        for n in nodes.iter().filter(|n| n.name == "rule") {
+            shaders.extend(
+                n.kids.iter().filter(|k| k.name == "border-shader").filter_map(|k| k.arg_str(0).map(str::to_string)),
+            );
+        }
+        for s in shaders.into_iter().filter(|s| !s.is_empty()) {
+            let p = resolve(&s, &cfg.dir);
+            if !cfg.files.contains(&p) {
+                cfg.files.push(p);
+            }
+        }
         for n in nodes.iter().filter(|n| n.name == "binds") {
             for b in &n.kids {
                 cfg.add_bind(b).with_context(|| format!("bind `{}` (line {})", b.name, b.line))?;
@@ -362,43 +395,11 @@ impl Config {
     }
 
     fn set_option(&mut self, n: &Node, vars: &HashMap<String, String>) -> Result<()> {
-        let name = n.name.as_str();
-        if self.deco.set(n, vars)? {
+        use crate::options::{set, DECO, GLOBAL};
+        if set(DECO, &mut self.deco, n, vars)? || set(GLOBAL, self, n, vars)? {
             return Ok(());
         }
-        let v = n.args.first().ok_or_else(|| anyhow!("missing value"))?;
-        let boolean = || v.as_bool().ok_or_else(|| anyhow!("expected true or false"));
-        let num = || v.as_num().ok_or_else(|| anyhow!("expected a number"));
-        let col = || match v {
-            Val::Str(s) => parse_color(s, vars),
-            _ => Err(anyhow!("expected a color string")),
-        };
-        match name {
-            "mod-key" => {
-                self.mod_key = match v.as_str().unwrap_or("") {
-                    "Super" | "Logo" => ModKey::Super,
-                    "Alt" => ModKey::Alt,
-                    "Ctrl" | "Control" => ModKey::Ctrl,
-                    "Shift" => ModKey::Shift,
-                    s => bail!("unknown mod-key `{s}` (Super, Alt, Ctrl or Shift)"),
-                }
-            }
-            "sloppy-focus" => self.sloppy_focus = boolean()?,
-            "warp-cursor" => self.warp_cursor = boolean()?,
-            "root-color" => self.root_color = col()?,
-            "fullscreen-bg" => self.fullscreen_bg = col()?,
-            "pan-step" => self.pan_step = range(num()?, 1.0, 10000.0)?,
-            "move-step" => self.move_step = range(num()?, 1.0, 10000.0)?,
-            "zoom-scroll" => self.zoom_scroll = range(num()?, 1.01, 3.0)?,
-            "new-window-offset" => self.new_window_offset = range(num()?, 0.0, 500.0)? as i32,
-            "cursor-theme" => self.cursor_theme = v.as_str().ok_or_else(|| anyhow!("expected a theme name"))?.into(),
-            "cursor-size" => self.cursor_size = range(num()?, 8.0, 256.0)? as u32,
-            "hardware-cursor" => self.hardware_cursor = boolean()?,
-            "direct-scanout" => self.direct_scanout = boolean()?,
-            "explicit-sync" => self.explicit_sync = boolean()?,
-            other => bail!("unknown option `{other}`"),
-        }
-        Ok(())
+        bail!("unknown option `{}`", n.name)
     }
 
     /// IPC `set`: one line of the `options` block (`focus-color "#ff8800"`), applied to a copy so a
@@ -601,6 +602,17 @@ fn parse_monitor(n: &Node) -> Result<MonitorConfig> {
     Ok(m)
 }
 
+/// A path from the config: "~/" is the home directory, a relative one is next to the config file.
+pub fn resolve(file: &str, dir: &Path) -> PathBuf {
+    if let Some(rest) = file.strip_prefix("~/") {
+        Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(rest)
+    } else if Path::new(file).is_absolute() {
+        file.into()
+    } else {
+        dir.join(file)
+    }
+}
+
 fn expand_includes(doc: &mut Vec<Node>, dir: &Path, files: &mut Vec<PathBuf>, depth: &mut u32) -> Result<()> {
     *depth += 1;
     if *depth > 8 {
@@ -613,13 +625,7 @@ fn expand_includes(doc: &mut Vec<Node>, dir: &Path, files: &mut Vec<PathBuf>, de
             continue;
         }
         let file = n.arg_str(0).ok_or_else(|| anyhow!("include needs a file name (line {})", n.line))?;
-        let path = if let Some(rest) = file.strip_prefix("~/") {
-            Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(rest)
-        } else if Path::new(file).is_absolute() {
-            file.into()
-        } else {
-            dir.join(file)
-        };
+        let path = resolve(file, dir);
         let text = std::fs::read_to_string(&path).with_context(|| format!("include {}", path.display()))?;
         let mut inc = kdl::parse(&text).map_err(|e| anyhow!("{}: {e}", path.display()))?;
         files.push(path.clone());
@@ -727,6 +733,11 @@ fn parse_action(n: &Node) -> Result<Action> {
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,
         "restore-window" => Action::RestoreWindow,
+        "scale-window" => {
+            let f = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("scale-window needs a factor"))?;
+            Action::ScaleWindow(range(f, 0.1, 10.0)?)
+        }
+        "scale-window-reset" => Action::ScaleWindowReset,
         "bookmark-save" | "bookmark-goto" => {
             let b = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("needs a bookmark number 1 to 9"))?;
             if b.fract() != 0.0 || !(1.0..=9.0).contains(&b) {
@@ -847,7 +858,7 @@ mod tests {
         );
         let g = c.deco.focus_gradient.as_ref().unwrap();
         assert_eq!((g.colors.len(), g.angle), (2, 45.0));
-        assert_eq!(c.deco.focus_shadow_size, -1.0, "any negative size means 'same as shadow-size'");
+        assert_eq!(c.deco.focus_shadow_size, None, "any negative size means 'same as shadow-size'");
         // An empty gradient turns it off.
         let c2 = Config::parse("options { focus-gradient }", Some(Path::new("/x/c.kdl"))).unwrap();
         assert!(c2.deco.focus_gradient.is_none());

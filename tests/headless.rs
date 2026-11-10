@@ -20,6 +20,7 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1 as ws_group, ext_workspace_handle_v1 as ws_handle,
     ext_workspace_manager_v1 as ws_manager,
 };
+use wayland_protocols::wp::fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
@@ -36,9 +37,20 @@ struct Uwc {
 impl Uwc {
     fn start(name: &str, config: Option<&str>) -> Uwc {
         let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
+        Uwc::start_with_state(name, config, &dir.join("state"))
+    }
+
+    /// With the session file under `state` (it outlives this compositor).
+    fn start_with_state(name: &str, config: Option<&str>, state: &std::path::Path) -> Uwc {
+        let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uwc"));
-        cmd.arg("--headless").arg("1000x600").env("XDG_RUNTIME_DIR", &dir).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.arg("--headless")
+            .arg("1000x600")
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("XDG_STATE_HOME", state)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         if let Some(c) = config {
             let f = dir.join("config.kdl");
             std::fs::write(&f, c).unwrap();
@@ -145,6 +157,9 @@ struct App {
     ws_info: std::collections::HashMap<wayland_client::backend::ObjectId, WsInfo>,
     ws_done: usize,
     ws_group_outputs: usize,
+    /// The last fractional preferred scale (in 1/120) and integer preferred buffer scale told.
+    frac: Option<u32>,
+    buffer_scale: Option<i32>,
     closed: Vec<String>,
     /// The size the compositor last asked a toplevel for.
     asked: Option<(i32, i32)>,
@@ -196,6 +211,8 @@ impl Client {
             ws_info: Default::default(),
             ws_done: 0,
             ws_group_outputs: 0,
+            frac: None,
+            buffer_scale: None,
             closed: vec![],
             asked: None,
             layer_size: None,
@@ -453,7 +470,38 @@ impl Dispatch<ws_handle::ExtWorkspaceHandleV1, ()> for App {
         }
     }
 }
-noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_surface::WlSurface);
+noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer);
+noop!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+
+impl Dispatch<wl_surface::WlSurface, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wl_surface::WlSurface,
+        e: wl_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_surface::Event::PreferredBufferScale { factor } = e {
+            app.buffer_scale = Some(factor);
+        }
+    }
+}
+
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wp_fractional_scale_v1::WpFractionalScaleV1,
+        e: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = e {
+            app.frac = Some(scale);
+        }
+    }
+}
 
 // ---- tests ---------------------------------------------------------------------------------
 
@@ -1018,4 +1066,216 @@ fn bookmarks_remember_views_per_tag() {
     for bad in ["bookmark goto 0", "bookmark goto 10", "bookmark jump 1", "bookmark save"] {
         assert!(uwc.cmd(bad).get("error").is_some(), "should refuse: {bad}");
     }
+}
+
+#[test]
+fn uwc_msg_talks_to_the_compositor() {
+    let mut uwc = Uwc::start("msg", None);
+    let sock = uwc.dir.join(format!("uwc-{}.sock", uwc.display));
+    let msg = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_uwc")).arg("msg").args(args).env("UWC_SOCKET", &sock).output().unwrap()
+    };
+    let out = msg(&["state"]);
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["event"], "state");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 1, "one JSON line");
+
+    // Arguments are joined into the command line; a shell-unquoted color is a bare KDL string.
+    assert!(msg(&["set", "focus-color", "#ff0000"]).status.success());
+    assert_eq!(uwc.cmd("get focus-color")["value"], "#ff0000ff");
+    assert!(msg(&["rule", "{ match app-id=\"mpv\"; opacity 0.9 }"]).status.success());
+    assert_eq!(uwc.cmd("rules")["ipc"], 1);
+
+    // Errors: caught locally before connecting, or reported by the compositor; both exit 1.
+    let bad = msg(&["pan", "x"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("not a number"));
+    let bad = msg(&["focus", "999"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("no window 999"));
+
+    let pretty = msg(&["-p", "get", "corner-radius"]);
+    assert!(String::from_utf8_lossy(&pretty.stdout).lines().count() > 1);
+    let help = msg(&["--help"]);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("bookmark save N"));
+
+    // subscribe streams: the first snapshot arrives, then one per change.
+    let mut sub = Command::new(env!("CARGO_BIN_EXE_uwc"))
+        .args(["msg", "subscribe"])
+        .env("UWC_SOCKET", &sock)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(sub.stdout.take().unwrap()).lines();
+    let first: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(first["event"], "state");
+    uwc.ok("pan 7 0");
+    let next: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(next["monitors"][0]["viewport"]["x"], 7);
+    let _ = sub.kill();
+    let _ = sub.wait();
+}
+
+#[test]
+fn zoomed_windows_are_asked_to_render_sharper() {
+    let mut uwc = Uwc::start("sharp-zoom", Some("options { zoom-settle-ms 60 }"));
+    let mut c = uwc.connect();
+    let w = c.window("A", 300, 200);
+    uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let qh = c.queue.handle();
+    let mgr: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let _fs = mgr.get_fractional_scale(&w.surface, &qh, ());
+    c.sync();
+    assert_eq!(c.app.frac, Some(120), "scale 1 at zoom 1");
+
+    let settle = |c: &mut Client| {
+        std::thread::sleep(Duration::from_millis(150));
+        c.sync();
+    };
+    uwc.ok("zoom 2");
+    c.sync();
+    assert_eq!(c.app.frac, Some(120), "not while the zoom may still be moving");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(240), "2x once it settled");
+    assert_eq!(c.app.buffer_scale, Some(2), "and the integer preferred buffer scale for older clients");
+
+    uwc.ok("zoom 8");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(360), "capped at zoom-render-scale-max 3");
+    uwc.ok("zoom 0.5");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(120), "zoomed out: no lower than zoom-render-scale-min 1");
+    uwc.ok("set zoom-render-scale-min 0.5");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(60), "unless that allows it");
+
+    // A pinned window is not zoomed, so it renders at the output scale.
+    let id = win(&uwc.state(), "A")["id"].as_u64().unwrap();
+    uwc.ok(&format!("pin {id}"));
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(120));
+}
+
+#[test]
+fn windows_have_their_own_scale_on_the_canvas() {
+    let mut uwc = Uwc::start(
+        "window-scale",
+        Some("options { zoom-settle-ms 40 }\nrule { match title=\"Small\"; open { scale 0.5 } }"),
+    );
+    let mut c = uwc.connect();
+    let w = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A").clone();
+    let id = a["id"].as_u64().unwrap();
+    assert_eq!((num(&a["x"]), num(&a["y"]), num(&a["scale"])), (350.0, 200.0, 1.0));
+
+    // Half size around its centre (500, 300): the footprint is 150x100 at (425, 250).
+    uwc.ok(&format!("window-scale {id} 0.5"));
+    let a = win(&uwc.state(), "A").clone();
+    assert_eq!((num(&a["x"]), num(&a["y"]), num(&a["scale"])), (425.0, 250.0, 0.5));
+    assert_eq!((num(&a["width"]), num(&a["height"])), (300.0, 200.0), "the client keeps its size");
+
+    // It renders for the scale it is shown at: view zoom x its own scale.
+    let qh = c.queue.handle();
+    let mgr: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let _fs = mgr.get_fractional_scale(&w.surface, &qh, ());
+    uwc.ok("zoom 4");
+    std::thread::sleep(Duration::from_millis(120));
+    c.sync();
+    assert_eq!(c.app.frac, Some(240), "zoom 4 x scale 0.5 = 2");
+
+    for bad in [format!("window-scale {id} 9"), format!("window-scale {id} 0"), "window-scale 999 1".to_string()] {
+        assert!(uwc.cmd(&bad).get("error").is_some(), "should refuse: {bad}");
+    }
+    uwc.ok(&format!("fullscreen {id}"));
+    assert!(uwc.cmd(&format!("window-scale {id} 1")).get("error").is_some(), "not while fullscreen");
+
+    let _small = c.window("Small", 200, 100);
+    let s = uwc.wait("Small", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(num(&win(&s, "Small")["scale"]), 0.5, "open {{ scale }} from a rule");
+}
+
+#[test]
+fn saving_a_shader_file_reloads_it() {
+    let mut uwc = Uwc::start("shader-watch", Some("options { background-shader \"bg.glsl\" }"));
+    // Relative paths are next to the config file.
+    std::fs::write(
+        uwc.dir.join("bg.glsl"),
+        "vec4 background(vec2 p, vec2 s, float t, vec2 v, float z) { return vec4(1.0); }\n",
+    )
+    .unwrap();
+    uwc.ok("reload");
+    let rev = num(&uwc.state()["config_rev"]);
+    std::thread::sleep(Duration::from_millis(1100)); // the mtime has 1 s resolution on some filesystems
+    std::fs::write(
+        uwc.dir.join("bg.glsl"),
+        "vec4 background(vec2 p, vec2 s, float t, vec2 v, float z) { return vec4(0.5); }\n",
+    )
+    .unwrap();
+    uwc.wait("reload after the shader changed", |s| num(&s["config_rev"]) > rev);
+    assert_eq!(uwc.cmd("get background-shader")["value"], "bg.glsl");
+}
+
+#[test]
+fn the_canvas_comes_back_after_a_restart() {
+    let state = std::env::temp_dir().join(format!("uwc-test-{}-session-state", std::process::id()));
+    let file = state.join("uwc/session.json");
+    let where_a;
+    {
+        let mut uwc = Uwc::start_with_state("session1", None, &state);
+        let mut c = uwc.connect();
+        let _a = c.window("A", 300, 200);
+        let _b = c.window("B", 200, 100);
+        let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+        let (a, b) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "B")["id"].as_u64().unwrap());
+        uwc.ok(&format!("move {a} 1234 567"));
+        uwc.ok(&format!("window-scale {a} 0.75"));
+        // Scaling keeps the centre, so the corner moved: remember where it is now.
+        let s = uwc.state();
+        where_a = (num(&win(&s, "A")["x"]), num(&win(&s, "A")["y"]));
+        uwc.ok(&format!("pin {b}"));
+        uwc.ok("panto 40 50");
+        uwc.ok("bookmark save 2");
+        uwc.ok("view 3");
+        uwc.ok("panto 500 -200");
+        uwc.ok("session save");
+        assert!(file.exists());
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved["windows"].as_array().unwrap().len(), 2);
+        uwc.ok("quit");
+        let start = Instant::now();
+        while uwc.child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let mut uwc = Uwc::start_with_state("session2", None, &state);
+    let s = uwc.state();
+    let m = &s["monitors"][0];
+    assert_eq!(m["tags"][2]["active"], true, "the tags in view come back");
+    assert_eq!((num(&m["viewport"]["x"]), num(&m["viewport"]["y"])), (500.0, -200.0), "and their views");
+    assert_eq!(m["tags"][0]["bookmarks"][0]["n"], 2, "and the bookmarks");
+
+    let mut c = uwc.connect();
+    let _a = c.window("A", 640, 480);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A");
+    assert_eq!((num(&a["x"]), num(&a["y"]), num(&a["scale"])), (where_a.0, where_a.1, 0.75), "where it was, its scale");
+    assert_eq!((num(&a["width"]), num(&a["height"])), (300.0, 200.0), "its size, in the first configure");
+    assert_eq!(a["tags"], 1);
+    let _b = c.window("B", 200, 100);
+    let s = uwc.wait("B", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(win(&s, "B")["pinned"], true);
+    // Nothing remembered for this one: it opens as usual.
+    let _c2 = c.window("C", 100, 100);
+    let s = uwc.wait("C", |s| s["windows"].as_array().unwrap().len() == 3);
+    assert_eq!(win(&s, "C")["tags"], 4, "on the tag in view");
+
+    uwc.ok("session forget");
+    assert!(!file.exists());
+    assert!(uwc.cmd("session").get("error").is_some());
+    drop(uwc);
+    let _ = std::fs::remove_dir_all(&state);
 }
