@@ -5,6 +5,8 @@
 //!     cargo run --example paint -- --bar 32 30a0d0     # a layer-shell bar along the top edge
 //!     cargo run --example paint -- --stripes "title" 300 200   # 1 px stripes, re-rendered at the
 //!                                                     # fractional scale it is told (a HiDPI client)
+//!     cargo run --example paint -- --popup                 # a window with a grabbed popup (a menu);
+//!                                                     # prints "popup done" and exits when it is dismissed
 
 use std::{io::Write, os::fd::AsFd};
 
@@ -13,7 +15,7 @@ use wayland_client::{
     protocol::{wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, QueueHandle,
 };
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::shell::client::{xdg_popup, xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 struct App {
@@ -37,6 +39,9 @@ fn main() {
             a.get(2).and_then(|s| s.parse().ok()).unwrap_or(32),
             a.get(3).map(String::as_str).unwrap_or("30a0d0"),
         );
+    }
+    if a.get(1).map(String::as_str) == Some("--popup") {
+        return popup();
     }
     let title = a.get(1).cloned().unwrap_or_else(|| "paint".into());
     let w: i32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(400);
@@ -130,6 +135,59 @@ fn stripes(title: String, w: i32, h: i32) {
             surface.commit();
             keep.push((pool, buf));
         }
+        queue.blocking_dispatch(&mut app).unwrap();
+    }
+}
+
+/// A window with a grabbed popup: what a menu is. When the compositor dismisses the popup (a click
+/// outside it), it prints "popup done" and exits, so a script can check the grab works.
+fn popup() {
+    use wayland_client::protocol::wl_seat;
+    use wayland_protocols::xdg::shell::client::xdg_positioner;
+
+    let conn = Connection::connect_to_env().expect("WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).unwrap();
+    let qh = queue.handle();
+    let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 4..=6, ()).unwrap();
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
+    let wm: xdg_wm_base::XdgWmBase = globals.bind(&qh, 1..=6, ()).unwrap();
+    let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=7, ()).unwrap();
+    let mut app = App { quit: false, layer_size: None, new_scale: None };
+
+    let surface = compositor.create_surface(&qh, ());
+    let xdg = wm.get_xdg_surface(&surface, &qh, ());
+    let toplevel = xdg.get_toplevel(&qh, ());
+    toplevel.set_title("P".into());
+    toplevel.set_app_id("uwc.paint".into());
+    surface.commit();
+    queue.roundtrip(&mut app).unwrap();
+    let (w, h) = (200, 150);
+    let mut f = tempfile_in_runtime();
+    f.write_all(&vec![0x33u8; (w * h * 4) as usize]).unwrap();
+    let pool = shm.create_pool(f.as_fd(), w * h * 4, &qh, ());
+    let buf = pool.create_buffer(0, w, h, w * 4, wl_shm::Format::Argb8888, &qh, ());
+    surface.attach(Some(&buf), 0, 0);
+    surface.commit();
+    queue.roundtrip(&mut app).unwrap();
+
+    // The menu: a grabbed popup at the window's top-left.
+    let pos = wm.create_positioner(&qh, ());
+    pos.set_size(100, 50);
+    pos.set_gravity(xdg_positioner::Gravity::BottomRight);
+    let psurface = compositor.create_surface(&qh, ());
+    let pxdg = wm.get_xdg_surface(&psurface, &qh, ());
+    let popup = pxdg.get_popup(Some(&xdg), &pos, &qh, ());
+    popup.grab(&seat, 1);
+    psurface.commit();
+    queue.roundtrip(&mut app).unwrap();
+    let (pw, ph) = (100, 50);
+    let mut f = tempfile_in_runtime();
+    f.write_all(&vec![0xd0u8; (pw * ph * 4) as usize]).unwrap();
+    let pool = shm.create_pool(f.as_fd(), pw * ph * 4, &qh, ());
+    let pbuf = pool.create_buffer(0, pw, ph, pw * 4, wl_shm::Format::Argb8888, &qh, ());
+    psurface.attach(Some(&pbuf), 0, 0);
+    psurface.commit();
+    while !app.quit {
         queue.blocking_dispatch(&mut app).unwrap();
     }
 }
@@ -235,6 +293,22 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for App {
         }
     }
 }
+impl Dispatch<xdg_popup::XdgPopup, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &xdg_popup::XdgPopup,
+        e: xdg_popup::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_popup::Event::PopupDone = e {
+            println!("popup done");
+            std::io::stdout().flush().unwrap();
+            app.quit = true;
+        }
+    }
+}
 impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
     fn event(
         app: &mut Self,
@@ -281,6 +355,8 @@ macro_rules! noop {
     )*};
 }
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
+noop!(wayland_client::protocol::wl_seat::WlSeat);
+noop!(wayland_protocols::xdg::shell::client::xdg_positioner::XdgPositioner);
 noop!(wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 noop!(wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter);
 noop!(wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport);

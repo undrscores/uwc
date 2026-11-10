@@ -16,12 +16,20 @@ use wayland_client::{
     protocol::{wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
+use wayland_protocols::ext::idle_notify::v1::client::{ext_idle_notification_v1, ext_idle_notifier_v1};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1 as ws_group, ext_workspace_handle_v1 as ws_handle,
     ext_workspace_manager_v1 as ws_manager,
 };
-use wayland_protocols::wp::fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+    idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
+};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::{
+    activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1},
+    shell::client::{xdg_popup, xdg_positioner},
+};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1 as tl_handle, zwlr_foreign_toplevel_manager_v1 as tl_manager,
 };
@@ -197,6 +205,13 @@ struct App {
     asked: Option<(i32, i32)>,
     /// The size the last layer-surface configure gave.
     layer_size: Option<(u32, u32)>,
+    /// The activation token string the last token request produced.
+    token: Option<String>,
+    /// Which idle notifications fired (their labels), and which resumed after.
+    idle_fired: Vec<u32>,
+    idle_resumed: Vec<u32>,
+    /// popup_done arrived for the grabbed popup.
+    popup_done: bool,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -264,6 +279,10 @@ impl Client {
             closed: vec![],
             asked: None,
             layer_size: None,
+            token: None,
+            idle_fired: vec![],
+            idle_resumed: vec![],
+            popup_done: false,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -355,6 +374,81 @@ impl Client {
         let o = self.globals.bind(&qh, 1..=4, ()).expect("wl_output");
         self.sync();
         o
+    }
+
+    fn bind_seat(&mut self) -> wayland_client::protocol::wl_seat::WlSeat {
+        let qh = self.queue.handle();
+        let s = self.globals.bind(&qh, 1..=7, ()).expect("wl_seat");
+        self.sync();
+        s
+    }
+
+    /// xdg-activation, the way a launcher binds it.
+    fn activation(&mut self) -> xdg_activation_v1::XdgActivationV1 {
+        let qh = self.queue.handle();
+        let a = self.globals.bind(&qh, 1..=1, ()).expect("xdg_activation_v1");
+        self.sync();
+        a
+    }
+
+    /// A fresh activation token (the string a launcher hands to the app it starts).
+    fn get_token(&mut self, act: &xdg_activation_v1::XdgActivationV1) -> String {
+        let qh = self.queue.handle();
+        act.get_activation_token(&qh, ()).commit();
+        self.sync();
+        self.app.token.take().expect("activation token")
+    }
+
+    fn idle_notifier(&mut self) -> ext_idle_notifier_v1::ExtIdleNotifierV1 {
+        let qh = self.queue.handle();
+        let n = self.globals.bind(&qh, 1..=1, ()).expect("ext_idle_notifier_v1");
+        self.sync();
+        n
+    }
+
+    /// An idle notification labelled `label`: `idle_fired` gains it once `timeout_ms` passes without
+    /// input, `idle_resumed` when activity follows.
+    fn idle_notification(
+        &mut self,
+        notifier: &ext_idle_notifier_v1::ExtIdleNotifierV1,
+        seat: &wayland_client::protocol::wl_seat::WlSeat,
+        timeout_ms: u32,
+        label: u32,
+    ) -> ext_idle_notification_v1::ExtIdleNotificationV1 {
+        let qh = self.queue.handle();
+        let n = notifier.get_idle_notification(timeout_ms, seat, &qh, label);
+        self.sync();
+        n
+    }
+
+    fn idle_inhibit_manager(&mut self) -> zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1 {
+        let qh = self.queue.handle();
+        let m = self.globals.bind(&qh, 1..=1, ()).expect("zwp_idle_inhibit_manager_v1");
+        self.sync();
+        m
+    }
+
+    /// A grabbed popup (a menu opened by a click): created, grabbed and committed.
+    fn popup(
+        &mut self,
+        parent: &Window,
+        seat: &wayland_client::protocol::wl_seat::WlSeat,
+        grabbed: bool,
+    ) -> xdg_popup::XdgPopup {
+        let qh = self.queue.handle();
+        let pos = self.app.wm.create_positioner(&qh, ());
+        pos.set_size(120, 60);
+        pos.set_anchor(xdg_positioner::Anchor::TopLeft);
+        pos.set_gravity(xdg_positioner::Gravity::BottomRight);
+        let surface = self.app.compositor.create_surface(&qh, ());
+        let xdg = self.app.wm.get_xdg_surface(&surface, &qh, ());
+        let popup = xdg.get_popup(Some(&parent.xdg), &pos, &qh, ());
+        if grabbed {
+            popup.grab(seat, 1);
+        }
+        surface.commit();
+        self.sync();
+        popup
     }
 
     /// The foreign-toplevel handle titled `title` and what was said about it.
@@ -463,11 +557,60 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
         }
     }
 }
+impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &xdg_activation_token_v1::XdgActivationTokenV1,
+        e: xdg_activation_token_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_activation_token_v1::Event::Done { token } = e {
+            app.token = Some(token);
+        }
+    }
+}
+impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, u32> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_idle_notification_v1::ExtIdleNotificationV1,
+        e: ext_idle_notification_v1::Event,
+        label: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ext_idle_notification_v1::Event::Idled => app.idle_fired.push(*label),
+            ext_idle_notification_v1::Event::Resumed => app.idle_resumed.push(*label),
+            _ => {}
+        }
+    }
+}
+impl Dispatch<xdg_popup::XdgPopup, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &xdg_popup::XdgPopup,
+        e: xdg_popup::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_popup::Event::PopupDone = e {
+            app.popup_done = true;
+        }
+    }
+}
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
 noop!(export_manager::HyprlandToplevelExportManagerV1);
 noop!(sc_manager::ZwlrScreencopyManagerV1);
+noop!(xdg_activation_v1::XdgActivationV1);
+noop!(ext_idle_notifier_v1::ExtIdleNotifierV1);
+noop!(zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1);
+noop!(zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
+noop!(xdg_positioner::XdgPositioner);
 
 impl Dispatch<sc_frame::ZwlrScreencopyFrameV1, ()> for App {
     fn event(
@@ -1641,4 +1784,102 @@ fn screencopy_offers_the_output_and_fails_cleanly_without_a_renderer() {
     c.sync();
     assert_eq!(c.app.export_buffer, Some((0, 300, 200, 1200)));
     drop(uwc);
+}
+
+#[test]
+fn activation_focuses_a_window_and_flags_an_unseen_one_urgent() {
+    let mut uwc = Uwc::start("activate", None);
+    let mut a = uwc.connect();
+    let wa = a.window("A", 300, 200);
+    let mut b = uwc.connect();
+    let _wb = b.window("B", 200, 100);
+    let s = uwc.wait("two windows", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(win(&s, "B")["focused"], true, "the newest window takes focus");
+
+    // B (a launcher) hands A a token; A activates itself with it and takes the focus.
+    let act_b = b.activation();
+    let token = b.get_token(&act_b);
+    let act_a = a.activation();
+    act_a.activate(token, &wa.surface);
+    a.sync();
+    uwc.wait("A focused by the activation", |s| win(s, "A")["focused"] == true);
+
+    // A window on an unseen tag cannot be focused: the request flags it urgent instead, and
+    // focusing it (which reveals it) answers the request.
+    uwc.ok("set tag-ms 0");
+    uwc.ok("view 2");
+    let wc = a.window("C", 100, 100);
+    uwc.ok("view 1");
+    let s = uwc.state();
+    assert_eq!(win(&s, "C")["urgent"], false);
+    let token = b.get_token(&act_b);
+    act_a.activate(token, &wc.surface);
+    a.sync();
+    let s = uwc.wait("C flagged urgent", |s| win(s, "C")["urgent"] == true);
+    let ic = win(&s, "C")["id"].as_u64().unwrap();
+    uwc.ok(&format!("focus {ic}"));
+    let s = uwc.wait("C revealed and focused", |s| win(s, "C")["focused"] == true);
+    assert_eq!(win(&s, "C")["urgent"], false, "focus answers the request");
+}
+
+#[test]
+fn idle_notifications_fire_unless_inhibited() {
+    let mut uwc = Uwc::start("idle", None);
+    let mut c = uwc.connect();
+    let w = c.window("A", 200, 100);
+    uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let seat = c.bind_seat();
+    let notifier = c.idle_notifier();
+
+    // No input happens, so a notification fires once its timeout passes.
+    let _n1 = c.idle_notification(&notifier, &seat, 150, 1);
+    std::thread::sleep(Duration::from_millis(600));
+    c.sync();
+    assert_eq!(c.app.idle_fired, vec![1], "the idle notification fired");
+
+    // While an inhibitor lives (a video player), nothing fires...
+    let manager = c.idle_inhibit_manager();
+    let qh = c.queue.handle();
+    let inhibitor = manager.create_inhibitor(&w.surface, &qh, ());
+    c.sync();
+    let _n2 = c.idle_notification(&notifier, &seat, 150, 2);
+    std::thread::sleep(Duration::from_millis(600));
+    c.sync();
+    assert!(!c.app.idle_fired.contains(&2), "an inhibitor pauses the notifications");
+
+    // ...and when it goes, they fire again.
+    inhibitor.destroy();
+    c.sync();
+    std::thread::sleep(Duration::from_millis(600));
+    c.sync();
+    assert!(c.app.idle_fired.contains(&2), "the notification fires once the inhibitor is gone");
+}
+
+#[test]
+fn popup_grabs_are_taken_and_end_cleanly() {
+    let mut uwc = Uwc::start("grab", None);
+    let mut c = uwc.connect();
+    let w = c.window("A", 300, 200);
+    uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let seat = c.bind_seat();
+
+    // A grabbed popup (a menu): the grab is taken without a protocol error.
+    let popup = c.popup(&w, &seat, true);
+    assert!(!c.app.popup_done);
+    // The window can still be driven over IPC while the grab is held.
+    assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), 1);
+
+    // The client dismissing its own popup ends the grab (popup_done, no error).
+    popup.destroy();
+    w.surface.commit();
+    c.sync();
+    uwc.ok("close 1");
+    c.sync();
+    assert_eq!(c.app.closed.len(), 1, "client is asked to close");
+    w.toplevel.destroy();
+    w.xdg.destroy();
+    w.surface.destroy();
+    c.sync();
+    let s = uwc.wait("the window gone", |s| s["windows"].as_array().unwrap().is_empty());
+    assert_eq!(s["monitors"][0]["animating"], false);
 }

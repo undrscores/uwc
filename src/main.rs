@@ -1,6 +1,7 @@
 //! uwc: a Wayland compositor with an infinite 2D canvas and dwm-style tags, in Rust on smithay.
 //! The successor to uwm (the same ideas, the same config and IPC), see README.md.
 
+mod activation;
 mod backend;
 mod canvas;
 mod capture;
@@ -9,6 +10,7 @@ mod cursor;
 mod deco;
 mod export;
 mod handlers;
+mod idle;
 mod input;
 mod ipc;
 mod kdl;
