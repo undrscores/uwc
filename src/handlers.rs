@@ -139,6 +139,7 @@ impl Uwc {
         let centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
         let c = &mut self.clients[i];
         c.mapped = true;
+        c.scale = open.scale.unwrap_or(1.0);
         c.tags = open.tags.unwrap_or(self.mon.as_ref().map(|m| m.tagset).unwrap_or(1));
         if open.pinned && !c.fullscreen {
             // A pinned window's position is a screen position.

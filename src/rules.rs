@@ -216,6 +216,8 @@ pub struct Open {
     pub minimized: bool,
     /// `focus false`: open without taking the keyboard.
     pub focus: Option<bool>,
+    /// The window's own scale on the canvas.
+    pub scale: Option<f64>,
 }
 
 impl Open {
@@ -228,6 +230,7 @@ impl Open {
         self.fullscreen |= o.fullscreen;
         self.minimized |= o.minimized;
         self.focus = o.focus.or(self.focus);
+        self.scale = o.scale.or(self.scale);
     }
 
     fn parse(n: &Node) -> Result<Open> {
@@ -269,8 +272,12 @@ impl Open {
                 "fullscreen" => o.fullscreen = flag()?,
                 "minimized" => o.minimized = flag()?,
                 "focus" => o.focus = Some(flag()?),
+                "scale" => {
+                    let [s] = nums()?[..] else { bail!("scale needs one number") };
+                    o.scale = Some(range(s, 0.1, 4.0)?);
+                }
                 other => {
-                    bail!("unknown open setting `{other}` (tag, size, position, pinned, fullscreen, minimized, focus)")
+                    bail!("unknown open setting `{other}` (tag, size, position, pinned, fullscreen, minimized, focus, scale)")
                 }
             }
         }

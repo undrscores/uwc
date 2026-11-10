@@ -69,6 +69,14 @@ row = [Image.open(SP+"/scen.png").convert("L").getpixel((x, 300)) for x in range
 flips = sum(1 for a, b in zip(row, row[1:]) if (a < 128) != (b < 128))
 check("zoomed 2x stripes stay 1 px (sharp)", flips >= 35, True)
 cmd("zoom 1 0 0")
+# Per-window scale: S (canvas 50,50 300x200) at half size around its centre (200,150) covers
+# 125..275 x 100..200 on screen, and the pointer hits it there and only there.
+cmd(f"window-scale {S} 0.5"); time.sleep(0.4)
+check("scaled window drawn inside its footprint", color(px(200,150)) != "root", True)
+check("and not beyond it", color(px(290,190)), "root")
+cur, kf = move(260,190); check("hover the scaled window", kf, {"window": S})
+cur, kf = move(290,190); check("just outside it keeps focus", kf, {"window": S})
+cmd(f"focus {B}"); cur, kf = move(290,190); check("outside the footprint does not focus it", kf, {"window": B})
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

@@ -31,6 +31,7 @@ pub enum Request {
     Pin(u32, bool),
     Minimize(u32, bool),
     Fullscreen(u32, bool),
+    WindowScale(u32, f64),
     Bookmark {
         save: bool,
         n: usize,
@@ -59,6 +60,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("pin ID | unpin ID", "keep a window on screen while the view moves"),
     ("minimize ID | restore ID", "hide a window / bring it back where you are"),
     ("fullscreen ID | unfullscreen ID", ""),
+    ("window-scale ID S", "a window's own scale on the canvas (0.1-4), around its centre"),
     ("bookmark save N | bookmark goto N", "remember / return to a view of the tag in use (1-9)"),
     ("overview | home", "fit all windows / back to the origin at zoom 1"),
     ("reload | quit", ""),
@@ -135,6 +137,13 @@ impl Request {
             "pin" | "unpin" => Request::Pin(id(0)?, cmd == "pin"),
             "minimize" | "restore" => Request::Minimize(id(0)?, cmd == "minimize"),
             "fullscreen" | "unfullscreen" => Request::Fullscreen(id(0)?, cmd == "fullscreen"),
+            "window-scale" => {
+                let s = num(1)?;
+                if !(0.1..=4.0).contains(&s) {
+                    return Err("a window scale is 0.1 to 4".into());
+                }
+                Request::WindowScale(id(0)?, s)
+            }
             "bookmark" => {
                 let save = match args.first().copied() {
                     Some("save") => true,
@@ -356,6 +365,7 @@ mod tests {
             "restore",
             "fullscreen",
             "unfullscreen",
+            "window-scale",
             "bookmark",
             "overview",
             "home",

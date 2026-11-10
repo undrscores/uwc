@@ -86,6 +86,9 @@ pub enum Action {
     TogglePin,
     MinimizeWindow,
     RestoreWindow,
+    /// Multiply the focused window's own scale.
+    ScaleWindow(f64),
+    ScaleWindowReset,
     /// 0-based slot.
     BookmarkSave(usize),
     BookmarkGoto(usize),
@@ -703,6 +706,11 @@ fn parse_action(n: &Node) -> Result<Action> {
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,
         "restore-window" => Action::RestoreWindow,
+        "scale-window" => {
+            let f = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("scale-window needs a factor"))?;
+            Action::ScaleWindow(range(f, 0.1, 10.0)?)
+        }
+        "scale-window-reset" => Action::ScaleWindowReset,
         "bookmark-save" | "bookmark-goto" => {
             let b = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("needs a bookmark number 1 to 9"))?;
             if b.fract() != 0.0 || !(1.0..=9.0).contains(&b) {

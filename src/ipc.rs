@@ -218,15 +218,16 @@ impl Uwc {
                     floating: true,
                     fullscreen: c.fullscreen,
                     urgent: c.urgent,
+                    // The client's own size (what `resize` sets); the footprint is that times `scale`.
                     rect: P::Rect {
                         x: r.loc.x.round() as i64,
                         y: r.loc.y.round() as i64,
-                        width: r.size.w as i64,
-                        height: r.size.h as i64,
+                        width: c.size().w as i64,
+                        height: c.size().h as i64,
                     },
                     pinned: c.pin.is_some(),
                     minimized: c.minimized != 0,
-                    scale: 1.0,
+                    scale: c.scale,
                 }
             })
             .collect();
@@ -378,6 +379,13 @@ impl Uwc {
             R::Fullscreen(w, on) => {
                 window(self, w)?;
                 self.set_fullscreen(w, on);
+            }
+            R::WindowScale(w, s) => {
+                let i = window(self, w)?;
+                if self.clients[i].fullscreen {
+                    return Err("a fullscreen window has no scale of its own".into());
+                }
+                self.set_window_scale(w, s, None);
             }
             R::Overview => self.toggle_overview(),
             R::Home => self.with_viewport(|v, _| *v = Default::default()),

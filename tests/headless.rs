@@ -1145,3 +1145,42 @@ fn zoomed_windows_are_asked_to_render_sharper() {
     settle(&mut c);
     assert_eq!(c.app.frac, Some(120));
 }
+
+#[test]
+fn windows_have_their_own_scale_on_the_canvas() {
+    let mut uwc = Uwc::start(
+        "window-scale",
+        Some("options { zoom-settle-ms 40 }\nrule { match title=\"Small\"; open { scale 0.5 } }"),
+    );
+    let mut c = uwc.connect();
+    let w = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A").clone();
+    let id = a["id"].as_u64().unwrap();
+    assert_eq!((num(&a["x"]), num(&a["y"]), num(&a["scale"])), (350.0, 200.0, 1.0));
+
+    // Half size around its centre (500, 300): the footprint is 150x100 at (425, 250).
+    uwc.ok(&format!("window-scale {id} 0.5"));
+    let a = win(&uwc.state(), "A").clone();
+    assert_eq!((num(&a["x"]), num(&a["y"]), num(&a["scale"])), (425.0, 250.0, 0.5));
+    assert_eq!((num(&a["width"]), num(&a["height"])), (300.0, 200.0), "the client keeps its size");
+
+    // It renders for the scale it is shown at: view zoom x its own scale.
+    let qh = c.queue.handle();
+    let mgr: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let _fs = mgr.get_fractional_scale(&w.surface, &qh, ());
+    uwc.ok("zoom 4");
+    std::thread::sleep(Duration::from_millis(120));
+    c.sync();
+    assert_eq!(c.app.frac, Some(240), "zoom 4 x scale 0.5 = 2");
+
+    for bad in [format!("window-scale {id} 9"), format!("window-scale {id} 0"), "window-scale 999 1".to_string()] {
+        assert!(uwc.cmd(&bad).get("error").is_some(), "should refuse: {bad}");
+    }
+    uwc.ok(&format!("fullscreen {id}"));
+    assert!(uwc.cmd(&format!("window-scale {id} 1")).get("error").is_some(), "not while fullscreen");
+
+    let _small = c.window("Small", 200, 100);
+    let s = uwc.wait("Small", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(num(&win(&s, "Small")["scale"]), 0.5, "open {{ scale }} from a rule");
+}

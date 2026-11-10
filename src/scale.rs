@@ -48,7 +48,13 @@ impl Uwc {
     /// protocol's 1/120 steps.
     pub fn render_scale(&self, c: &Client) -> f64 {
         let o = &self.config;
-        let zoom = if self.place(c).on_canvas { self.settled_zoom * c.scale } else { 1.0 };
+        let zoom = if c.fullscreen {
+            1.0
+        } else if c.pin.is_some() {
+            c.scale
+        } else {
+            self.settled_zoom * c.scale
+        };
         let s = self.output_scale() * zoom.clamp(o.zoom_render_scale_min, o.zoom_render_scale_max);
         (s * 120.0).round().max(1.0) / 120.0
     }

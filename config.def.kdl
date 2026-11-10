@@ -110,6 +110,7 @@ options {
 //       position 3000 0    canvas px of its top-left corner (screen px when it also opens pinned)
 //       pinned / fullscreen / minimized    (minimized: it starts hidden, a scratchpad)
 //       focus false        it does not take the keyboard
+//       scale 0.5          its own scale on the canvas (also scale-window / Mod+Ctrl+scroll)
 // - any decoration option (border-width, border-color, focus-color, focus-gradient, corner-radius,
 //   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, border-spin-ms,
 //   urgent-*): it applies to these windows live, and follows their state (e.g. match focused=false).
@@ -159,6 +160,11 @@ binds {
     Mod+minus { zoom 0.8; }
     Mod+equal { zoom 1.25; }
     Mod+Shift+0 { zoom-reset; }
+    // A window's own scale on the canvas (it stays sharp and usable); Mod+Ctrl+scroll scales the one
+    // under the pointer.
+    Mod+Ctrl+minus { scale-window 0.8; }
+    Mod+Ctrl+equal { scale-window 1.25; }
+    Mod+Ctrl+0 { scale-window-reset; }
     Mod+Alt+H { pan-view "left"; }
     Mod+Alt+L { pan-view "right"; }
     Mod+Alt+K { pan-view "up"; }

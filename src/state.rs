@@ -92,9 +92,10 @@ impl Client {
         self.window.geometry().size
     }
 
+    /// The window's footprint on the canvas: its size times its own scale.
     pub fn rect(&self) -> Rectangle<f64, Logical> {
         let s = self.size();
-        Rectangle::new(self.canvas, (s.w as f64, s.h as f64).into())
+        Rectangle::new(self.canvas, (s.w as f64 * self.scale, s.h as f64 * self.scale).into())
     }
 
     pub fn surface(&self) -> &WlSurface {
@@ -408,11 +409,51 @@ impl Uwc {
         if c.fullscreen {
             return Place { origin: (0.0, 0.0).into(), zoom: 1.0, on_canvas: false };
         }
+        // Pinned windows ignore the view's zoom but keep their own scale.
         if let Some(p) = c.pin {
-            return Place { origin: p, zoom: 1.0, on_canvas: false };
+            return Place { origin: p, zoom: c.scale, on_canvas: false };
         }
         let vp = self.viewport();
-        Place { origin: vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), zoom: vp.zoom, on_canvas: true }
+        Place { origin: vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), zoom: vp.zoom * c.scale, on_canvas: true }
+    }
+
+    /// Scale a window on the canvas by `factor` (its own scale, 0.1 to 4), keeping screen point
+    /// `anchor` over the same spot of the window (default: its centre).
+    pub fn scale_window(&mut self, id: u32, factor: f64, anchor: Option<Point<f64, Logical>>) {
+        self.set_window_scale(id, self.client_index(id).map(|i| self.clients[i].scale * factor).unwrap_or(1.0), anchor);
+    }
+
+    pub fn set_window_scale(&mut self, id: u32, scale: f64, anchor: Option<Point<f64, Logical>>) {
+        let Some(i) = self.client_index(id) else { return };
+        if self.clients[i].fullscreen || !scale.is_finite() {
+            return;
+        }
+        let new = scale.clamp(0.1, 4.0);
+        let old = self.clients[i].scale;
+        let pl = self.place(&self.clients[i]);
+        let size = self.clients[i].size();
+        let anchor = anchor.unwrap_or_else(|| {
+            (pl.origin.x + size.w as f64 * pl.zoom / 2.0, pl.origin.y + size.h as f64 * pl.zoom / 2.0).into()
+        });
+        // Screen origin so the anchor stays put: origin' = anchor - (anchor - origin) * new / old.
+        let r = new / old;
+        let origin: Point<f64, Logical> =
+            (anchor.x - (anchor.x - pl.origin.x) * r, anchor.y - (anchor.y - pl.origin.y) * r).into();
+        let c = &mut self.clients[i];
+        c.scale = new;
+        if c.pin.is_some() {
+            c.pin = Some(origin);
+        } else {
+            c.canvas = self
+                .mon
+                .as_ref()
+                .map(|m| m.viewport())
+                .unwrap_or_default()
+                .screen_to_canvas((origin.x, origin.y))
+                .into();
+        }
+        self.refresh_pointer();
+        self.damage();
     }
 
     /// Apply `f` to the viewport in use, then re-send the pointer position so what is under
@@ -882,6 +923,16 @@ impl Uwc {
                 }
             }
             Action::RestoreWindow => self.restore_newest(),
+            Action::ScaleWindow(f) => {
+                if let Some(id) = self.focus {
+                    self.scale_window(id, *f, None);
+                }
+            }
+            Action::ScaleWindowReset => {
+                if let Some(id) = self.focus {
+                    self.set_window_scale(id, 1.0, None);
+                }
+            }
             Action::BookmarkSave(n) => self.bookmark_save(*n),
             Action::BookmarkGoto(n) => {
                 self.bookmark_goto(*n);
