@@ -1184,3 +1184,24 @@ fn windows_have_their_own_scale_on_the_canvas() {
     let s = uwc.wait("Small", |s| s["windows"].as_array().unwrap().len() == 2);
     assert_eq!(num(&win(&s, "Small")["scale"]), 0.5, "open {{ scale }} from a rule");
 }
+
+#[test]
+fn saving_a_shader_file_reloads_it() {
+    let mut uwc = Uwc::start("shader-watch", Some("options { background-shader \"bg.glsl\" }"));
+    // Relative paths are next to the config file.
+    std::fs::write(
+        uwc.dir.join("bg.glsl"),
+        "vec4 background(vec2 p, vec2 s, float t, vec2 v, float z) { return vec4(1.0); }\n",
+    )
+    .unwrap();
+    uwc.ok("reload");
+    let rev = num(&uwc.state()["config_rev"]);
+    std::thread::sleep(Duration::from_millis(1100)); // the mtime has 1 s resolution on some filesystems
+    std::fs::write(
+        uwc.dir.join("bg.glsl"),
+        "vec4 background(vec2 p, vec2 s, float t, vec2 v, float z) { return vec4(0.5); }\n",
+    )
+    .unwrap();
+    uwc.wait("reload after the shader changed", |s| num(&s["config_rev"]) > rev);
+    assert_eq!(uwc.cmd("get background-shader")["value"], "bg.glsl");
+}

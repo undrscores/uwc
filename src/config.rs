@@ -226,6 +226,10 @@ pub struct Config {
     pub direct_scanout: bool,
     /// Real session only: offer linux-drm-syncobj-v1 when the GPU supports it.
     pub explicit_sync: bool,
+    /// A GLSL file drawing the background behind everything ("" = root-color).
+    pub background_shader: String,
+    /// Where relative paths in the config (shaders) are resolved from.
+    pub dir: PathBuf,
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
     pub keyboard: Keyboard,
@@ -322,6 +326,8 @@ impl Config {
             hardware_cursor: true,
             direct_scanout: true,
             explicit_sync: true,
+            background_shader: String::new(),
+            dir: path.and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
             keys: Vec::new(),
             mouse: Vec::new(),
             keyboard: Keyboard::default(),
@@ -362,6 +368,19 @@ impl Config {
                     cfg.monitors.push(m);
                 }
                 other => bail!("unknown section `{other}` (line {})", n.line),
+            }
+        }
+        // Shader files are watched like includes: saving one reloads the config, which recompiles it.
+        let mut shaders: Vec<String> = vec![cfg.background_shader.clone(), cfg.deco.border_shader.clone()];
+        for n in nodes.iter().filter(|n| n.name == "rule") {
+            shaders.extend(
+                n.kids.iter().filter(|k| k.name == "border-shader").filter_map(|k| k.arg_str(0).map(str::to_string)),
+            );
+        }
+        for s in shaders.into_iter().filter(|s| !s.is_empty()) {
+            let p = resolve(&s, &cfg.dir);
+            if !cfg.files.contains(&p) {
+                cfg.files.push(p);
             }
         }
         for n in nodes.iter().filter(|n| n.name == "binds") {
@@ -580,6 +599,17 @@ fn parse_monitor(n: &Node) -> Result<MonitorConfig> {
     Ok(m)
 }
 
+/// A path from the config: "~/" is the home directory, a relative one is next to the config file.
+pub fn resolve(file: &str, dir: &Path) -> PathBuf {
+    if let Some(rest) = file.strip_prefix("~/") {
+        Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(rest)
+    } else if Path::new(file).is_absolute() {
+        file.into()
+    } else {
+        dir.join(file)
+    }
+}
+
 fn expand_includes(doc: &mut Vec<Node>, dir: &Path, files: &mut Vec<PathBuf>, depth: &mut u32) -> Result<()> {
     *depth += 1;
     if *depth > 8 {
@@ -592,13 +622,7 @@ fn expand_includes(doc: &mut Vec<Node>, dir: &Path, files: &mut Vec<PathBuf>, de
             continue;
         }
         let file = n.arg_str(0).ok_or_else(|| anyhow!("include needs a file name (line {})", n.line))?;
-        let path = if let Some(rest) = file.strip_prefix("~/") {
-            Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(rest)
-        } else if Path::new(file).is_absolute() {
-            file.into()
-        } else {
-            dir.join(file)
-        };
+        let path = resolve(file, dir);
         let text = std::fs::read_to_string(&path).with_context(|| format!("include {}", path.display()))?;
         let mut inc = kdl::parse(&text).map_err(|e| anyhow!("{}: {e}", path.display()))?;
         files.push(path.clone());

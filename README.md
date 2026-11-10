@@ -17,6 +17,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 |---|---|
 | Canvas, viewport, zoom (about the pointer), pan, overview, fit/center | done |
 | Per-window scale: a window can be smaller or larger on the canvas than its size (a sticky note), still usable and sharp; `scale-window F` / `scale-window-reset` (Mod+Ctrl+minus/equal/0), Mod+Ctrl+scroll on a window, IPC `window-scale ID S`, rule `open { scale }`; pinned windows keep theirs | done |
+| Your own shaders: `border-shader` (per window through rules) and `background-shader` GLSL files, a small documented contract (`border(p, size, time, color, focused)`, `background(p, size, time, view, zoom)`); reloaded on save, redrawn every frame only if they use time, built-in fallback with the GLSL compiler's own message (line numbers into your file) in the log and the IPC state (`shader_errors`); examples in `shaders/` (neon border, canvas dot grid, aurora) | done |
 | Sharp zoom: windows are asked (fractional-scale-v1, viewporter, wl_surface v6 preferred buffer scale) to render at output scale x zoom once the zoom settles, so zooming in shows real detail; bounded by `zoom-render-scale-min`/`-max` | done |
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
 | xdg-shell toplevels and popups, xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
@@ -123,6 +124,7 @@ src/protocol.rs    the IPC protocol, typed: Request (parsed from a line), the sn
 src/ipc.rs         control socket: connections, subscriptions, running requests
 src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
 src/rules.rs       window rules and the per-window decoration settings (`Deco`)
+shaders/           example user shaders (border, background)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
 src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
 src/scale.rs       sharp zoom: preferred render scale per window (fractional scale)
@@ -134,6 +136,7 @@ tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland client
 
 ## Differences from uwm worth knowing
 
+- Ricing goes past fixed effects: borders and the background can be your own GLSL.
 - Windows can have their own scale on the canvas, on top of the view's zoom (no other compositor does this).
 - Zoom is sharp: clients re-render at output scale x zoom with fractional scale (uwm stretches, or asks for an
   integer scale), and the renderer draws the bigger buffer at its logical size.

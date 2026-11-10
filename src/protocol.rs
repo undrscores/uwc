@@ -275,6 +275,8 @@ pub enum Event {
         selmon: String,
         config_error: Option<String>,
         config_rev: u32,
+        /// User shader files that did not compile (or load), by the path in the config.
+        shader_errors: std::collections::BTreeMap<String, String>,
         backend: &'static str,
         keyboard_focus: Option<KeyboardFocus>,
         monitors: Vec<Monitor>,

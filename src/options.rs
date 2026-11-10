@@ -182,6 +182,7 @@ pub static DECO: &[Opt<Deco>] = option_table!(Deco;
     "opacity" => opacity (0, 1),
     "inactive-opacity" => inactive_opacity (0, 1),
     "inactive-dim" => inactive_dim (0, 1),
+    "border-shader" => border_shader,
 );
 
 /// Everything else in the `options` block.
@@ -203,6 +204,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "hardware-cursor" => hardware_cursor,
     "direct-scanout" => direct_scanout,
     "explicit-sync" => explicit_sync,
+    "background-shader" => background_shader,
 );
 
 /// Set option `n` from `table` on `t`. `Ok(false)`: the table has no such option.

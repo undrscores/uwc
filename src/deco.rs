@@ -47,7 +47,7 @@ float rrect(vec2 p, vec2 halfsize, float r) {
 }
 "#;
 
-const BOX: &str = r#"
+const BOX_HEAD: &str = r#"
 uniform float alpha;
 uniform vec2 size;
 varying vec2 v_coords;
@@ -83,6 +83,9 @@ vec4 color_at(float t) {
     return mix(pick(i), pick(i + 1.0), s - i);
 }
 
+"#;
+
+const BOX_MAIN: &str = r#"
 void main() {
     vec2 p = v_coords * size;
     vec2 halfsize = u_box.zw * 0.5;
@@ -98,6 +101,55 @@ void main() {
     float t = clamp(0.5 + dot(q, dir) / (2.0 * max(len, 0.001)), 0.0, 1.0);
     vec4 c = color_at(t);
     vec4 color = vec4(c.rgb * c.a, c.a) * cover * alpha;
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0) color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+#endif
+    gl_FragColor = color;
+}
+"#;
+
+/// A user border shader: the built-in box's inputs, `border()` from the user's file in between, and a
+/// main that masks its result to the ring. `time` and `focused` are extra uniforms.
+const USER_BORDER_MAIN: &str = r#"
+void main() {
+    vec2 p = v_coords * size;
+    vec2 halfsize = u_box.zw * 0.5;
+    vec2 q = p - (u_box.xy + halfsize);
+    float cover = clamp(0.5 - rrect(q, halfsize, u_radius), 0.0, 1.0);
+    if (u_width > 0.0) {
+        float inner_r = max(u_radius - u_width, 0.0);
+        float inner = clamp(0.5 - rrect(q, halfsize - vec2(u_width), inner_r), 0.0, 1.0);
+        cover = cover * (1.0 - inner);
+    }
+    vec2 dir = vec2(sin(u_angle), -cos(u_angle));
+    float len = abs(halfsize.x * dir.x) + abs(halfsize.y * dir.y);
+    float t = clamp(0.5 + dot(q, dir) / (2.0 * max(len, 0.001)), 0.0, 1.0);
+    vec4 c = border(p - u_box.xy, u_box.zw, u_time, color_at(t), u_focused);
+    vec4 color = vec4(c.rgb * c.a, c.a) * cover * alpha;
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0) color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+#endif
+    gl_FragColor = color;
+}
+"#;
+
+const USER_BACKGROUND_HEAD: &str = r#"
+uniform float alpha;
+uniform vec2 size;
+varying vec2 v_coords;
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+uniform float u_time;
+uniform vec2 u_view;
+uniform float u_zoom;
+"#;
+
+const USER_BACKGROUND_MAIN: &str = r#"
+void main() {
+    vec2 p = v_coords * size;
+    vec4 c = background(p, size, u_time, u_view, u_zoom);
+    vec4 color = vec4(c.rgb * c.a, c.a) * alpha;
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0) color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
 #endif
@@ -231,6 +283,70 @@ pub struct Shaders {
 /// Cached per GL context; `None` once compiling failed.
 struct ShaderCache(Option<Shaders>);
 
+/// Which hook a user shader file fills in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UserShader {
+    /// `vec4 border(vec2 p, vec2 size, float time, vec4 color, float focused)`
+    Border,
+    /// `vec4 background(vec2 p, vec2 size, float time, vec2 view, float zoom)`
+    Background,
+}
+
+/// The last GLSL compiler message smithay logged (it returns only a bare error); main's tracing
+/// layer fills it in, so a user shader's error can say what the compiler said.
+pub static GL_LOG: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Whether a user shader uses its time parameter (then it is redrawn every frame): the third
+/// parameter of `border(...)` / `background(...)`, whatever it is called, used beyond its declaration.
+pub fn uses_time(kind: UserShader, src: &str) -> bool {
+    let func = match kind {
+        UserShader::Border => "border",
+        UserShader::Background => "background",
+    };
+    let words = |s: &str| -> Vec<String> {
+        s.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(str::to_string).collect()
+    };
+    let Some(start) = src.find(&format!("{func}(")) else { return false };
+    let Some(end) = src[start..].find(')') else { return false };
+    let params: Vec<&str> = src[start + func.len() + 1..start + end].split(',').collect();
+    let Some(name) = params.get(2).and_then(|p| words(p).pop()) else { return false };
+    words(src).iter().filter(|w| **w == name).count() > 1
+}
+
+/// Compile a user shader file around uwc's template. `#line 1` makes the GLSL compiler's line
+/// numbers point into the user's file.
+pub fn compile_user(r: &mut GlesRenderer, kind: UserShader, src: &str) -> Result<GlesPixelProgram, GlesError> {
+    let f4 = |n| UniformName::new(n, UniformType::_4f);
+    let f2 = |n| UniformName::new(n, UniformType::_2f);
+    let f1 = |n| UniformName::new(n, UniformType::_1f);
+    match kind {
+        UserShader::Border => r.compile_custom_pixel_shader(
+            format!(
+                "{PRECISION}{SDF}{BOX_HEAD}\nuniform float u_time;\nuniform float u_focused;\n#line 1\n{src}\n{USER_BORDER_MAIN}"
+            ),
+            &[
+                f4("u_box"),
+                f1("u_radius"),
+                f1("u_width"),
+                f1("u_ncolors"),
+                f1("u_angle"),
+                f4("u_c0"),
+                f4("u_c1"),
+                f4("u_c2"),
+                f4("u_c3"),
+                f4("u_c4"),
+                f4("u_c5"),
+                f1("u_time"),
+                f1("u_focused"),
+            ],
+        ),
+        UserShader::Background => r.compile_custom_pixel_shader(
+            format!("{PRECISION}{USER_BACKGROUND_HEAD}#line 1\n{src}\n{USER_BACKGROUND_MAIN}"),
+            &[f1("u_time"), f2("u_view"), f1("u_zoom")],
+        ),
+    }
+}
+
 impl Shaders {
     pub fn get(renderer: &mut GlesRenderer) -> Option<Shaders> {
         if renderer.egl_context().user_data().get::<ShaderCache>().is_none() {
@@ -247,7 +363,7 @@ impl Shaders {
         let f4 = |n| UniformName::new(n, UniformType::_4f);
         let f1 = |n| UniformName::new(n, UniformType::_1f);
         let boxes = r.compile_custom_pixel_shader(
-            format!("{PRECISION}{SDF}{BOX}"),
+            format!("{PRECISION}{SDF}{BOX_HEAD}{BOX_MAIN}"),
             &[
                 f4("u_box"),
                 f1("u_radius"),
@@ -305,9 +421,64 @@ impl ShaderElement {
             Paint::Solid(c) => (vec![*c], 0.0),
             Paint::Gradient(g, extra) => (g.colors.clone(), (g.angle + extra).to_radians()),
         };
+        let uniforms = box_uniforms(geo, radius, width, &colors, angle);
+        ShaderElement { id: id.clone(), commit, geo, program: shaders.boxes.clone(), uniforms }
+    }
+
+    /// A box drawn by a user border shader: the built-in inputs, plus `time` (s) and `focused` (0/1).
+    #[allow(clippy::too_many_arguments)]
+    pub fn user_box(
+        program: &GlesPixelProgram,
+        id: &Id,
+        commit: CommitCounter,
+        geo: Rectangle<i32, Physical>,
+        radius: f64,
+        width: f64,
+        paint: &Paint,
+        time: f64,
+        focused: bool,
+    ) -> ShaderElement {
+        let (colors, angle) = match paint {
+            Paint::Solid(c) => (vec![*c], 0.0),
+            Paint::Gradient(g, extra) => (g.colors.clone(), (g.angle + extra).to_radians()),
+        };
+        let mut uniforms = box_uniforms(geo, radius, width, &colors, angle);
+        uniforms.push(u1("u_time", time as f32));
+        uniforms.push(u1("u_focused", if focused { 1.0 } else { 0.0 }));
+        ShaderElement { id: id.clone(), commit, geo, program: program.clone(), uniforms }
+    }
+
+    /// The whole output drawn by a user background shader. `view` is the canvas point at the
+    /// top-left, `zoom` physical px per canvas px.
+    pub fn user_background(
+        program: &GlesPixelProgram,
+        id: &Id,
+        commit: CommitCounter,
+        geo: Rectangle<i32, Physical>,
+        time: f64,
+        view: (f64, f64),
+        zoom: f64,
+    ) -> ShaderElement {
+        let uniforms = vec![
+            u1("u_time", time as f32),
+            Uniform::new("u_view", UniformValue::_2f(view.0 as f32, view.1 as f32)),
+            u1("u_zoom", zoom as f32),
+        ];
+        ShaderElement { id: id.clone(), commit, geo, program: program.clone(), uniforms }
+    }
+}
+
+fn box_uniforms(
+    geo: Rectangle<i32, Physical>,
+    radius: f64,
+    width: f64,
+    colors: &[Color],
+    angle: f64,
+) -> Vec<Uniform<'static>> {
+    {
         let at = |i: usize| colors.get(i).copied().unwrap_or(*colors.last().unwrap());
         let r = radius.min(geo.size.w as f64 / 2.0).min(geo.size.h as f64 / 2.0).max(0.0);
-        let uniforms = vec![
+        vec![
             u4("u_box", [0.0, 0.0, geo.size.w as f32, geo.size.h as f32]),
             u1("u_radius", r as f32),
             u1("u_width", width as f32),
@@ -319,10 +490,11 @@ impl ShaderElement {
             u4("u_c3", at(3)),
             u4("u_c4", at(4)),
             u4("u_c5", at(5)),
-        ];
-        ShaderElement { id: id.clone(), commit, geo, program: shaders.boxes.clone(), uniforms }
+        ]
     }
+}
 
+impl ShaderElement {
     /// The shadow of `box_` (the window's outer box, already offset and spread), blurred by `sigma`,
     /// with `clip` (the window's box, not offset) cut out. The element extends `reach` px around it.
     #[allow(clippy::too_many_arguments)]
@@ -539,5 +711,27 @@ mod tests {
         assert!((spin_degrees(1000.0, 250.0) - 90.0).abs() < 1e-9);
         assert!((spin_degrees(1000.0, 1250.0) - 90.0).abs() < 1e-9);
         assert!((spin_degrees(-1000.0, 250.0) + 90.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod user_shader_tests {
+    use super::{uses_time, UserShader};
+
+    #[test]
+    fn time_use_is_detected_from_the_parameter_name() {
+        let still = "vec4 border(vec2 p, vec2 size, float time, vec4 color, float focused) { return color; }";
+        let moving =
+            "vec4 border(vec2 p, vec2 size, float time, vec4 color, float focused) { return color * sin(time); }";
+        let renamed = "vec4 background(vec2 p, vec2 s, float t, vec2 v, float z) { return vec4(t); }";
+        let unused = "vec4 background(vec2 p, vec2 s, float t, vec2 v, float z) { return vec4(1.0); }";
+        assert!(!uses_time(UserShader::Border, still));
+        assert!(uses_time(UserShader::Border, moving));
+        assert!(uses_time(UserShader::Background, renamed));
+        assert!(!uses_time(UserShader::Background, unused));
+        // The bundled examples.
+        assert!(uses_time(UserShader::Border, include_str!("../shaders/neon.glsl")));
+        assert!(!uses_time(UserShader::Background, include_str!("../shaders/dots.glsl")));
+        assert!(uses_time(UserShader::Background, include_str!("../shaders/aurora.glsl")));
     }
 }

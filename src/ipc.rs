@@ -235,6 +235,7 @@ impl Uwc {
             selmon: name,
             config_error: self.config_error.clone(),
             config_rev: self.config_rev,
+            shader_errors: self.shader_errors.clone(),
             backend: self.backend.name(),
             keyboard_focus: self.keyboard_focus(),
             monitors,
@@ -297,6 +298,8 @@ impl Uwc {
             R::Set(line) => {
                 let c = self.config.set_line(&line).map_err(|e| format!("{e:#}"))?;
                 self.config = c;
+                self.user_shaders.clear();
+                self.shader_errors.clear();
                 // Like a reload for whoever follows config_rev, without re-reading the file.
                 self.config_rev += 1;
                 self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);

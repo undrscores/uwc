@@ -246,6 +246,14 @@ pub struct Uwc {
     pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
     /// Counts minimize calls, so the newest minimized window comes back first.
     pub minimize_stamp: u32,
+    /// Compiled user shaders by kind and file (None: it failed), and why the failed ones failed
+    /// (by the path as written in the config). Cleared when the config is applied.
+    pub user_shaders: std::collections::HashMap<
+        (crate::deco::UserShader, std::path::PathBuf),
+        Option<(smithay::backend::renderer::gles::GlesPixelProgram, bool)>,
+    >,
+    pub shader_errors: std::collections::BTreeMap<String, String>,
+    pub background_id: Id,
     /// The rect behind a fullscreen window (`fullscreen-bg`).
     pub fullscreen_bg_id: Id,
     /// Set while drawing a frame that is part of an animation: the backend asks for the next one.
@@ -332,6 +340,9 @@ impl Uwc {
             fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Uwc>(&dh),
             viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Uwc>(&dh),
             fullscreen_bg_id: Id::new(),
+            user_shaders: Default::default(),
+            shader_errors: Default::default(),
+            background_id: Id::new(),
             animating: false,
             ipc,
         })
@@ -1007,6 +1018,9 @@ impl Uwc {
             Ok(c) => {
                 self.config = c;
                 self.ipc_rules.clear();
+                // Shader files may have changed (saving one is what reloaded the config).
+                self.user_shaders.clear();
+                self.shader_errors.clear();
                 self.apply_input_config();
                 self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
                 self.backend.config_changed(&self.config);

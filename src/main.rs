@@ -116,9 +116,14 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with(GlLog)
+            .init();
+    }
     let args = parse_args()?;
     let path = config::config_path(args.config.as_deref());
 
@@ -253,6 +258,32 @@ fn msg(args: &[String]) -> Result<()> {
         }
         if req != protocol::Request::Subscribe {
             return Ok(());
+        }
+    }
+}
+
+/// Keeps the last `[GL]` compiler message smithay logs (see `deco::GL_LOG`).
+struct GlLog;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GlLog {
+    fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(Option<String>);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                if f.name() == "message" {
+                    self.0 = Some(format!("{v:?}"));
+                }
+            }
+        }
+        if !e.metadata().target().starts_with("smithay::backend::renderer::gles") {
+            return;
+        }
+        let mut m = Message(None);
+        e.record(&mut m);
+        if let Some(msg) = m.0.filter(|m| m.starts_with("[GL]")) {
+            if let Ok(mut log) = deco::GL_LOG.lock() {
+                *log = Some(msg.trim_start_matches("[GL]").trim().to_string());
+            }
         }
     }
 }

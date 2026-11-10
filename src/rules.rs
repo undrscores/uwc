@@ -51,6 +51,8 @@ pub struct Deco {
     pub focus_gradient: Option<Gradient>,
     pub urgent_gradient: Option<Gradient>,
     pub border_spin_ms: f64,
+    /// A GLSL file drawing the border ("" = the built-in one).
+    pub border_shader: String,
 }
 
 impl Default for Deco {
@@ -76,6 +78,7 @@ impl Default for Deco {
             focus_gradient: None,
             urgent_gradient: None,
             border_spin_ms: 0.0,
+            border_shader: String::new(),
         }
     }
 }
