@@ -46,7 +46,12 @@ pub fn check_buffer(buffer: &WlBuffer, size: Size<i32, Physical>) -> Result<(), 
         if d.width != size.w || d.height != size.h {
             return Err(format!("buffer is {}x{}, expected {}x{}", d.width, d.height, size.w, size.h));
         }
-        if d.stride < size.w * 4 || (d.offset as usize + (d.stride * d.height) as usize) > len {
+        // Every number here came from the client: no overflow, nothing negative, all of it inside the pool.
+        let end = (d.stride as i64)
+            .checked_mul(d.height as i64)
+            .and_then(|n| n.checked_add(d.offset as i64))
+            .filter(|&e| d.offset >= 0 && d.stride >= 0 && e <= len as i64);
+        if d.stride < size.w.saturating_mul(4) || end.is_none() {
             return Err("buffer stride or size too small".into());
         }
         Ok(())

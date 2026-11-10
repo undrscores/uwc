@@ -28,3 +28,11 @@ serde_json = "1"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# smithay's debug assertions and overflow checks panic on client-controlled numbers (a layer surface's
+# margins, a positioner's offsets), and a panic inside a libwayland callback aborts the process. Release
+# builds, which is what a session runs, do not have those checks; keep dev builds the same for smithay
+# (uwc's own crate keeps them on).
+[profile.dev.package.smithay]
+debug-assertions = false
+overflow-checks = false

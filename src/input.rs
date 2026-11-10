@@ -27,6 +27,17 @@ fn mods_of(m: &ModifiersState) -> Mods {
     Mods { logo: m.logo, alt: m.alt, ctrl: m.ctrl, shift: m.shift }
 }
 
+/// Whether a key bind may run now. While the session is locked, or a client holds the shortcuts (a
+/// VM, a remote desktop), only the ways out do: switching VT (so a lock client that died, or took the
+/// lock without meaning well, cannot trap you) and, for inhibited shortcuts, taking them back.
+pub fn bind_runs(action: &Action, locked: bool, inhibited: bool) -> bool {
+    match action {
+        Action::SwitchVt(_) => true,
+        Action::ToggleShortcutsInhibit => !locked,
+        _ => !locked && !inhibited,
+    }
+}
+
 impl Uwc {
     pub fn process_input_event<B: InputBackend>(&mut self, event: InputEvent<B>) {
         // Real user input, from whichever backend: it resets the idle timers (ext-idle-notify).
@@ -61,12 +72,11 @@ impl Uwc {
                             };
                             return FilterResult::Intercept(Action::Hint(key));
                         }
-                        if pressed && !state.is_locked() {
+                        if pressed {
                             let m = mods_of(modifiers);
-                            // A client holding the shortcuts (a VM) gets every key but the way out.
-                            let inhibited = state.shortcuts_inhibited();
+                            let (locked, inhibited) = (state.is_locked(), state.shortcuts_inhibited());
                             for bind in &state.config.keys {
-                                if inhibited && !matches!(bind.action, Action::ToggleShortcutsInhibit) {
+                                if !bind_runs(&bind.action, locked, inhibited) {
                                     continue;
                                 }
                                 if bind.mods == m
@@ -543,5 +553,22 @@ impl Uwc {
         let ptr = self.pointer();
         ptr.button(self, &ButtonEvent { button, state, serial, time });
         ptr.frame(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_ways_out_run_while_locked_or_inhibited() {
+        let (vt, quit, esc) = (Action::SwitchVt(2), Action::Quit, Action::ToggleShortcutsInhibit);
+        assert!(bind_runs(&quit, false, false));
+        assert!(!bind_runs(&quit, true, false), "no binds on a locked screen");
+        assert!(!bind_runs(&quit, false, true), "nor while a client holds the shortcuts");
+        assert!(bind_runs(&vt, true, false), "but you can always leave for another VT");
+        assert!(bind_runs(&vt, false, true));
+        assert!(bind_runs(&esc, false, true), "and take the shortcuts back");
+        assert!(!bind_runs(&esc, true, true), "nothing else unlocks a lock");
     }
 }

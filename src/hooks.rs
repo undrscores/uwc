@@ -11,6 +11,9 @@
 //! }
 //! ```
 //!
+//! Window titles and app-ids come from the apps: quote them (`"$UWC_TITLE"`) and never `eval` them or build
+//! another command from them.
+//!
 //! Each command runs through `sh -c` with the event in its environment: `UWC_EVENT`, and for
 //! window events `UWC_WINDOW_ID`, `UWC_APP_ID`, `UWC_TITLE` and `UWC_TAGS` (a bit mask, tag 1 = 1);
 //! `UWC_TAGSET` is the tags in view. Commands run in the background and must not rely on uwc waiting

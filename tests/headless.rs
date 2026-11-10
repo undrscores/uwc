@@ -60,6 +60,8 @@ struct Uwc {
     display: String,
     ipc: UnixStream,
     reader: BufReader<UnixStream>,
+    /// A test that makes uwc panic on purpose sets this.
+    allow_panics: bool,
 }
 
 impl Uwc {
@@ -88,8 +90,8 @@ impl Uwc {
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
             .env("UWC_DEBUG_PANIC", "1")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(std::fs::File::create(dir.join("uwc.log")).unwrap()))
+            .stderr(Stdio::from(std::fs::OpenOptions::new().append(true).open(dir.join("uwc.log")).unwrap()));
         if let Some(c) = config {
             let f = dir.join("config.kdl");
             std::fs::write(&f, c).unwrap();
@@ -122,7 +124,7 @@ impl Uwc {
         };
         ipc.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let reader = BufReader::new(ipc.try_clone().unwrap());
-        Uwc { child, dir, display, ipc, reader }
+        Uwc { child, dir, display, ipc, reader, allow_panics: false }
     }
 
     fn connect(&self) -> Client {
@@ -167,7 +169,13 @@ impl Drop for Uwc {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // A panic uwc survived would otherwise go unnoticed: every test checks the log for one.
+        let log = std::fs::read_to_string(self.dir.join("uwc.log")).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&self.dir);
+        if !self.allow_panics && !std::thread::panicking() && log.contains("panic:") {
+            let first = log.lines().find(|l| l.contains("panic:")).unwrap_or_default();
+            panic!("uwc panicked during the test (and survived it): {first}");
+        }
     }
 }
 
@@ -1488,6 +1496,7 @@ fn jump_finds_a_window_on_any_tag_and_brings_it_into_view() {
 #[test]
 fn a_panic_in_a_handler_does_not_take_the_session_down() {
     let mut uwc = Uwc::start("panic", None);
+    uwc.allow_panics = true;
     let mut c = uwc.connect();
     let _w = c.window("Survivor", 200, 150);
     let id = win(&uwc.state(), "Survivor")["id"].as_u64().unwrap();
@@ -1879,6 +1888,136 @@ fn the_keyboard_layout_is_reported_switched_and_remembered_per_window() {
     assert_eq!(uwc.state()["keyboard_layout"]["index"], 0, "a window that never chose gets the first layout");
     uwc.ok(&format!("focus {a}"));
     assert_eq!(uwc.state()["keyboard_layout"]["index"], 1, "Writer is back in German");
+}
+
+#[test]
+fn hostile_ipc_input_is_refused_and_the_compositor_keeps_running() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut uwc = Uwc::start("hostile", None);
+    let mut c = uwc.connect();
+    let _w = c.window("W", 200, 150);
+    // The control socket is for its owner only.
+    let sock = std::fs::read_dir(&uwc.dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().ends_with(".sock"))
+        .unwrap()
+        .path();
+    assert_eq!(std::fs::metadata(&sock).unwrap().permissions().mode() & 0o077, 0, "group/other have no access");
+    // Numbers a script could send to overflow, go negative or become infinite are errors, not crashes.
+    for bad in [
+        "frame add 0 0 -5 -5",
+        "frame add 0 0 0 100",
+        "frame add 1e308 0 100 100",
+        "move 1 1e308 0",
+        "move 1 nan 0",
+        "zoom 1e308",
+        "pan inf 0",
+        "panto -1e300 1e300",
+        "fling 1e308 1e308",
+        "resize 1 99999999999 1",
+        "window-scale 1 1e308",
+    ] {
+        let r = uwc.cmd(bad);
+        assert!(r.get("error").is_some(), "{bad} -> {r}");
+    }
+    // A script cannot fill memory with frames.
+    for _ in 0..crate_max_frames() {
+        uwc.ok("frame add 0 0 100 100");
+    }
+    assert!(uwc.cmd("frame add 0 0 100 100").get("error").is_some());
+    // A line that never ends is cut off, without taking the compositor with it.
+    let mut s = UnixStream::connect(&sock).unwrap();
+    s.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    let junk = vec![b'a'; 64 * 1024];
+    for _ in 0..64 {
+        if s.write_all(&junk).is_err() {
+            break;
+        }
+    }
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc is still running");
+    assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), 1);
+}
+
+fn crate_max_frames() -> usize {
+    500
+}
+
+#[test]
+fn clients_with_extreme_numbers_cannot_crash_the_compositor() {
+    let mut uwc = Uwc::start("extreme", None);
+    let sizes = [0u32, 1, 4096, i32::MAX as u32, u32::MAX];
+    let zones = [i32::MIN, -1, 0, 1, i32::MAX];
+    let margins = [i32::MIN, -5, 0, i32::MAX];
+    // Layer surfaces with every combination of silly sizes, exclusive zones and margins. A client the
+    // compositor disconnects (a protocol error) is fine; a compositor that panics is not (every test
+    // checks the log for that when it ends).
+    for &w in &sizes {
+        for &z in &zones {
+            for &m in &margins {
+                let mut c = uwc.connect();
+                let qh = c.queue.handle();
+                let surface = c.app.compositor.create_surface(&qh, ());
+                let l = c.app.layer_shell.get_layer_surface(
+                    &surface,
+                    None,
+                    zwlr_layer_shell_v1::Layer::Top,
+                    "x".into(),
+                    &qh,
+                    (),
+                );
+                l.set_size(w, w);
+                l.set_anchor(zwlr_layer_surface_v1::Anchor::all());
+                l.set_exclusive_zone(z);
+                l.set_margin(m, m, m, m);
+                surface.commit();
+                let _ = c.queue.roundtrip(&mut c.app);
+                if let Some(st) = uwc.child.try_wait().unwrap() {
+                    let log = std::fs::read_to_string(uwc.dir.join("uwc.log")).unwrap_or_default();
+                    let at: Vec<&str> = log
+                        .lines()
+                        .filter(|l| l.contains("panic") || l.contains("overflow") || l.contains("src/"))
+                        .take(12)
+                        .collect();
+                    let _ = at;
+                    panic!("uwc exited ({st}) with size {w} zone {z} margin {m}: {}", &log[..log.len().min(2500)]);
+                }
+            }
+        }
+    }
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc survived the layer surfaces");
+    let _ = uwc.state();
+    // Popups with extreme positioners, and windows with extreme size hints.
+    for off in [i32::MIN, -1, 0, i32::MAX] {
+        let mut c = uwc.connect();
+        let parent = c.window("P", 200, 150);
+        let qh = c.queue.handle();
+        let pos = c.app.wm.create_positioner(&qh, ());
+        pos.set_size(120, 60);
+        pos.set_anchor_rect(off, off, i32::MAX, i32::MAX);
+        pos.set_offset(off, off);
+        pos.set_anchor(xdg_positioner::Anchor::BottomRight);
+        pos.set_gravity(xdg_positioner::Gravity::BottomRight);
+        pos.set_constraint_adjustment(xdg_positioner::ConstraintAdjustment::all());
+        let surface = c.app.compositor.create_surface(&qh, ());
+        let xdg = c.app.wm.get_xdg_surface(&surface, &qh, ());
+        let popup = xdg.get_popup(Some(&parent.xdg), &pos, &qh, ());
+        surface.commit();
+        let _ = c.queue.roundtrip(&mut c.app);
+        popup.destroy();
+        parent.toplevel.set_min_size(i32::MAX, i32::MAX);
+        parent.toplevel.set_max_size(i32::MAX, 1);
+        parent.xdg.set_window_geometry(off, off, i32::MAX, i32::MAX);
+        parent.surface.commit();
+        let _ = c.queue.roundtrip(&mut c.app);
+    }
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc survived the popups");
+    // Many windows at once.
+    let mut c = uwc.connect();
+    let wins: Vec<_> = (0..150).map(|i| c.window(&format!("w{i}"), 40, 30)).collect();
+    assert!(uwc.state()["windows"].as_array().unwrap().len() >= 100);
+    drop(wins);
+    assert!(uwc.cmd("overview").get("ok").is_some());
 }
 
 #[test]
@@ -2658,6 +2797,11 @@ fn the_canvas_comes_back_after_a_restart() {
         uwc.ok("frame add 100 100 600 400 notes");
         uwc.ok("session save");
         assert!(file.exists());
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "the session file names your windows: owner only, was {mode:o}");
+        }
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(saved["windows"].as_array().unwrap().len(), 2);
         uwc.ok("quit");

@@ -263,9 +263,11 @@ fn set_panic_hook() {
     }));
 }
 
-/// Run the event loop, and survive a bug: a panic in any handler is logged, the transient state
-/// (drags, gestures, hint mode) is dropped and the loop carries on, so one bad request does not
-/// take every window with it. Three panics within ten seconds, or a backend left taken (a panic
+/// Run the event loop, and survive a bug: a panic in an IPC, input, timer or drawing callback is logged,
+/// the transient state (drags, gestures, hint mode) is dropped and the loop carries on, so one bad
+/// request does not take every window with it. (A panic inside a Wayland protocol handler cannot be
+/// caught here: libwayland calls those through C, and unwinding through C aborts. The session file,
+/// saved every few seconds, is what survives that.) Three panics within ten seconds, or a backend left taken (a panic
 /// while drawing), mean the state cannot be trusted: the session is saved and uwc exits.
 fn serve(event_loop: &mut EventLoop<Uwc>, state: &mut Uwc) -> Result<()> {
     let mut recent: Vec<std::time::Instant> = Vec::new();
@@ -321,13 +323,18 @@ fn msg(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let line = args.join(" ");
+    // One command per call: a newline in an argument (say, a window title a script passed on) would
+    // otherwise become a second command, such as `quit`.
+    if line.contains(['\n', '\r']) {
+        bail!("a command cannot contain a newline");
+    }
     // Check it here so a typo is reported without a round trip.
     let req = protocol::Request::parse(&line).map_err(|e| anyhow::anyhow!(e))?;
     let path = match std::env::var_os("UWC_SOCKET") {
         Some(p) => PathBuf::from(p),
         None => {
             // The newest uwc socket in the runtime dir.
-            let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+            let dir = ipc::socket_dir()?;
             std::fs::read_dir(&dir)?
                 .filter_map(|e| e.ok())
                 .filter(|e| {

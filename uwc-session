@@ -4,8 +4,9 @@
 # Once the compositor is up it hands WAYLAND_DISPLAY etc. to D-Bus / systemd (portals, notification
 # daemons and other activated services need them), then runs ~/.config/uwc/startup if executable.
 dir="${XDG_STATE_HOME:-$HOME/.local/state}"
-mkdir -p "$dir"
-[ -f "$dir/uwc.log" ] && mv -f "$dir/uwc.log" "$dir/uwc.log.old"
+# The log names your windows: create it for you alone (in a subshell, so the apps started from this session
+# keep the umask they had).
+(umask 077; mkdir -p "$dir"; [ -f "$dir/uwc.log" ] && mv -f "$dir/uwc.log" "$dir/uwc.log.old"; chmod 600 "$dir/uwc.log.old" 2>/dev/null; : > "$dir/uwc.log")
 startup='vars="WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE UWC_SOCKET XCURSOR_THEME XCURSOR_SIZE"
 if command -v dbus-update-activation-environment >/dev/null; then
     dbus-update-activation-environment --systemd $vars
@@ -14,4 +15,4 @@ elif command -v systemctl >/dev/null; then
 fi
 s="${XDG_CONFIG_HOME:-$HOME/.config}/uwc/startup"
 [ -x "$s" ] && exec "$s"'
-exec @PREFIX@/bin/uwc --backend udev -s "$startup" "$@" >"$dir/uwc.log" 2>&1
+exec @PREFIX@/bin/uwc --backend udev -s "$startup" "$@" >>"$dir/uwc.log" 2>&1
