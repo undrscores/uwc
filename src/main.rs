@@ -14,6 +14,7 @@ mod layer;
 mod render;
 mod state;
 mod sync;
+mod workspace;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -180,6 +181,7 @@ fn run() -> Result<()> {
 
     event_loop.run(None, &mut state, |state| {
         state.udev_render();
+        state.workspace_refresh();
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();
     })?;

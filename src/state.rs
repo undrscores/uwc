@@ -65,6 +65,8 @@ pub struct Client {
     pub tags: u32,
     /// False until the client has committed a first buffer.
     pub mapped: bool,
+    /// Wants attention (set by xdg-activation once that exists).
+    pub urgent: bool,
     /// Ids for the four border rects, stable so the damage tracker can tell frames apart.
     pub border_ids: [Id; 4],
     /// Ids for the dim, backdrop, border and shadow shader elements.
@@ -158,6 +160,7 @@ pub struct Uwc {
     pub popups: PopupManager,
     pub seat: Seat<Uwc>,
     pub layer_shell_state: WlrLayerShellState,
+    pub workspaces: crate::workspace::WorkspaceState,
     /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
     pub layer_focus: Option<WlSurface>,
     pub dmabuf_state: DmabufState,
@@ -238,6 +241,7 @@ impl Uwc {
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
             popups: PopupManager::default(),
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
+            workspaces: crate::workspace::WorkspaceState::new(&dh),
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
             syncobj_state: None,

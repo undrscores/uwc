@@ -165,9 +165,12 @@ impl Uwc {
         let screen = self.screen_size();
         let wa = self.work_area();
         let ts = self.tagset();
-        let mut occ = 0u32;
+        let (mut occ, mut urg) = (0u32, 0u32);
         for c in &self.clients {
             occ |= c.tags;
+            if c.urgent {
+                urg |= c.tags;
+            }
         }
         let mons: Vec<Value> = self
             .mon
@@ -180,7 +183,7 @@ impl Uwc {
                             "n": i + 1,
                             "active": ts & (1 << i) != 0,
                             "occupied": occ & (1 << i) != 0,
-                            "urgent": false,
+                            "urgent": urg & (1 << i) != 0,
                             "viewport": {"x": m.vp[i].x.round() as i64, "y": m.vp[i].y.round() as i64, "zoom": m.vp[i].zoom},
                             "bookmarks": [],
                         })
@@ -215,7 +218,7 @@ impl Uwc {
                     "focused": self.focus == Some(c.id),
                     "floating": true,
                     "fullscreen": false,
-                    "urgent": false,
+                    "urgent": c.urgent,
                     "x": r.loc.x.round() as i64, "y": r.loc.y.round() as i64, "width": r.size.w as i64, "height": r.size.h as i64,
                     "pinned": false,
                     "minimized": false,

@@ -11,9 +11,14 @@ use std::{
 
 use serde_json::Value;
 use wayland_client::{
+    globals::GlobalList,
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface},
-    Connection, Dispatch, EventQueue, QueueHandle,
+    protocol::{wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+};
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1 as ws_group, ext_workspace_handle_v1 as ws_handle,
+    ext_workspace_manager_v1 as ws_manager,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
@@ -135,11 +140,24 @@ struct App {
     shm: wl_shm::WlShm,
     wm: xdg_wm_base::XdgWmBase,
     layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1,
+    /// ext-workspace: the handles in announcement order, and what the compositor said about each.
+    ws: Vec<ws_handle::ExtWorkspaceHandleV1>,
+    ws_info: std::collections::HashMap<wayland_client::backend::ObjectId, WsInfo>,
+    ws_done: usize,
+    ws_group_outputs: usize,
     closed: Vec<String>,
     /// The size the compositor last asked a toplevel for.
     asked: Option<(i32, i32)>,
     /// The size the last layer-surface configure gave.
     layer_size: Option<(u32, u32)>,
+}
+
+#[derive(Default, Debug, Clone)]
+struct WsInfo {
+    id: String,
+    name: String,
+    state: u32,
+    coordinates: Vec<u8>,
 }
 
 struct Layer {
@@ -156,6 +174,7 @@ struct Window {
 }
 
 struct Client {
+    globals: GlobalList,
     conn: Connection,
     queue: EventQueue<App>,
     app: App,
@@ -173,12 +192,16 @@ impl Client {
             shm: globals.bind(&qh, 1..=1, ()).unwrap(),
             wm: globals.bind(&qh, 1..=6, ()).unwrap(),
             layer_shell: globals.bind(&qh, 1..=4, ()).unwrap(),
+            ws: vec![],
+            ws_info: Default::default(),
+            ws_done: 0,
+            ws_group_outputs: 0,
             closed: vec![],
             asked: None,
             layer_size: None,
         };
         queue.roundtrip(&mut app).unwrap();
-        Client { conn, queue, app, _dir: runtime_dir.to_path_buf() }
+        Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
     }
 
     /// A layer surface the way a bar or launcher makes one: set it up, commit, take the configured
@@ -251,6 +274,27 @@ impl Client {
             win._buf = buf;
             self.sync();
         }
+    }
+
+    fn bind_workspaces(&mut self) -> ws_manager::ExtWorkspaceManagerV1 {
+        let qh = self.queue.handle();
+        let m = self.globals.bind(&qh, 1..=1, ()).expect("ext_workspace_manager_v1");
+        self.sync();
+        m
+    }
+
+    fn bind_output(&mut self) -> wl_output::WlOutput {
+        let qh = self.queue.handle();
+        let o = self.globals.bind(&qh, 1..=4, ()).expect("wl_output");
+        self.sync();
+        o
+    }
+
+    /// The workspace named `name` and its state bits.
+    fn ws(&self, name: &str) -> (ws_handle::ExtWorkspaceHandleV1, u32) {
+        let h = self.app.ws.iter().find(|h| self.app.ws_info[&h.id()].name == name).unwrap().clone();
+        let s = self.app.ws_info[&h.id()].state;
+        (h, s)
     }
 
     fn sync(&mut self) {
@@ -346,6 +390,67 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
     }
 }
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
+noop!(wl_output::WlOutput);
+
+impl Dispatch<ws_manager::ExtWorkspaceManagerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ws_manager::ExtWorkspaceManagerV1,
+        e: ws_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ws_manager::Event::Workspace { workspace } => {
+                app.ws_info.insert(workspace.id(), WsInfo::default());
+                app.ws.push(workspace);
+            }
+            ws_manager::Event::Done => app.ws_done += 1,
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(App, ws_manager::ExtWorkspaceManagerV1, [
+        ws_manager::EVT_WORKSPACE_GROUP_OPCODE => (ws_group::ExtWorkspaceGroupHandleV1, ()),
+        ws_manager::EVT_WORKSPACE_OPCODE => (ws_handle::ExtWorkspaceHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ws_group::ExtWorkspaceGroupHandleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ws_group::ExtWorkspaceGroupHandleV1,
+        e: ws_group::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ws_group::Event::OutputEnter { .. } = e {
+            app.ws_group_outputs += 1;
+        }
+    }
+}
+
+impl Dispatch<ws_handle::ExtWorkspaceHandleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        h: &ws_handle::ExtWorkspaceHandleV1,
+        e: ws_handle::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let info = app.ws_info.entry(h.id()).or_default();
+        match e {
+            ws_handle::Event::Id { id } => info.id = id,
+            ws_handle::Event::Name { name } => info.name = name,
+            ws_handle::Event::Coordinates { coordinates } => info.coordinates = coordinates,
+            ws_handle::Event::State { state } => info.state = state.into(),
+            _ => {}
+        }
+    }
+}
 noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_surface::WlSurface);
 
 // ---- tests ---------------------------------------------------------------------------------
@@ -655,4 +760,61 @@ fn set_changes_options_live_and_rejects_bad_values() {
     uwc.ok("reload");
     assert_eq!(uwc.cmd("get inactive-opacity")["value"], 1.0);
     assert_eq!(uwc.cmd("get focus-gradient")["value"], Value::Null);
+}
+
+#[test]
+fn bars_see_tags_as_workspaces_and_can_switch_them() {
+    const ACTIVE: u32 = 1;
+    let mut uwc = Uwc::start("workspaces", None);
+    let mut c = uwc.connect();
+    let m = c.bind_workspaces();
+    assert_eq!(c.app.ws.len(), 9);
+    let names: Vec<String> = c.app.ws.iter().map(|h| c.app.ws_info[&h.id()].name.clone()).collect();
+    assert_eq!(names, (1..=9).map(|i| i.to_string()).collect::<Vec<_>>());
+    let three = c.app.ws_info[&c.ws("3").0.id()].clone();
+    assert_eq!(three.id, "uwc-tag-3");
+    assert_eq!(three.coordinates, 3u32.to_ne_bytes().to_vec());
+    assert_eq!((c.ws("1").1, c.ws("2").1), (ACTIVE, 0));
+    assert!(c.app.ws_done >= 1);
+
+    // A click on workspace 3: activate + commit views it alone.
+    c.ws("3").0.activate();
+    m.commit();
+    c.sync();
+    let s = uwc.wait("tag 3 viewed", |s| s["monitors"][0]["tags"][2]["active"] == true);
+    assert_eq!(s["monitors"][0]["tags"][0]["active"], false);
+    c.sync();
+    assert_eq!((c.ws("1").1, c.ws("3").1), (0, ACTIVE), "the bar is told");
+
+    // Changes from elsewhere (IPC, keys) reach the bar too, with a done.
+    let done = c.app.ws_done;
+    uwc.ok("toggleview 5");
+    std::thread::sleep(Duration::from_millis(50));
+    c.sync();
+    assert_eq!((c.ws("3").1, c.ws("5").1), (ACTIVE, ACTIVE));
+    assert!(c.app.ws_done > done);
+
+    // A deactivation makes the batch a toggle.
+    c.ws("3").0.deactivate();
+    m.commit();
+    c.sync();
+    uwc.wait("only tag 5", |s| {
+        s["monitors"][0]["tags"][2]["active"] == false && s["monitors"][0]["tags"][4]["active"] == true
+    });
+    // Deactivating the last visible tag is ignored.
+    c.ws("5").0.deactivate();
+    m.commit();
+    c.sync();
+    assert_eq!(uwc.state()["monitors"][0]["tags"][4]["active"], true);
+    // Requests without a commit do nothing.
+    c.ws("7").0.activate();
+    c.sync();
+    assert_eq!(uwc.state()["monitors"][0]["tags"][6]["active"], false);
+
+    // A wl_output bound after the manager still gets the group announced on it.
+    assert_eq!(c.app.ws_group_outputs, 0);
+    let _o = c.bind_output();
+    std::thread::sleep(Duration::from_millis(50));
+    c.sync();
+    assert_eq!(c.app.ws_group_outputs, 1);
 }

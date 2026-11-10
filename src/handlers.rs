@@ -139,6 +139,7 @@ impl XdgShellHandler for Uwc {
             canvas: (0.0, 0.0).into(),
             tags: self.tagset(),
             mapped: false,
+            urgent: false,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         });

@@ -28,6 +28,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Buffer sync: explicit sync (`linux-drm-syncobj-v1`) on udev; commits wait for a dmabuf's acquire point or implicit fences (all backends) | done |
 | NVIDIA: modesetting check with the fix in the error, `hardware-cursor` / `direct-scanout` / `explicit-sync` switches | done |
 | Decoration (uwm's options and names): `corner-radius`, gradient borders (`border-` / `focus-gradient`, `border-spin-ms`), shadows and the focus glow (`shadow-*`, `focus-shadow-*`), `backdrop-color`, `opacity` / `inactive-opacity`, `inactive-dim`; all scale with zoom; GLES shaders, square solid borders if they fail to compile | done |
+| ext-workspace-v1: the tags as workspaces "1".."9" (ids `uwc-tag-N`, 1-D coordinates, active/urgent) for bars that speak it; activate/deactivate applied per commit (only activations = view those tags, with a deactivation = toggle) | done |
 | wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
 
 **The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
@@ -39,16 +40,15 @@ Limits: one GPU, and one output at a time (the first connected one not marked `o
 
 Not yet (roughly in the order to do them):
 
-1. `ext-workspace-v1` (tags for bars that speak it; the IPC has them already).
-2. Multiple monitors (the state has one `Monitor`), pinned windows, minimize/scratchpad, fullscreen.
-3. The rest of uwm's IPC (`set`, `theme`, `rule`, `bookmark`, `swipe`, `pinch`, `palette`, ...) and window rules.
-4. Animations (open/close/move/tag-switch, eased pan, momentum), driven from the frame callback, never timers.
-5. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
+1. Multiple monitors (the state has one `Monitor`), pinned windows, minimize/scratchpad, fullscreen.
+2. The rest of uwm's IPC (`theme`, `rule`, `bookmark`, `swipe`, `pinch`, `palette`, ...) and window rules.
+3. Animations (open/close/move/tag-switch, eased pan, momentum), driven from the frame callback, never timers.
+4. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.
-7. Popup grabs (clicking outside a menu closes it), xdg-activation, idle-inhibit/idle-notify, session-lock, pointer
+5. Popup grabs (clicking outside a menu closes it), xdg-activation, idle-inhibit/idle-notify, session-lock, pointer
    constraints, gestures, fractional-scale, Xwayland, input-method/text-input, screencopy, output-management.
-8. Multi-GPU, animated cursors, DPMS.
+6. Multi-GPU, animated cursors, DPMS.
 
 ## Build and run
 
@@ -113,6 +113,7 @@ src/render.rs      the canvas as a list of render elements (zoom = RescaleRender
 src/ipc.rs         control socket
 src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
+src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
 src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
 src/cursor.rs      the pointer image (xcursor theme, client surfaces, fallback arrow)
 src/backend/       udev (real session), winit (nested), headless (tests)
