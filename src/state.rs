@@ -371,6 +371,7 @@ impl Monitor {
 
 pub struct Uwc {
     pub start_time: Instant,
+    pub extras: crate::extras::Extras,
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Uwc>,
     pub loop_signal: LoopSignal,
@@ -549,19 +550,22 @@ impl Uwc {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let ipc = Ipc::new(&loop_handle, &socket_name)?;
+        let primary_selection = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh);
+        let extras = crate::extras::Extras::new(&dh, &primary_selection);
 
         // zwlr-output-management-v1 (kanshi, wdisplays): the manager global.
         dh.create_global::<Uwc, smithay::reexports::wayland_protocols_wlr::output_management::v1::server::zwlr_output_manager_v1::ZwlrOutputManagerV1, ()>(4, ());
 
         Ok(Uwc {
             start_time: Instant::now(),
+            extras,
             compositor_state: CompositorState::new_v6::<Uwc>(&dh),
             xdg_shell_state: XdgShellState::new::<Uwc>(&dh),
             shm_state: ShmState::new::<Uwc>(&dh, vec![]),
             xdg_decoration_state: XdgDecorationState::new::<Uwc>(&dh),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Uwc>(&dh),
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
-            primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh),
+            primary_selection,
             popups: PopupManager::default(),
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
             ipc_rules: Vec::new(),
@@ -1705,6 +1709,7 @@ impl Uwc {
                 }
             }
             Action::ToggleOverview => self.toggle_overview(),
+            Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::ToggleFullscreen => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let (id, on) = (self.clients[i].id, !self.clients[i].fullscreen);

@@ -991,6 +991,28 @@ fn state_shape_and_defaults() {
 }
 
 #[test]
+fn the_everyday_protocols_are_advertised() {
+    let uwc = Uwc::start("globals", None);
+    let c = uwc.connect();
+    let have: Vec<String> = c.globals.contents().with_list(|l| l.iter().map(|g| g.interface.clone()).collect());
+    for want in [
+        "wp_cursor_shape_manager_v1",
+        "zwlr_data_control_manager_v1",
+        "ext_data_control_manager_v1",
+        "zwp_virtual_keyboard_manager_v1",
+        "wp_single_pixel_buffer_manager_v1",
+        "zxdg_exporter_v2",
+        "zxdg_importer_v2",
+        "xdg_wm_dialog_v1",
+        "zwp_keyboard_shortcuts_inhibit_manager_v1",
+        "xdg_system_bell_v1",
+        "wp_content_type_manager_v1",
+    ] {
+        assert!(have.iter().any(|h| h == want), "missing global {want}; have {have:?}");
+    }
+}
+
+#[test]
 fn window_maps_centered_and_focused() {
     let mut uwc = Uwc::start("map", None);
     let mut c = uwc.connect();

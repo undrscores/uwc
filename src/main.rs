@@ -10,6 +10,7 @@ mod constraints;
 mod cursor;
 mod deco;
 mod export;
+mod extras;
 mod handlers;
 mod idle;
 mod ime;

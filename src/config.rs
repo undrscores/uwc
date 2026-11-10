@@ -82,6 +82,8 @@ pub enum Action {
     CenterWindow,
     FitWindow,
     ToggleOverview,
+    /// Take the keyboard back from a client that inhibited the shortcuts (works while inhibited).
+    ToggleShortcutsInhibit,
     ToggleFullscreen,
     TogglePin,
     MinimizeWindow,
@@ -749,6 +751,7 @@ fn parse_action(n: &Node) -> Result<Action> {
         "center-window" => Action::CenterWindow,
         "fit-window" => Action::FitWindow,
         "toggle-overview" => Action::ToggleOverview,
+        "toggle-shortcuts-inhibit" => Action::ToggleShortcutsInhibit,
         "toggle-fullscreen" => Action::ToggleFullscreen,
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,

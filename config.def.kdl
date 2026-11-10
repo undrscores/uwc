@@ -176,6 +176,9 @@ binds {
     Mod+Shift+N { focus-previous-window; }
 
     Mod+O { toggle-overview; }
+    // A VM or remote desktop can ask for every key (keyboard-shortcuts-inhibit); this takes them back, and
+    // is the one bind that still works while they are held.
+    Mod+Shift+Escape { toggle-shortcuts-inhibit; }
     Mod+C { center-window; }
     Mod+M { fit-window; }
     Mod+E { toggle-fullscreen; }

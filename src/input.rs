@@ -46,7 +46,12 @@ impl Uwc {
                     |state, modifiers, handle| {
                         if pressed && !state.is_locked() {
                             let m = mods_of(modifiers);
+                            // A client holding the shortcuts (a VM) gets every key but the way out.
+                            let inhibited = state.shortcuts_inhibited();
                             for bind in &state.config.keys {
+                                if inhibited && !matches!(bind.action, Action::ToggleShortcutsInhibit) {
+                                    continue;
+                                }
                                 if bind.mods == m
                                     && handle.raw_syms().iter().any(|&s| crate::config::lower(s) == bind.sym)
                                 {
