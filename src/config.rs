@@ -209,6 +209,8 @@ pub struct Config {
     /// The `vars` of the file, so IPC `set` can use them too.
     pub vars: HashMap<String, String>,
     pub pan_step: f64,
+    /// How long eased view moves (pan keys, centre, fit, bookmarks, home) take; 0 = jump.
+    pub view_ms: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
     /// Zoom is told to clients only after it stayed put this long.
@@ -317,6 +319,7 @@ impl Config {
             rules: Vec::new(),
             vars: HashMap::new(),
             pan_step: 200.0,
+            view_ms: 180.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
             zoom_settle_ms: 200.0,

@@ -59,6 +59,9 @@ impl Uwc {
     /// The whole picture of the output; `with_cursor` false leaves the pointer out (screencopy).
     pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, scale: f64, with_cursor: bool) -> Vec<UwcElement> {
         use smithay::wayland::shell::wlr_layer::Layer;
+        if self.step_view() {
+            self.animating = true;
+        }
         // A spinning gradient border changes every frame: new content, and another frame after this one.
         if self.spinning_border_visible() {
             self.deco_commit.increment();

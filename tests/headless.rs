@@ -711,6 +711,32 @@ fn panning_moves_the_view_not_the_windows() {
 }
 
 #[test]
+fn view_moves_ease_to_their_target() {
+    let mut uwc = Uwc::start("ease", None);
+    // IPC shows where the view is going at once; the view itself follows over view-ms.
+    uwc.ok("pan 400 0");
+    let s = uwc.state();
+    assert_eq!(s["monitors"][0]["viewport"]["x"], 400.0);
+    assert_eq!(s["monitors"][0]["view_moving"], true);
+    // A second pan builds on the target, not on wherever the view is by now.
+    uwc.ok("pan 100 0");
+    assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 500.0);
+    uwc.wait("the view to settle", |s| s["monitors"][0]["view_moving"] == false);
+    assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 500.0);
+    // An instant change (zoom) mid-move finishes the move first instead of dropping it.
+    uwc.ok("panto 0 0");
+    uwc.ok("zoom 2");
+    let s = uwc.state();
+    // Settled at x=0, then zoomed about the middle of the 1000 px screen: x = 500 - 500/2.
+    assert_eq!(s["monitors"][0]["viewport"]["x"], 250.0, "{s:#}");
+    assert_eq!(s["monitors"][0]["view_moving"], false);
+    // view-ms 0 jumps.
+    uwc.ok("set view-ms 0");
+    uwc.ok("pan 40 0");
+    assert_eq!(uwc.state()["monitors"][0]["view_moving"], false);
+}
+
+#[test]
 fn move_resize_focus_close() {
     let mut uwc = Uwc::start("wm", None);
     let mut c = uwc.connect();

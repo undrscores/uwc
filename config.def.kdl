@@ -57,6 +57,7 @@ options {
     background-shader ""
     // All of these can be changed live over IPC:  set focus-gradient "#ff0000" "#0000ff" angle=45
     pan-step 200                // canvas px for the pan-view action
+    view-ms 180                 // eased view moves (pan keys, center/fit, reveal, bookmarks, home) take about this long; 0 = jump. Dragging and scrolling are always instant
     move-step 50                // canvas px for move-window / resize-window
     zoom-scroll 1.1             // zoom factor per scroll notch with Mod held
     // Sharp zoom: windows are asked to render at output scale x zoom (fractional scale), so zooming in

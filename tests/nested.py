@@ -61,6 +61,15 @@ cur, kf = move(100,100); check("hover fullscreen A", kf, {"window": A})
 cur, kf = move(900,250); check("pinned B hidden under fullscreen takes no pointer", kf, {"window": A})
 cmd(f"unfullscreen {A}"); time.sleep(0.5)
 check("bar back on top", color(px(600,10)), "bar")
+# Eased view moves: IPC reports the target at once, the drawn view gets there over view-ms through the
+# real frame loop. A (canvas 100,100) is drawn at 50,50 at zoom 0.5; after pan 200 it is at -50.
+cmd("pan 200 0")
+check("eased pan starts moving", cmd("state")["monitors"][0]["view_moving"], True)
+time.sleep(0.8)
+check("and settles", cmd("state")["monitors"][0]["view_moving"], False)
+check("A drawn at its panned spot", (color(px(100,100)), color(px(240,190))), ("red", "root"))
+cmd("pan -200 0"); time.sleep(0.8)
+check("pan back: A where it was", color(px(240,190)), "red")
 # Sharp zoom: a client that re-renders at its fractional scale shows 1 px stripes at 1 screen px when
 # zoomed 2x, once the zoom settled (stretched, they would be 2 px wide: half the transitions).
 cmd(f"minimize {A}"); cmd("home")

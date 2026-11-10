@@ -33,6 +33,7 @@ pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>, size: (i32, i32)
 
     handle
         .insert_source(Timer::from_duration(Duration::from_millis(16)), move |_, _, state| {
+            state.step_view();
             if std::mem::take(&mut state.redraw) {
                 super::send_frame_callbacks(state, &output);
             }

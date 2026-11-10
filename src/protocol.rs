@@ -238,6 +238,8 @@ pub struct Monitor {
     pub scale: f64,
     pub viewport: View,
     pub work_area: Rect,
+    /// An eased view move is still under way (`viewport` already shows where it ends).
+    pub view_moving: bool,
     pub layers: Vec<Layer>,
     pub tags: Vec<Tag>,
 }

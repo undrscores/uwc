@@ -172,6 +172,8 @@ pub struct Monitor {
     pub overview: Option<Viewport>,
     /// Saved views per tag: `bookmarks[tag][n]`.
     pub bookmarks: [[Option<Viewport>; 9]; TAGCOUNT],
+    /// An eased move in progress: the tag and the view `vp[tag]` is heading for.
+    pub target: Option<(usize, Viewport)>,
 }
 
 impl Monitor {
@@ -179,8 +181,30 @@ impl Monitor {
         self.vp[lowest_tag(self.tagset)]
     }
 
+    /// Jump to where an eased move is heading.
+    pub fn settle(&mut self) {
+        if let Some((t, v)) = self.target.take() {
+            self.vp[t] = v;
+        }
+    }
+
+    /// For direct, instant changes: a pending eased move is finished first, so they build on the
+    /// view IPC reported and nothing is left to pull it back.
     pub fn viewport_mut(&mut self) -> &mut Viewport {
+        self.settle();
         &mut self.vp[lowest_tag(self.tagset)]
+    }
+
+    /// Where the view of `tag` is going: the end of an eased move, else the view itself.
+    pub fn view_of(&self, tag: usize) -> Viewport {
+        match self.target {
+            Some((t, v)) if t == tag => v,
+            _ => self.vp[tag],
+        }
+    }
+
+    pub fn target_viewport(&self) -> Viewport {
+        self.view_of(lowest_tag(self.tagset))
     }
 }
 
@@ -268,6 +292,8 @@ pub struct Uwc {
     pub fullscreen_bg_id: Id,
     /// Set while drawing a frame that is part of an animation: the backend asks for the next one.
     pub animating: bool,
+    /// When the eased view move last stepped.
+    pub view_stepped: Instant,
     pub ipc: Ipc,
 }
 
@@ -360,6 +386,7 @@ impl Uwc {
             session_pool: Vec::new(),
             session_written: None,
             animating: false,
+            view_stepped: Instant::now(),
             ipc,
         })
     }
@@ -416,12 +443,18 @@ impl Uwc {
             vp: [Viewport::default(); TAGCOUNT],
             overview: None,
             bookmarks: [[None; 9]; TAGCOUNT],
+            target: None,
         });
         self.cursor = (size.w as f64 / 2.0, size.h as f64 / 2.0).into();
     }
 
     pub fn viewport(&self) -> Viewport {
         self.mon.as_ref().map(|m| m.viewport()).unwrap_or_default()
+    }
+
+    /// The view an eased move is heading for (what IPC reports and relative moves build on).
+    pub fn target_viewport(&self) -> Viewport {
+        self.mon.as_ref().map(|m| m.target_viewport()).unwrap_or_default()
     }
 
     pub fn screen_size(&self) -> (f64, f64) {
@@ -496,9 +529,61 @@ impl Uwc {
         self.damage();
     }
 
-    /// Smooth viewport changes are not animated yet: IPC and key pans are instant.
+    /// Like `with_viewport`, but the view eases to the result over `view-ms` (builds on where an
+    /// earlier eased move is heading, so repeated key pans add up).
+    pub fn with_viewport_eased(&mut self, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        if self.config.view_ms <= 0.0 {
+            return self.with_viewport(f);
+        }
+        let area = self.work_area();
+        let Some(m) = self.mon.as_mut() else { return };
+        m.overview = None;
+        let tag = lowest_tag(m.tagset);
+        let mut v = m.target_viewport();
+        f(&mut v, area);
+        if m.target.is_none() {
+            self.view_stepped = Instant::now();
+        }
+        m.target = (v != m.vp[tag]).then_some((tag, v));
+        self.damage();
+    }
+
+    /// One step of an eased move, called when a frame is drawn: the view closes in on its target
+    /// (the centre of the screen and the log of the zoom move by the same fraction, so the time
+    /// does not matter and a new target mid-move just bends the path). True while still moving.
+    pub fn step_view(&mut self) -> bool {
+        let tau = (self.config.view_ms / 1000.0 / 4.0).max(1e-4);
+        let now = Instant::now();
+        let dt = now.duration_since(self.view_stepped).as_secs_f64().min(0.05);
+        self.view_stepped = now;
+        let Some(m) = self.mon.as_mut() else { return false };
+        let Some((tag, goal)) = m.target else { return false };
+        let (w, h) = (m.size.w as f64 / 2.0, m.size.h as f64 / 2.0);
+        let cur = m.vp[tag];
+        let (c, g) = (cur.screen_to_canvas((w, h)), goal.screen_to_canvas((w, h)));
+        let dz = (goal.zoom / cur.zoom).ln();
+        let near = (g.0 - c.0).abs() * cur.zoom < 0.25 && (g.1 - c.1).abs() * cur.zoom < 0.25 && dz.abs() < 1e-3;
+        let moving = if tag != lowest_tag(m.tagset) || near || self.config.view_ms <= 0.0 {
+            m.vp[tag] = goal;
+            m.target = None;
+            false
+        } else {
+            let k = 1.0 - (-dt / tau).exp();
+            let zoom = cur.zoom * (dz * k).exp();
+            let c = (c.0 + (g.0 - c.0) * k, c.1 + (g.1 - c.1) * k);
+            m.vp[tag] = Viewport { x: c.0 - w / zoom, y: c.1 - h / zoom, zoom };
+            true
+        };
+        self.refresh_pointer();
+        self.redraw = true;
+        if !moving {
+            self.ipc.dirty = true;
+        }
+        moving
+    }
+
     pub fn pan_canvas(&mut self, dx: f64, dy: f64) {
-        self.with_viewport(|v, _| v.pan_canvas(dx, dy));
+        self.with_viewport_eased(|v, _| v.pan_canvas(dx, dy));
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
@@ -580,14 +665,14 @@ impl Uwc {
         }
         let r = self.clients[i].rect();
         let (ax, ay, aw, ah) = self.work_area();
-        let vp = self.viewport();
+        let vp = self.target_viewport();
         let (sx, sy) = vp.canvas_to_screen((r.loc.x, r.loc.y));
         let (ex, ey) = vp.canvas_to_screen((r.loc.x + r.size.w, r.loc.y + r.size.h));
         if sx >= ax && sy >= ay && ex <= ax + aw && ey <= ay + ah {
             return;
         }
         let c = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0);
-        self.with_viewport(|v, s| v.center_on(c, s));
+        self.with_viewport_eased(|v, s| v.center_on(c, s));
     }
 
     pub fn focus_and_reveal(&mut self, id: u32) {
@@ -781,7 +866,7 @@ impl Uwc {
     pub fn bookmark_save(&mut self, n: usize) {
         if let Some(m) = self.mon.as_mut() {
             let t = crate::canvas::lowest_tag(m.tagset);
-            m.bookmarks[t][n] = Some(m.viewport());
+            m.bookmarks[t][n] = Some(m.target_viewport());
             self.ipc.dirty = true;
         }
     }
@@ -791,7 +876,7 @@ impl Uwc {
         let Some(v) = self.mon.as_ref().and_then(|m| m.bookmarks[crate::canvas::lowest_tag(m.tagset)][n]) else {
             return false;
         };
-        self.with_viewport(|vp, _| *vp = v);
+        self.with_viewport_eased(|vp, _| *vp = v);
         true
     }
 
@@ -922,13 +1007,13 @@ impl Uwc {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let r = self.clients[i].rect();
                     let c = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0);
-                    self.with_viewport(|v, s| v.center_on(c, s));
+                    self.with_viewport_eased(|v, s| v.center_on(c, s));
                 }
             }
             Action::FitWindow => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let r = self.clients[i].rect();
-                    self.with_viewport(|v, s| v.fit((r.loc.x, r.loc.y, r.size.w, r.size.h), s, 40.0));
+                    self.with_viewport_eased(|v, s| v.fit((r.loc.x, r.loc.y, r.size.w, r.size.h), s, 40.0));
                 }
             }
             Action::ToggleOverview => self.toggle_overview(),

@@ -178,7 +178,8 @@ impl Uwc {
                 layout: "><>",
                 rect: P::Rect { x: 0, y: 0, width: sw as i64, height: sh as i64 },
                 scale: m.output.current_scale().fractional_scale(),
-                viewport: view(&m.viewport()),
+                viewport: view(&m.target_viewport()),
+                view_moving: m.target.is_some(),
                 work_area: P::Rect { x: wa.0 as i64, y: wa.1 as i64, width: wa.2 as i64, height: wa.3 as i64 },
                 layers: self.layer_info(),
                 tags: (0..TAGCOUNT)
@@ -187,7 +188,7 @@ impl Uwc {
                         active: ts & (1 << i) != 0,
                         occupied: occ & (1 << i) != 0,
                         urgent: urg & (1 << i) != 0,
-                        viewport: view(&m.vp[i]),
+                        viewport: view(&m.view_of(i)),
                         bookmarks: m.bookmarks[i]
                             .iter()
                             .enumerate()
@@ -206,7 +207,7 @@ impl Uwc {
                 let mut r = c.rect();
                 // A pinned window's canvas position is wherever its screen spot is over the canvas now.
                 if let Some(p) = c.pin {
-                    r.loc = self.viewport().screen_to_canvas((p.x, p.y)).into();
+                    r.loc = self.target_viewport().screen_to_canvas((p.x, p.y)).into();
                 }
                 P::Window {
                     id: c.id,
@@ -338,7 +339,7 @@ impl Uwc {
                 }
             }
             R::Pan(dx, dy) => self.pan_canvas(dx, dy),
-            R::PanTo(x, y) => self.with_viewport(|v, _| {
+            R::PanTo(x, y) => self.with_viewport_eased(|v, _| {
                 v.x = x;
                 v.y = y;
             }),
@@ -393,7 +394,7 @@ impl Uwc {
             R::Session { save: true } => self.session_save(true).map_err(|e| format!("{e:#}"))?,
             R::Session { save: false } => self.session_forget(),
             R::Overview => self.toggle_overview(),
-            R::Home => self.with_viewport(|v, _| *v = Default::default()),
+            R::Home => self.with_viewport_eased(|v, _| *v = Default::default()),
             R::Reload => self.reload_config()?,
             R::Quit => self.loop_signal.stop(),
         }

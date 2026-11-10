@@ -193,6 +193,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "root-color" => root_color,
     "fullscreen-bg" => fullscreen_bg,
     "pan-step" => pan_step (1, 10000),
+    "view-ms" => view_ms (0, 5000),
     "move-step" => move_step (1, 10000),
     "zoom-scroll" => zoom_scroll (1.01, 3),
     "zoom-settle-ms" => zoom_settle_ms (0, 10000),
