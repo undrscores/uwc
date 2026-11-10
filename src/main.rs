@@ -19,6 +19,7 @@ mod protocols;
 mod render;
 mod rules;
 mod scale;
+mod screencopy;
 mod session;
 mod state;
 mod sync;
@@ -218,6 +219,7 @@ fn run() -> Result<()> {
         state.sync_scales();
         state.workspace_refresh();
         state.toplevels_refresh();
+        state.screencopy_flush();
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();
     })?;

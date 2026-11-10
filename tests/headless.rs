@@ -26,6 +26,9 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1 as tl_handle, zwlr_foreign_toplevel_manager_v1 as tl_manager,
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1 as sc_frame, zwlr_screencopy_manager_v1 as sc_manager,
+};
 
 // ---- the compositor under test -----------------------------------------------------------
 
@@ -464,6 +467,28 @@ noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
 noop!(export_manager::HyprlandToplevelExportManagerV1);
+noop!(sc_manager::ZwlrScreencopyManagerV1);
+
+impl Dispatch<sc_frame::ZwlrScreencopyFrameV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &sc_frame::ZwlrScreencopyFrameV1,
+        e: sc_frame::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            sc_frame::Event::Buffer { format, width, height, stride } => {
+                app.export_buffer = Some((format.into(), width, height, stride))
+            }
+            sc_frame::Event::BufferDone => app.export_done = true,
+            sc_frame::Event::Failed => app.export_failed = true,
+            sc_frame::Event::Ready { .. } => app.export_ready = true,
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<export_frame::HyprlandToplevelExportFrameV1, ()> for App {
     fn event(
@@ -1491,4 +1516,28 @@ fn window_previews_offer_the_window_and_fail_cleanly_without_a_renderer() {
     let _f2 = m.capture_toplevel(0, 9999, &qh, ());
     c.sync();
     assert!(c.app.export_failed, "an unknown window fails at once");
+}
+
+#[test]
+fn screencopy_offers_the_output_and_fails_cleanly_without_a_renderer() {
+    let uwc = Uwc::start("screencopy", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let out: wl_output::WlOutput = c.globals.bind(&qh, 1..=4, ()).unwrap();
+    let m: sc_manager::ZwlrScreencopyManagerV1 = c.globals.bind(&qh, 1..=3, ()).unwrap();
+    let frame = m.capture_output(0, &out, &qh, ());
+    c.sync();
+    assert_eq!(c.app.export_buffer, Some((0, 1000, 600, 4000)), "the whole output, ARGB8888");
+    assert!(c.app.export_done, "buffer_done (v3)");
+    let buf = c.buffer("sc", 1000, 600);
+    frame.copy(&buf);
+    c.sync();
+    assert!(c.app.export_failed && !c.app.export_ready, "headless: failed, not a hang");
+
+    // A region, in logical px.
+    c.app.export_buffer = None;
+    let _f = m.capture_output_region(0, &out, 10, 20, 300, 200, &qh, ());
+    c.sync();
+    assert_eq!(c.app.export_buffer, Some((0, 300, 200, 1200)));
+    drop(uwc);
 }

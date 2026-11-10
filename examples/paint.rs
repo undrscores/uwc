@@ -64,6 +64,11 @@ fn main() {
     for y in 0..h {
         for x in 0..w {
             let edge = x < 10 || y < 10 || x >= w - 10 || y >= h - 10;
+            // A white strip under the top edge, like a title bar: the picture has a top and a bottom.
+            if !edge && y < 30 {
+                px.extend_from_slice(&[0xee, 0xee, 0xee, 255]);
+                continue;
+            }
             let k = if edge { 255 } else { 0 };
             px.extend_from_slice(&[b.saturating_add(k / 3), g.saturating_add(k / 3), r.saturating_add(k / 3), 255]);
         }

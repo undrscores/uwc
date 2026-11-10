@@ -106,13 +106,14 @@ check("an animated border keeps moving", a != b2, True)
 # Window previews (hyprland-toplevel-export, as Quickshell's ScreencopyView asks): the window alone,
 # at its own size, without uwc's border, shadow or zoom.
 def capture(args):
-    r = subprocess.run(["./target/debug/examples/capture", *args, SP+"/cap.ppm"], env=wenv, capture_output=True, text=True)
+    r = subprocess.run(["./target/debug/examples/capture", *args, SP+"/cap.ppm"], env=wenv, capture_output=True, text=True, timeout=20)
     return r.returncode, r.stdout.strip()
 rc, size = capture(["--title", "B"])
 check("capture by toplevel handle", (rc, size), (0, "300x200"))
 im = Image.open(SP+"/cap.ppm").convert("RGB")
 check("the window's own pixels", im.getpixel((150,100)), (0x30,0x50,0xd0))
 r,g,b = im.getpixel((2,2)); check("its own frame at the corner, not uwc's border", (r > 90 and b > 200 and g > 100), True)
+check("the right way up: title strip at the top", (im.getpixel((150,20)), im.getpixel((150,190))[2] > 200), ((0xee,0xee,0xee), True))
 rc, size = capture(["--id", str(B)])
 check("capture by uwc window id", (rc, size), (0, "300x200"))
 rc, _ = capture(["--id", "9999"])
@@ -130,6 +131,26 @@ try:
 except subprocess.TimeoutExpired:
     check("and comes once the window redraws", False, True)
 cmd("zoom 1 0 0")
+# Output capture (wlr-screencopy, what grim and Quickshell's monitor capture use).
+st = cmd("state")["monitors"][0]
+rc, size = capture(["--output"])
+check("screencopy of the whole output", (rc, size), (0, f'{st["width"]}x{st["height"]}'))
+im = Image.open(SP+"/cap.ppm").convert("RGB")
+check("the bar where it is on screen", im.getpixel((600,10)), (0x24,0x28,0x3b))
+r,g,b = im.getpixel((850,200)); check("pinned B where it is on screen", (r,g,b), (0x30,0x50,0xd0))
+# A region exactly over B (pinned at 700,100, 300x200): B's own picture, top-left included, so the
+# region is taken from the right place (not mirrored vertically).
+rc, size = capture(["--region", "700", "100", "300", "200"])
+check("screencopy of a region", (rc, size), (0, "300x200"))
+im = Image.open(SP+"/cap.ppm").convert("RGB")
+check("region centre is B", im.getpixel((150,100)), (0x30,0x50,0xd0))
+r,g,b = im.getpixel((3,3)); check("region top-left is B's light frame", (r > 90 and b > 200 and g > 100), True)
+check("region the right way up: B's title strip at its top", im.getpixel((150,20)), (0xee,0xee,0xee))
+rc, _ = capture(["--region", "0", "0", "100", "60"])
+im = Image.open(SP+"/cap.ppm").convert("RGB")
+check("a region over the bar has the bar in its top rows", im.getpixel((50,5)) != im.getpixel((50,55)), True)
+rc, _ = capture(["--region", "5000", "5000", "10", "10"])
+check("a region off the output fails", rc, 2)
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

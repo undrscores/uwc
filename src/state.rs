@@ -208,6 +208,9 @@ pub struct Uwc {
     pub workspaces: crate::workspace::WorkspaceState,
     pub toplevels: crate::toplevels::ForeignToplevels,
     pub export: crate::export::ToplevelExport,
+    pub screencopy: crate::screencopy::Screencopy,
+    /// Frames the output has drawn (with damage), for screencopy's copy_with_damage.
+    pub frames_drawn: u64,
     /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
     pub layer_focus: Option<WlSurface>,
     pub dmabuf_state: DmabufState,
@@ -316,6 +319,8 @@ impl Uwc {
             workspaces: crate::workspace::WorkspaceState::new(&dh),
             toplevels: crate::toplevels::ForeignToplevels::new(&dh),
             export: crate::export::ToplevelExport::new(&dh),
+            screencopy: crate::screencopy::Screencopy::new(&dh),
+            frames_drawn: 0,
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
             syncobj_state: None,

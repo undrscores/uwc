@@ -10,7 +10,7 @@ use smithay::{
             damage::OutputDamageTracker,
             element::{surface::WaylandSurfaceRenderElement, AsRenderElements, RenderElement},
             gles::{GlesRenderer, GlesTexture},
-            Bind, ExportMem, Offscreen, TextureMapping,
+            Bind, ExportMem, Offscreen,
         },
     },
     reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_shm},
@@ -98,22 +98,41 @@ pub fn render_to_shm<E: RenderElement<GlesRenderer>>(
     scale: f64,
     buffer: &WlBuffer,
 ) -> Result<(), String> {
+    // Transparent around the window.
+    render_region_to_shm(r, elements, size, Rectangle::from_size(size), scale, [0.0; 4], buffer)
+}
+
+/// Render `elements` at `size` over `clear` and copy the part `region` of it into the shm `buffer`
+/// (already checked to be `region`'s size).
+pub fn render_region_to_shm<E: RenderElement<GlesRenderer>>(
+    r: &mut GlesRenderer,
+    elements: &[E],
+    size: Size<i32, Physical>,
+    region: Rectangle<i32, Physical>,
+    scale: f64,
+    clear: [f32; 4],
+    buffer: &WlBuffer,
+) -> Result<(), String> {
     let bsize: Size<i32, Buffer> = (size.w, size.h).into();
     let mut tex: GlesTexture =
         r.create_buffer(Fourcc::Abgr8888, bsize).map_err(|e| format!("offscreen buffer: {e}"))?;
     let mapping = {
         let mut fb = r.bind(&mut tex).map_err(|e| format!("bind: {e}"))?;
         let mut tracker = OutputDamageTracker::new(size, scale, Transform::Normal);
-        tracker.render_output(r, &mut fb, 0, elements, [0.0, 0.0, 0.0, 0.0]).map_err(|e| format!("render: {e:?}"))?;
-        r.copy_framebuffer(&fb, Rectangle::from_size(bsize), Fourcc::Argb8888).map_err(|e| format!("read back: {e}"))?
+        tracker.render_output(r, &mut fb, 0, elements, clear).map_err(|e| format!("render: {e:?}"))?;
+        let area =
+            Rectangle::<i32, Buffer>::new((region.loc.x, region.loc.y).into(), (region.size.w, region.size.h).into());
+        r.copy_framebuffer(&fb, area, Fourcc::Argb8888).map_err(|e| format!("read back: {e}"))?
     };
-    let flipped = mapping.flipped();
     let pixels = r.map_texture(&mapping).map_err(|e| format!("map: {e}"))?;
-    let row = (size.w * 4) as usize;
+    let (w, h) = (region.size.w, region.size.h);
+    let row = (w * 4) as usize;
     with_buffer_contents_mut(buffer, |ptr, len, d| {
-        for y in 0..size.h as usize {
-            // GL reads bottom-up; the client gets the picture the right way up.
-            let src_y = if flipped { size.h as usize - 1 - y } else { y };
+        for y in 0..h as usize {
+            // smithay renders offscreen textures upright, so their read-back rows are already top-down
+            // (its mapping says `flipped`, which holds for the GL framebuffer, not here; checked
+            // with asymmetric pictures in tests/nested.py).
+            let src_y = y;
             let dst = d.offset as usize + y * d.stride as usize;
             if dst + row > len {
                 break;

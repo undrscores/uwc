@@ -593,6 +593,7 @@ impl Uwc {
                     Ok(r) if !r.is_empty => match out.drm_output.queue_frame(()) {
                         Ok(()) => {
                             out.pending = true;
+                            self.frames_drawn += 1;
                             true
                         }
                         Err(e) => {

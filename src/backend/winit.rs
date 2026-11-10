@@ -80,7 +80,12 @@ impl Uwc {
                 Ok((renderer, mut fb)) => {
                     let elements = self.frame_elements(renderer, 1.0);
                     match w.tracker.render_output(renderer, &mut fb, age, &elements, self.config.root_color) {
-                        Ok(r) => r.damage.cloned(),
+                        Ok(r) => {
+                            if r.damage.is_some_and(|d| !d.is_empty()) {
+                                self.frames_drawn += 1;
+                            }
+                            r.damage.cloned()
+                        }
                         Err(e) => {
                             tracing::error!("render: {e}");
                             None

@@ -37,6 +37,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Window rules (uwc's own design, not uwm's): `rule { match ...; exclude ...; open { ... }; <decoration> }`; exact or glob app-id/title, state matchers (`focused`, `tag`, `pinned`, `fullscreen`, `urgent`) that decoration follows live; `open { tag size position pinned fullscreen minimized focus }` applied once (size and fullscreen in the first configure); IPC `rule { ... }` / `rule clear` / `rules`, `get-window ID` (a window's resolved decoration) | done |
 | Viewport bookmarks: 9 per tag, `bookmark-save` / `bookmark-goto` (Mod+Alt+[Shift+]1..9), IPC `bookmark save\|goto N`, listed per tag in the snapshot | done |
 | Window previews: hyprland-toplevel-export-v1 (what Quickshell's `ScreencopyView` uses for a `ToplevelManager` toplevel; also by uwc window id): the window alone at the output scale, no decoration or zoom, into an shm buffer; damage-waiting copies are answered on the window's next commit, so live previews follow the app's frame rate | done |
+| Output capture: wlr-screencopy (grim, screen recorders, Quickshell's monitor `ScreencopyView`): the whole output or a region, pointer optional, `copy_with_damage` answered on the next drawn frame | done |
 | wlr-foreign-toplevel-management: the window list for taskbars and shells (Quickshell's ToplevelManager, Waybar): title, app-id, output, activated/minimized/fullscreen; activate (restores and reveals), close, minimize, fullscreen | done |
 | wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
 
@@ -133,6 +134,7 @@ src/toplevels.rs   wlr-foreign-toplevel-management (the window list for taskbars
 src/capture.rs     drawing into a client's buffer (offscreen render, read back into shm)
 src/export.rs      hyprland-toplevel-export-v1: window previews
 src/protocols.rs   protocols no crate has, generated from protocols/*.xml
+src/screencopy.rs  wlr-screencopy: output captures
 src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
 src/scale.rs       sharp zoom: preferred render scale per window (fractional scale)
 src/session.rs     session restore (serde, JSON in XDG_STATE_HOME)
@@ -155,7 +157,8 @@ Repeater {
 }
 ```
 
-`cargo run --example capture -- --title TITLE out.ppm` grabs one window from the command line.
+`cargo run --example capture -- --title TITLE out.ppm` grabs one window from the command line,
+`--output out.ppm` or `--region X Y W H out.ppm` the screen (so does `grim`).
 
 ## Differences from uwm worth knowing
 
