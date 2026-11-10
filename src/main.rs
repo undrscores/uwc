@@ -6,6 +6,7 @@ mod backend;
 mod canvas;
 mod capture;
 mod config;
+mod constraints;
 mod cursor;
 mod deco;
 mod export;

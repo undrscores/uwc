@@ -59,16 +59,25 @@ impl Uwc {
             }
             InputEvent::PointerMotion { event } => {
                 let t = Event::time_msec(&event);
+                let (dx, dy) = (event.delta_x(), event.delta_y());
                 let (sw, sh) = self.global_size();
-                let p: Point<f64, Logical> = (self.cursor.x + event.delta_x(), self.cursor.y + event.delta_y()).into();
-                self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
-                self.real_motion(t);
+                let p: Point<f64, Logical> = (self.cursor.x + dx, self.cursor.y + dy).into();
+                // A locked pointer consumes the motion (the client reads the deltas); a
+                // confined one is kept inside the window.
+                if let Some(p) = self.apply_pointer_constraint(p, (dx, dy), t) {
+                    self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
+                    self.real_motion(t);
+                }
             }
             InputEvent::PointerMotionAbsolute { event } => {
                 let t = Event::time_msec(&event);
                 let (w, h) = self.global_size();
-                self.cursor = event.position_transformed((w as i32, h as i32).into());
-                self.real_motion(t);
+                let p = event.position_transformed((w as i32, h as i32).into());
+                let d = (p.x - self.cursor.x, p.y - self.cursor.y);
+                if let Some(p) = self.apply_pointer_constraint(p, d, t) {
+                    self.cursor = p;
+                    self.real_motion(t);
+                }
             }
             InputEvent::PointerButton { event } => {
                 self.pointer_button(event.button_code(), event.state(), Event::time_msec(&event))
@@ -168,6 +177,10 @@ impl Uwc {
             Some(Under::Layer { surface, origin, .. }) => (local, Some((surface, origin))),
             None => (local, None),
         };
+        // A persistent constraint re-activates when the pointer enters its surface again.
+        if let Some((surface, _)) = &focus {
+            self.pointer_constraint_entered(surface);
+        }
         let ptr = self.pointer();
         ptr.motion(self, focus, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });
         ptr.frame(self);

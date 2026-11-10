@@ -4,8 +4,8 @@ use smithay::{
     backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
-    delegate_output, delegate_seat, delegate_session_lock, delegate_shm, delegate_xdg_activation,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_output, delegate_pointer_constraints, delegate_relative_pointer, delegate_seat, delegate_session_lock,
+    delegate_shm, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
     input::{
         pointer::{CursorImageStatus, Focus},
@@ -439,5 +439,7 @@ delegate_output!(Uwc);
 delegate_dmabuf!(Uwc);
 delegate_xdg_activation!(Uwc);
 delegate_session_lock!(Uwc);
+delegate_pointer_constraints!(Uwc);
+delegate_relative_pointer!(Uwc);
 delegate_idle_notify!(Uwc);
 delegate_idle_inhibit!(Uwc);

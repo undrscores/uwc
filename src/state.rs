@@ -332,6 +332,13 @@ pub struct Uwc {
     pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Uwc>,
     /// ext-session-lock-v1 (lock screen clients).
     pub session_lock: crate::sessionlock::SessionLock,
+    /// zwp-pointer-constraints-v1 (games, 3D apps); held so the global stays alive.
+    #[allow(dead_code)]
+    pub pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState,
+    /// zwp-relative-pointer-manager-v1 (the deltas a locked pointer hands over); held so the
+    /// global stays alive.
+    #[allow(dead_code)]
+    pub relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
     #[allow(dead_code)] // held so the global stays alive
     pub idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
     /// Live zwp-idle-inhibitor-v1 objects; any one pauses the idle notifications.
@@ -461,6 +468,8 @@ impl Uwc {
             activation_state: smithay::wayland::xdg_activation::XdgActivationState::new::<Uwc>(&dh),
             idle_notifier: smithay::wayland::idle_notify::IdleNotifierState::new(&dh, loop_handle.clone()),
             session_lock: crate::sessionlock::SessionLock::new(&dh),
+            pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Uwc>(&dh),
+            relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Uwc>(&dh),
             idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Uwc>(&dh),
             idle_inhibitors: 0,
             frames_drawn: 0,

@@ -25,6 +25,7 @@ use wayland_protocols::ext::workspace::v1::client::{
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
+    pointer_constraints::zv1::client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::{
@@ -227,6 +228,9 @@ struct App {
     /// serial to ack.
     lock_events: Vec<String>,
     lock_serial: Option<u32>,
+    /// zwp-pointer-constraints: the events so far ("confined", "locked", "unconfined",
+    /// "unlocked").
+    constraint_events: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -300,6 +304,7 @@ impl Client {
             popup_done: false,
             lock_events: vec![],
             lock_serial: None,
+            constraint_events: vec![],
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -473,6 +478,20 @@ impl Client {
         surface.commit();
         self.sync();
         lock
+    }
+
+    /// Roundtrips until a pointer-constraint event named `what` arrives.
+    fn wait_constraint(&mut self, what: &str) {
+        let start = Instant::now();
+        while !self.app.constraint_events.iter().any(|e| e == what) {
+            self.sync();
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timed out waiting for {what}: {:?}",
+                self.app.constraint_events
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Roundtrips until a lock event named `what` arrives.
@@ -680,6 +699,36 @@ impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for App 
         }
     }
 }
+impl Dispatch<zwp_confined_pointer_v1::ZwpConfinedPointerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        e: zwp_confined_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_confined_pointer_v1::Event::Confined = e {
+            app.constraint_events.push("confined".into());
+        }
+    }
+}
+impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        e: zwp_locked_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            zwp_locked_pointer_v1::Event::Locked => app.constraint_events.push("locked".into()),
+            zwp_locked_pointer_v1::Event::Unlocked => app.constraint_events.push("unlocked".into()),
+            _ => {}
+        }
+    }
+}
 impl Dispatch<xdg_popup::XdgPopup, ()> for App {
     fn event(
         app: &mut Self,
@@ -697,11 +746,16 @@ impl Dispatch<xdg_popup::XdgPopup, ()> for App {
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
+noop!(wayland_client::protocol::wl_pointer::WlPointer);
 noop!(export_manager::HyprlandToplevelExportManagerV1);
 noop!(sc_manager::ZwlrScreencopyManagerV1);
 noop!(xdg_activation_v1::XdgActivationV1);
 noop!(ext_idle_notifier_v1::ExtIdleNotifierV1);
 noop!(wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1);
+noop!(wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1);
+noop!(
+    wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+);
 noop!(zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1);
 noop!(zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
 noop!(xdg_positioner::XdgPositioner);
@@ -2021,4 +2075,31 @@ fn a_session_lock_covers_the_screen_and_unlocks() {
     c.sync();
     let s = uwc.wait("unlocked", |s| s["keyboard_focus"]["window"] == id);
     assert_eq!(s["keyboard_focus"]["window"], id);
+}
+
+#[test]
+fn pointer_constraints_activate_over_the_window() {
+    let mut uwc = Uwc::start("constraints", None);
+    let mut c = uwc.connect();
+    let w = c.window("A", 300, 200);
+    uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let seat = c.bind_seat();
+    let qh = c.queue.handle();
+    let manager = c
+        .globals
+        .bind::<wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1, _, _>(&qh, 1..=1, ())
+        .expect("zwp_pointer_constraints_v1");
+
+    let pointer = seat.get_pointer(&qh, ());
+    use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::Lifetime;
+
+    // The pointer sits over the window, so a confinement activates right away.
+    let confined = manager.confine_pointer(&w.surface, &pointer, None, Lifetime::Oneshot, &qh, ());
+    c.wait_constraint("confined");
+    confined.destroy();
+    c.sync();
+
+    // A lock takes over: the cursor is held still and the client reads the deltas.
+    let _locked = manager.lock_pointer(&w.surface, &pointer, None, Lifetime::Oneshot, &qh, ());
+    c.wait_constraint("locked");
 }

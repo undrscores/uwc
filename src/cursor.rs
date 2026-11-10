@@ -126,13 +126,17 @@ fn arrow(px: u32) -> CursorImage {
 }
 
 impl Uwc {
-    /// The pointer as render elements at output scale `scale` (empty when hidden).
+    /// The pointer as render elements at output scale `scale` (empty when hidden, and while
+    /// a locked pointer holds it still).
     pub fn cursor_elements_at(
         &mut self,
         renderer: &mut GlesRenderer,
         scale: f64,
         pos: Point<f64, Logical>,
     ) -> Vec<UwcElement> {
+        if self.pointer_locked() {
+            return vec![];
+        }
         let pos: Point<f64, Physical> = (pos.x * scale, pos.y * scale).into();
         match &self.cursor_status {
             CursorImageStatus::Hidden => vec![],
