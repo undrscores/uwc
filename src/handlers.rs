@@ -5,7 +5,7 @@ use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
     delegate_output, delegate_pointer_constraints, delegate_relative_pointer, delegate_seat, delegate_session_lock,
-    delegate_shm, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_shm, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell, delegate_xwayland_shell,
     desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
     input::{
         pointer::{CursorImageStatus, Focus},
@@ -44,7 +44,7 @@ use smithay::{
 
 use crate::{
     canvas::ALLTAGS,
-    state::{Client as UClient, ClientState, Uwc},
+    state::{Client as UClient, ClientState, Shell, Uwc},
 };
 
 impl CompositorHandler for Uwc {
@@ -53,7 +53,11 @@ impl CompositorHandler for Uwc {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(d) = client.get_data::<ClientState>() {
+            return &d.compositor_state;
+        }
+        // The Xwayland server's client carries its own.
+        &client.get_data::<smithay::xwayland::XWaylandClientData>().unwrap().compositor_state
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
@@ -71,18 +75,24 @@ impl CompositorHandler for Uwc {
         }
 
         if let Some(i) = self.client_by_surface(&root) {
-            self.clients[i].window.on_commit();
             self.clients[i].commits += 1;
-            let toplevel = self.clients[i].window.toplevel().unwrap().clone();
-            let sent = with_states(&root, |s| {
-                s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap().initial_configure_sent
-            });
-            if !sent {
-                self.open_rules(i);
-                toplevel.send_configure();
-            }
-            if !self.clients[i].mapped && self.clients[i].window.geometry().size.w > 0 {
-                self.map_client(i);
+            match self.clients[i].shell.clone() {
+                Shell::Wayland(w) => {
+                    w.on_commit();
+                    let toplevel = w.toplevel().unwrap().clone();
+                    let sent = with_states(&root, |s| {
+                        s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap().initial_configure_sent
+                    });
+                    if !sent {
+                        self.open_rules(i);
+                        toplevel.send_configure();
+                    }
+                    if !self.clients[i].mapped && w.geometry().size.w > 0 {
+                        self.map_client(i);
+                    }
+                }
+                // An X11 window maps when the X server asks for it, not on a commit.
+                Shell::X11(_) => {}
             }
             self.ipc.dirty = true;
             let id = self.clients[i].id;
@@ -121,16 +131,18 @@ impl Uwc {
         }
         let screen = self.monitors.get(self.cur).map(|m| m.size).unwrap_or((1280, 720).into());
         let c = &mut self.clients[i];
-        if let Some(t) = c.window.toplevel() {
-            t.with_pending_state(|s| {
-                if let Some((w, h)) = open.size {
-                    s.size = Some((w, h).into());
-                }
-                if open.fullscreen {
-                    s.states.set(State::Fullscreen);
-                    s.size = Some(screen);
-                }
-            });
+        if let Shell::Wayland(w) = &c.shell {
+            if let Some(t) = w.toplevel() {
+                t.with_pending_state(|s| {
+                    if let Some((w, h)) = open.size {
+                        s.size = Some((w, h).into());
+                    }
+                    if open.fullscreen {
+                        s.states.set(State::Fullscreen);
+                        s.size = Some(screen);
+                    }
+                });
+            }
         }
         if open.fullscreen {
             c.fullscreen = true;
@@ -182,9 +194,11 @@ impl Uwc {
             self.minimize_stamp += 1;
             self.clients[i].minimized = self.minimize_stamp;
         }
-        for m in &self.monitors {
-            let rect = Rectangle::from_size(m.size);
-            output_update(&m.output, Some(rect), self.clients[i].surface());
+        if let Some(surface) = self.clients[i].surface() {
+            for m in &self.monitors {
+                let rect = Rectangle::from_size(m.size);
+                output_update(&m.output, Some(rect), &surface);
+            }
         }
         let id = self.clients[i].id;
         // It takes the keyboard unless a rule says not to, or it opened out of sight.
@@ -216,7 +230,7 @@ impl XdgShellHandler for Uwc {
         self.next_id += 1;
         self.clients.push(UClient {
             id,
-            window: Window::new_wayland_window(surface),
+            shell: Shell::Wayland(Window::new_wayland_window(surface)),
             canvas: (0.0, 0.0).into(),
             tags: self.tagset(),
             mapped: false,
@@ -272,32 +286,7 @@ impl XdgShellHandler for Uwc {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
-            // Keep the last frame to fade out over close-ms: the one captured when the close was
-            // asked for, else one captured now if the surface is still alive (skipped without a
-            // renderer, so closing stays instant headless).
-            let idle = !self.anim_running();
-            let g = self.pending_ghosts.remove(&self.clients[i].id).or_else(|| self.closing_ghost(i));
-            if let Some(g) = g {
-                self.ghosts.push(g);
-                if idle {
-                    self.begin_anim();
-                }
-                self.damage();
-            }
-            let gone = self.clients.remove(i);
-            self.export_on_close(gone.id);
-            if self.focus == Some(gone.id) {
-                self.focus = None;
-                let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
-                self.focus_client(top);
-            }
-            if let Some(crate::state::Drag::Move { id, .. } | crate::state::Drag::Resize { id, .. }) = self.drag {
-                if id == gone.id {
-                    self.drag = None;
-                }
-            }
-            self.refresh_pointer();
-            self.damage();
+            self.remove_client(i);
         }
     }
 
@@ -441,5 +430,6 @@ delegate_xdg_activation!(Uwc);
 delegate_session_lock!(Uwc);
 delegate_pointer_constraints!(Uwc);
 delegate_relative_pointer!(Uwc);
+delegate_xwayland_shell!(Uwc);
 delegate_idle_notify!(Uwc);
 delegate_idle_inhibit!(Uwc);

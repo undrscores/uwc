@@ -104,6 +104,7 @@ impl Uwc {
     /// layer, fullscreen windows, top layer, windows, bottom and background layers — all on the
     /// monitor the point is on, in that monitor's coordinates.
     pub fn under(&self, p: Point<f64, Logical>) -> Option<Under> {
+        let p_global = p;
         let m = self.mon_at(p);
         let o = self.output_of(m);
         let p = p - self.monitors.get(m).map(|x| x.origin).unwrap_or((0.0, 0.0).into());
@@ -113,6 +114,21 @@ impl Uwc {
             origin: h.origin,
             location: h.location,
         };
+        // Override-redirect X11 windows (menus, tooltips) are on top of everything.
+        for w in self.or_windows.iter().rev() {
+            if let Some(r) = self.or_geometry(w) {
+                if r.contains((p_global.x, p_global.y)) {
+                    if let Some(surface) = w.wl_surface() {
+                        return Some(Under::Layer {
+                            root: surface.clone(),
+                            surface,
+                            origin: r.loc,
+                            interactive: false,
+                        });
+                    }
+                }
+            }
+        }
         if let Some(u) = o.as_ref().and_then(|o| self.layer_under(o, WlrLayer::Overlay, p)) {
             return Some(u);
         }
@@ -147,7 +163,7 @@ impl Uwc {
         } else {
             self.layer_focus
                 .clone()
-                .or_else(|| self.focus.and_then(|id| self.client_index(id)).map(|i| self.clients[i].surface().clone()))
+                .or_else(|| self.focus.and_then(|id| self.client_index(id)).and_then(|i| self.clients[i].surface()))
         };
         let kb = self.keyboard();
         if kb.current_focus() != target {

@@ -173,8 +173,12 @@ impl PointerConstraintsHandler for Uwc {
 impl Uwc {
     /// The client whose main surface this is, and the monitor it is on.
     fn client_on(&self, surface: &WlSurface) -> Option<(usize, &Client)> {
-        let (i, m) =
-            self.clients.iter().enumerate().find(|(_, c)| c.surface() == surface).map(|(i, c)| (i, self.mon_of(c)))?;
+        let (i, m) = self
+            .clients
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.surface().as_ref() == Some(surface))
+            .map(|(i, c)| (i, self.mon_of(c)))?;
         Some((m, &self.clients[i]))
     }
 }

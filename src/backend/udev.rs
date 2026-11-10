@@ -545,11 +545,13 @@ impl Uwc {
             self.add_monitor(output.clone(), logical);
             // Windows already mapped need to know about the (new) output for their scale.
             for c in &self.clients {
-                smithay::desktop::utils::output_update(
-                    &output,
-                    Some(smithay::utils::Rectangle::from_size(logical)),
-                    c.surface(),
-                );
+                if let Some(surface) = c.surface() {
+                    smithay::desktop::utils::output_update(
+                        &output,
+                        Some(smithay::utils::Rectangle::from_size(logical)),
+                        &surface,
+                    );
+                }
             }
             gpu.outs.push(Out { crtc, connector: info.handle(), output, global, drm_output, pending: false });
         }

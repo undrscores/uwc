@@ -138,9 +138,17 @@ impl Ghost {
 }
 
 /// A toplevel window and where it sits on the canvas.
+/// What a client is: a Wayland xdg-shell toplevel, or an X11 window through Xwayland.
+#[derive(Clone)]
+pub enum Shell {
+    Wayland(Window),
+    /// Boxed: an X11Surface is far larger than a Wayland window handle.
+    X11(Box<smithay::xwayland::xwm::X11Surface>),
+}
+
 pub struct Client {
     pub id: u32,
-    pub window: Window,
+    pub shell: Shell,
     /// Top-left of the window geometry in canvas px (what clients are told and IPC reports).
     pub canvas: Point<f64, Logical>,
     pub tags: u32,
@@ -177,7 +185,18 @@ pub struct Client {
 
 impl Client {
     pub fn size(&self) -> Size<i32, Logical> {
-        self.window.geometry().size
+        match &self.shell {
+            Shell::Wayland(w) => w.geometry().size,
+            Shell::X11(s) => s.geometry().size,
+        }
+    }
+
+    /// The X11 window, when this client is one.
+    pub fn x11(&self) -> Option<&smithay::xwayland::xwm::X11Surface> {
+        match &self.shell {
+            Shell::X11(s) => Some(s),
+            Shell::Wayland(_) => None,
+        }
     }
 
     /// The window's footprint on the canvas: its size times its own scale.
@@ -186,26 +205,43 @@ impl Client {
         Rectangle::new(self.canvas, (s.w as f64 * self.scale, s.h as f64 * self.scale).into())
     }
 
-    pub fn surface(&self) -> &WlSurface {
-        self.window.toplevel().expect("wayland window").wl_surface()
+    /// The surface the client draws with. An X11 window that only renders into pixmaps (an
+    /// ancient X app) has none and is not drawn.
+    pub fn surface(&self) -> Option<WlSurface> {
+        match &self.shell {
+            Shell::Wayland(w) => Some(w.toplevel().expect("wayland window").wl_surface().clone()),
+            Shell::X11(s) => s.wl_surface(),
+        }
     }
 
     pub fn title(&self) -> String {
-        smithay::wayland::compositor::with_states(self.surface(), |s| {
-            s.data_map
-                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                .and_then(|d| d.lock().ok().and_then(|d| d.title.clone()))
-        })
-        .unwrap_or_default()
+        match &self.shell {
+            Shell::X11(s) => s.title(),
+            Shell::Wayland(w) => {
+                let surface = w.toplevel().expect("wayland window").wl_surface();
+                smithay::wayland::compositor::with_states(surface, |s| {
+                    s.data_map
+                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                        .and_then(|d| d.lock().ok().and_then(|d| d.title.clone()))
+                })
+                .unwrap_or_default()
+            }
+        }
     }
 
     pub fn app_id(&self) -> String {
-        smithay::wayland::compositor::with_states(self.surface(), |s| {
-            s.data_map
-                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                .and_then(|d| d.lock().ok().and_then(|d| d.app_id.clone()))
-        })
-        .unwrap_or_default()
+        match &self.shell {
+            Shell::X11(s) => s.class(),
+            Shell::Wayland(w) => {
+                let surface = w.toplevel().expect("wayland window").wl_surface();
+                smithay::wayland::compositor::with_states(surface, |s| {
+                    s.data_map
+                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                        .and_then(|d| d.lock().ok().and_then(|d| d.app_id.clone()))
+                })
+                .unwrap_or_default()
+            }
+        }
     }
 }
 
@@ -339,6 +375,15 @@ pub struct Uwc {
     /// global stays alive.
     #[allow(dead_code)]
     pub relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    /// xwayland-shell-v1, so X11 windows can associate a wl_surface.
+    pub xwayland_shell: smithay::wayland::xwayland_shell::XWaylandShellState,
+    /// The X11 window manager, once Xwayland is up.
+    pub xwm: Option<smithay::xwayland::X11Wm>,
+    /// Keeps the Xwayland server source in the loop (dropping it would stop the server).
+    #[allow(dead_code)]
+    pub xwayland: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// Override-redirect X11 windows (menus, tooltips): drawn on top, not managed.
+    pub or_windows: Vec<smithay::xwayland::X11Surface>,
     #[allow(dead_code)] // held so the global stays alive
     pub idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
     /// Live zwp-idle-inhibitor-v1 objects; any one pauses the idle notifications.
@@ -470,6 +515,10 @@ impl Uwc {
             session_lock: crate::sessionlock::SessionLock::new(&dh),
             pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Uwc>(&dh),
             relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Uwc>(&dh),
+            xwayland_shell: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Uwc>(&dh),
+            xwm: None,
+            xwayland: None,
+            or_windows: Vec::new(),
             idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Uwc>(&dh),
             idle_inhibitors: 0,
             frames_drawn: 0,
@@ -982,7 +1031,7 @@ impl Uwc {
     }
 
     pub fn client_by_surface(&self, s: &WlSurface) -> Option<usize> {
-        self.clients.iter().position(|c| c.surface() == s)
+        self.clients.iter().position(|c| c.surface().as_ref() == Some(s))
     }
 
     /// Topmost visible client under a screen point and the surface within it.
@@ -995,10 +1044,39 @@ impl Uwc {
             let pl = self.place_on(m, c, &c.fx);
             // The point relative to the window geometry, in window px.
             let local: Point<f64, Logical> = ((p.x - pl.origin.x) / pl.zoom, (p.y - pl.origin.y) / pl.zoom).into();
-            let g = c.window.geometry().loc.to_f64();
-            if let Some((surface, loc)) = c.window.surface_under(local + g, smithay::desktop::WindowSurfaceType::ALL) {
-                let space = if pl.on_canvas { c.canvas } else { pl.origin };
-                return Some(WindowHit { idx, surface, origin: space - g + loc.to_f64(), location: space + local });
+            match &c.shell {
+                Shell::Wayland(w) => {
+                    let g = w.geometry().loc.to_f64();
+                    if let Some((surface, loc)) = w.surface_under(local + g, smithay::desktop::WindowSurfaceType::ALL) {
+                        let space = if pl.on_canvas { c.canvas } else { pl.origin };
+                        return Some(WindowHit {
+                            idx,
+                            surface,
+                            origin: space - g + loc.to_f64(),
+                            location: space + local,
+                        });
+                    }
+                }
+                // An X11 window has no subsurfaces: the whole geometry is the hit rect.
+                Shell::X11(s) => {
+                    let g = s.geometry();
+                    let in_rect = local.x >= g.loc.x as f64
+                        && local.y >= g.loc.y as f64
+                        && local.x < (g.loc.x + g.size.w) as f64
+                        && local.y < (g.loc.y + g.size.h) as f64;
+                    if in_rect {
+                        if let Some(surface) = s.wl_surface() {
+                            let g = g.loc.to_f64();
+                            let space = if pl.on_canvas { c.canvas } else { pl.origin };
+                            return Some(WindowHit {
+                                idx,
+                                surface: surface.clone(),
+                                origin: space - g,
+                                location: space + local,
+                            });
+                        }
+                    }
+                }
             }
         }
         None
@@ -1024,20 +1102,26 @@ impl Uwc {
             }
         }
         for c in &self.clients {
-            if let Some(t) = c.window.toplevel() {
-                t.with_pending_state(|s| {
-                    if Some(c.id) == id {
-                        s.states.set(
-                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-                        );
-                    } else {
-                        s.states.unset(
-                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-                        );
+            match &c.shell {
+                Shell::Wayland(w) => {
+                    let Some(t) = w.toplevel() else { continue };
+                    t.with_pending_state(|s| {
+                        if Some(c.id) == id {
+                            s.states.set(
+                                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
+                            );
+                        } else {
+                            s.states.unset(
+                                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
+                            );
+                        }
+                    });
+                    if c.mapped {
+                        t.send_pending_configure();
                     }
-                });
-                if c.mapped {
-                    t.send_pending_configure();
+                }
+                Shell::X11(s) => {
+                    let _ = s.set_activated(Some(c.id) == id);
                 }
             }
         }
@@ -1133,10 +1217,48 @@ impl Uwc {
             if let Some(g) = self.closing_ghost(i) {
                 self.pending_ghosts.insert(id, g);
             }
-            if let Some(t) = self.clients[i].window.toplevel() {
-                t.send_close();
+            match &self.clients[i].shell {
+                Shell::Wayland(w) => {
+                    if let Some(t) = w.toplevel() {
+                        t.send_close();
+                    }
+                }
+                Shell::X11(s) => {
+                    let _ = s.close();
+                }
             }
         }
+    }
+
+    /// Take a client out of the list: keep its last frame for the fade-out, hand focus to what
+    /// is left on top, and end a drag it was part of.
+    pub fn remove_client(&mut self, i: usize) {
+        // Keep the last frame to fade out over close-ms: the one captured when the close was
+        // asked for, else one captured now if the surface is still alive (skipped without a
+        // renderer, so closing stays instant headless).
+        let idle = !self.anim_running();
+        let g = self.pending_ghosts.remove(&self.clients[i].id).or_else(|| self.closing_ghost(i));
+        if let Some(g) = g {
+            self.ghosts.push(g);
+            if idle {
+                self.begin_anim();
+            }
+            self.damage();
+        }
+        let gone = self.clients.remove(i);
+        self.export_on_close(gone.id);
+        if self.focus == Some(gone.id) {
+            self.focus = None;
+            let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
+            self.focus_client(top);
+        }
+        if let Some(Drag::Move { id, .. } | Drag::Resize { id, .. }) = self.drag {
+            if id == gone.id {
+                self.drag = None;
+            }
+        }
+        self.refresh_pointer();
+        self.damage();
     }
 
     /// Move a window to canvas position `x`, `y`. A pinned window goes where that is on screen now.
@@ -1174,11 +1296,28 @@ impl Uwc {
 
     pub fn resize_client(&mut self, id: u32, w: i32, h: i32) {
         if let Some(i) = self.client_index(id) {
-            if let Some(t) = self.clients[i].window.toplevel() {
-                t.with_pending_state(|s| s.size = Some((w.max(50), h.max(30)).into()));
-                t.send_pending_configure();
+            match &self.clients[i].shell {
+                Shell::Wayland(win) => {
+                    if let Some(t) = win.toplevel() {
+                        t.with_pending_state(|s| s.size = Some((w.max(50), h.max(30)).into()));
+                        t.send_pending_configure();
+                    }
+                }
+                // The X11 window is told its new X geometry: its screen position and the size.
+                Shell::X11(s) => {
+                    let c = &self.clients[i];
+                    let at = self.x11_screen_pos(c);
+                    let _ = s.configure(Rectangle::new(at, Size::from((w.max(50), h.max(30)))));
+                }
             }
         }
+    }
+
+    /// An X11 window's top-left corner in the global input space (its pinned screen spot).
+    pub fn x11_screen_pos(&self, c: &Client) -> Point<i32, Logical> {
+        let p = c.pin.unwrap_or_else(|| self.monitors.first().map(|m| m.origin).unwrap_or((0.0, 0.0).into()));
+        let o = self.origin_of(c.pin_mon);
+        Point::<f64, Logical>::from((p.x + o.x, p.y + o.y)).to_i32_round()
     }
 
     /// Re-send the pointer position so focus follows what is under it after the scene moved.
@@ -1337,8 +1476,30 @@ impl Uwc {
         let Some(i) = self.client_index(id) else { return };
         let fs_mon = self.mon_of(&self.clients[i]);
         let screen = self.monitors.get(fs_mon).map(|m| m.size).unwrap_or((1280, 720).into());
+        if let Some(s) = self.clients[i].x11().cloned() {
+            let c = &mut self.clients[i];
+            if c.fullscreen != on {
+                c.fullscreen = on;
+                if on {
+                    c.fs_mon = fs_mon;
+                    // A repeated request must not overwrite the saved size with the fullscreen one.
+                    c.prev_size = Some(c.size()).filter(|s| s.w > 0 && s.h > 0);
+                }
+            }
+            let prev = c.prev_size;
+            let at = self.x11_screen_pos(&self.clients[i]);
+            // An X11 window is told its state, and its X geometry: the monitor, or its old size.
+            let _ = s.set_fullscreen(on);
+            let size = if on { screen } else { prev.unwrap_or(screen) };
+            let _ = s.configure(Rectangle::new(at, size));
+            if on {
+                self.focus_client(Some(id));
+            }
+            self.refresh_pointer();
+            self.damage();
+            return;
+        }
         let c = &mut self.clients[i];
-        let Some(t) = c.window.toplevel().cloned() else { return };
         if c.fullscreen != on {
             c.fullscreen = on;
             if on {
@@ -1348,6 +1509,12 @@ impl Uwc {
             }
         }
         let prev = c.prev_size;
+        let Some(t) = (match &c.shell {
+            Shell::Wayland(w) => w.toplevel().cloned(),
+            Shell::X11(_) => None,
+        }) else {
+            return;
+        };
         let output = self.monitors.get(fs_mon).and_then(|m| {
             let client = self.display_handle.get_client(t.wl_surface().id()).ok()?;
             m.output.client_outputs(&client).next()

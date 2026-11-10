@@ -27,6 +27,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | xdg-activation (apps ask for focus: a fresh token focuses the window and reveals it, an unseen one goes `urgent`, answered by focusing), ext-idle-notify + zwp-idle-inhibit (idle daemons; video players keep the screen on; real input resets the timers) | done |
 | ext-session-lock-v1 (swaylock, waylock, Quickshell's lock screen): the lock surface covers every output and takes all input; nothing else is drawn, key bindings do not run, screencopy and window previews fail while locked; a lock client that dies without unlocking leaves the screen blank (locked) | done |
 | zwp-pointer-constraints-v1 + zwp-relative-pointer-manager-v1 (games, 3D apps): a confined pointer is kept inside the window (or the region it names), a locked one holds the cursor still (uwc's cursor is not drawn) and hands the motion to the client as relative deltas; constraints activate when the pointer is on the surface and deactivate when it leaves | done |
+| Xwayland (`xwayland true`, needs the Xwayland binary; real sessions only): X11 windows become clients like any other -- pinned to the monitor they asked for, with uwc's decoration, focus, move / resize / fullscreen and the IPC; override-redirect windows (X menus, tooltips) are drawn on top and take the pointer by their own geometry; no clipboard bridging yet | done |
 | Multiple monitors: all outputs tiled left to right, one shared canvas and tagset, a viewport and bookmarks per monitor per tag; the pointer's monitor is where view actions, new windows and pins land; a window is drawn on every monitor whose view shows it, fullscreen covers the monitor it is on | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
 | Mouse: Mod+drag move / resize / pan, empty-canvas drag pans, Mod+scroll zooms | done |
@@ -63,8 +64,9 @@ Not yet (roughly in the order to do them):
 3. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.
-4. Xwayland, input-method/text-input, output-management (popup grabs, xdg-activation,
-   idle-inhibit/idle-notify, session-lock and pointer constraints are done).
+4. Input-method/text-input, output-management, clipboard bridging for Xwayland (popup grabs,
+   xdg-activation, idle-inhibit/idle-notify, session-lock, pointer constraints and Xwayland are
+   done).
 5. Multi-GPU, animated cursors, DPMS.
 
 ## Build and run

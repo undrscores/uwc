@@ -212,6 +212,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "explicit-sync" => explicit_sync,
     "background-shader" => background_shader,
     "session-restore" => session_restore,
+    "xwayland" => xwayland,
 );
 
 /// Set option `n` from `table` on `t`. `Ok(false)`: the table has no such option.

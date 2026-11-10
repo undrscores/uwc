@@ -65,15 +65,32 @@ impl Backend {
 pub fn send_frame_callbacks(state: &Uwc, output: &Output) {
     let time = state.start_time.elapsed();
     for c in state.clients.iter().filter(|c| state.visible(c)) {
-        c.window.send_frame(output, time, Some(Duration::ZERO), |_, _| Some(output.clone()));
-        for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(c.surface()) {
-            smithay::desktop::utils::send_frames_surface_tree(
-                popup.wl_surface(),
-                output,
-                time,
-                Some(Duration::ZERO),
-                |_, _| Some(output.clone()),
-            );
+        match &c.shell {
+            crate::state::Shell::Wayland(w) => {
+                w.send_frame(output, time, Some(Duration::ZERO), |_, _| Some(output.clone()))
+            }
+            crate::state::Shell::X11(s) => {
+                if let Some(surface) = s.wl_surface() {
+                    smithay::desktop::utils::send_frames_surface_tree(
+                        &surface,
+                        output,
+                        time,
+                        Some(Duration::ZERO),
+                        |_, _| Some(output.clone()),
+                    );
+                }
+            }
+        }
+        if let Some(surface) = c.surface() {
+            for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
+                smithay::desktop::utils::send_frames_surface_tree(
+                    popup.wl_surface(),
+                    output,
+                    time,
+                    Some(Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
         }
     }
     let map = smithay::desktop::layer_map_for_output(output);

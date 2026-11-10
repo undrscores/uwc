@@ -90,13 +90,17 @@ impl Uwc {
                 // Before the first commit the output scale is right; set it once so the first
                 // buffer already has it.
                 let s = self.output_scale_of(self.mon_of(&self.clients[i]));
-                apply(self.clients[i].surface(), s);
+                if let Some(surface) = self.clients[i].surface() {
+                    apply(&surface, s);
+                }
                 self.clients[i].sent_scale = Some(s);
                 continue;
             }
             let s = self.render_scale(&self.clients[i]);
             if self.clients[i].sent_scale != Some(s) {
-                apply(self.clients[i].surface(), s);
+                if let Some(surface) = self.clients[i].surface() {
+                    apply(&surface, s);
+                }
                 self.clients[i].sent_scale = Some(s);
             }
         }

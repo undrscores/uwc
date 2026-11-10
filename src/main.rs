@@ -29,6 +29,7 @@ mod state;
 mod sync;
 mod toplevels;
 mod workspace;
+mod xwayland;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -171,6 +172,11 @@ fn run() -> Result<()> {
         BackendKind::Udev => backend::udev::init(&mut state, &handle)?,
     }
     tracing::info!("backend: {}", state.backend.name());
+    if state.config.xwayland && !matches!(state.backend, backend::Backend::Headless) {
+        if let Err(e) = state.start_xwayland() {
+            tracing::error!("xwayland: {e}");
+        }
+    }
     state.session_load();
 
     // SIGINT/SIGTERM end the session cleanly (the socket file is removed on drop).

@@ -9,7 +9,7 @@ use smithay::{
         renderer::{
             damage::OutputDamageTracker,
             element::memory::MemoryRenderBuffer,
-            element::{surface::WaylandSurfaceRenderElement, AsRenderElements, RenderElement},
+            element::RenderElement,
             gles::{GlesRenderer, GlesTexture},
             Bind, ExportMem, Offscreen,
         },
@@ -18,7 +18,7 @@ use smithay::{
         protocol::{wl_buffer::WlBuffer, wl_shm},
         Resource,
     },
-    utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform},
+    utils::{Buffer, Physical, Point, Rectangle, Size, Transform},
     wayland::shm::with_buffer_contents_mut,
 };
 
@@ -83,7 +83,7 @@ impl Uwc {
     /// cannot render (headless), so closing there stays instant.
     pub fn closing_ghost(&mut self, i: usize) -> Option<Ghost> {
         let c = &self.clients[i];
-        if self.config.close_ms <= 0.0 || !self.visible(c) || !c.surface().is_alive() {
+        if self.config.close_ms <= 0.0 || !self.visible(c) || !c.surface().is_some_and(|s| s.is_alive()) {
             return None;
         }
         let pl = self.place(c);
@@ -101,10 +101,9 @@ impl Uwc {
         let buffer = self
             .with_renderer(|state, r| {
                 let c = &state.clients[i];
-                let g = c.window.geometry().loc.to_f64();
+                let g = c.geo_loc().to_f64();
                 let at: Point<i32, Physical> = Point::<f64, Physical>::from((-g.x * k, -g.y * k)).to_i32_round();
-                let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                    AsRenderElements::<GlesRenderer>::render_elements(&c.window, r, at, Scale::from(k), 1.0);
+                let elements = c.render_content(r, at, k, 1.0);
                 render_to_memory(r, &elements, px, k)
             })
             .unwrap_or_else(|| Err("this backend cannot render (headless)".into()))
@@ -137,10 +136,9 @@ impl Uwc {
             let Some(i) = state.client_index(id) else { return Err("the window is gone".to_string()) };
             let c = &state.clients[i];
             // The geometry's top-left at 0,0 (the surface may start further out, e.g. client shadows).
-            let g = c.window.geometry().loc.to_f64().to_physical(scale);
+            let g = c.geo_loc().to_f64().to_physical(scale);
             let at: Point<i32, Physical> = Point::<f64, Physical>::from((-g.x, -g.y)).to_i32_round();
-            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                AsRenderElements::<GlesRenderer>::render_elements(&c.window, r, at, Scale::from(scale), 1.0);
+            let elements = c.render_content(r, at, scale, 1.0);
             render_to_shm(r, &elements, size, scale, buffer)
         });
         res.unwrap_or_else(|| Err("this backend cannot render (headless)".into()))

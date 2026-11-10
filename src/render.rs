@@ -42,6 +42,44 @@ render_elements! {
     RoundedGhost=RoundedElement<RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>>,
 }
 
+impl crate::state::Client {
+    /// The top-left of the window geometry inside its surface (client-side shadows and such).
+    pub fn geo_loc(&self) -> Point<i32, smithay::utils::Logical> {
+        match &self.shell {
+            crate::state::Shell::Wayland(w) => w.geometry().loc,
+            crate::state::Shell::X11(s) => s.geometry().loc,
+        }
+    }
+
+    /// The window's content as render elements at `origin` (physical px).
+    pub fn render_content(
+        &self,
+        renderer: &mut GlesRenderer,
+        origin: Point<i32, Physical>,
+        scale: f64,
+        alpha: f32,
+    ) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
+        match &self.shell {
+            crate::state::Shell::Wayland(w) => {
+                AsRenderElements::<GlesRenderer>::render_elements(w, renderer, origin, Scale::from(scale), alpha)
+            }
+            crate::state::Shell::X11(s) => s
+                .wl_surface()
+                .map(|surf| {
+                    render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                        renderer,
+                        &surf,
+                        origin,
+                        Scale::from(scale),
+                        alpha,
+                        Kind::Unspecified,
+                    )
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// How one window looks right now, resolved from the options and its focus.
 struct Look {
     border: Paint,
@@ -145,6 +183,23 @@ impl Uwc {
                 (vp.x, vp.y),
                 vp.zoom * scale,
             )));
+        }
+        // Override-redirect X11 windows (menus, tooltips) sit on top of everything.
+        for w in self.or_windows.iter().rev() {
+            let Some(r) = self.or_geometry(w) else { continue };
+            let at = (r.loc.x - self.origin_of(m).x, r.loc.y - self.origin_of(m).y);
+            out.extend(
+                render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                    renderer,
+                    &w.wl_surface().expect("or window with a surface"),
+                    Point::<f64, Physical>::from((at.0 * scale, at.1 * scale)).to_i32_round(),
+                    Scale::from(scale),
+                    1.0,
+                    Kind::Unspecified,
+                )
+                .into_iter()
+                .map(UwcElement::Layer),
+            );
         }
         out
     }
@@ -262,7 +317,7 @@ impl Uwc {
             // Window px to physical output px.
             let z = pl.zoom;
             let k = z * scale;
-            let g = c.window.geometry().loc;
+            let g = c.geo_loc();
             let size = c.size();
             // The content box (the window geometry) and the outer (border) box, physical px.
             let content = Rectangle::new(
@@ -286,19 +341,23 @@ impl Uwc {
             let [dim_id, backdrop_id, border_id, shadow_id] = &c.deco_ids;
 
             // Popups sit above their toplevel; `Space` does the same placement.
-            let g = c.window.geometry().loc;
-            for (popup, offset) in smithay::desktop::PopupManager::popups_for_surface(c.surface()) {
-                let rel: Point<i32, smithay::utils::Logical> = g + offset - popup.geometry().loc;
-                let at = origin + rel.to_f64().to_physical(scale).to_i32_round();
-                let els = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
-                    renderer,
-                    popup.wl_surface(),
-                    at,
-                    Scale::from(scale),
-                    look.alpha,
-                    Kind::Unspecified,
-                );
-                out.extend(els.into_iter().map(|e| UwcElement::from(RescaleRenderElement::from_element(e, origin, z))));
+            let g = c.geo_loc();
+            if let Some(surface) = c.surface() {
+                for (popup, offset) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
+                    let rel: Point<i32, smithay::utils::Logical> = g + offset - popup.geometry().loc;
+                    let at = origin + rel.to_f64().to_physical(scale).to_i32_round();
+                    let els = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                        renderer,
+                        popup.wl_surface(),
+                        at,
+                        Scale::from(scale),
+                        look.alpha,
+                        Kind::Unspecified,
+                    );
+                    out.extend(
+                        els.into_iter().map(|e| UwcElement::from(RescaleRenderElement::from_element(e, origin, z))),
+                    );
+                }
             }
 
             if let (Some(s), true) = (shaders, decorated && look.dim > 0.0) {
@@ -313,13 +372,7 @@ impl Uwc {
                 )));
             }
 
-            let els = AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                &c.window,
-                renderer,
-                origin,
-                Scale::from(scale),
-                look.alpha,
-            );
+            let els = c.render_content(renderer, origin, scale, look.alpha);
             for e in els {
                 let e = RescaleRenderElement::from_element(e, origin, z);
                 out.push(RoundedElement::wrap(e, shaders, content, inner_radius, Scale::from(scale)));

@@ -9,6 +9,7 @@ license = "MIT"
 smithay = { version = "0.7", default-features = false, features = [
     "backend_winit", "backend_egl", "renderer_gl", "wayland_frontend", "desktop", "use_system_lib",
     "backend_drm", "backend_gbm", "backend_libinput", "backend_session_libseat", "backend_udev",
+    "xwayland",
 ] }
 calloop = { version = "0.14", features = ["signals"] }
 tracing = "0.1"
