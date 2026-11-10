@@ -77,6 +77,10 @@ pub struct Client {
     pub minimized: u32,
     /// What the rules' `open { }` blocks said, decided at the first configure, used when it maps.
     pub open: crate::rules::Open,
+    /// The window's own scale on the canvas (1 = normal), on top of the view's zoom.
+    pub scale: f64,
+    /// The render scale it was last told (fractional scale / preferred buffer scale).
+    pub sent_scale: Option<f64>,
     /// Ids for the four border rects, stable so the damage tracker can tell frames apart.
     pub border_ids: [Id; 4],
     /// Ids for the dim, backdrop, border and shadow shader elements.
@@ -230,6 +234,15 @@ pub struct Uwc {
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
     pub redraw: bool,
+    /// The zoom windows render for: follows the view's zoom once it has stayed put (`zoom-settle-ms`).
+    pub settled_zoom: f64,
+    /// The zoom seen last turn, and a counter so only the last zoom change of a burst settles.
+    pub seen_zoom: f64,
+    pub scale_gen: u64,
+    #[allow(dead_code)] // held so the globals stay alive
+    pub fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState,
+    #[allow(dead_code)]
+    pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
     /// Counts minimize calls, so the newest minimized window comes back first.
     pub minimize_stamp: u32,
     /// The rect behind a fullscreen window (`fullscreen-bg`).
@@ -275,7 +288,7 @@ impl Uwc {
 
         Ok(Uwc {
             start_time: Instant::now(),
-            compositor_state: CompositorState::new::<Uwc>(&dh),
+            compositor_state: CompositorState::new_v6::<Uwc>(&dh),
             xdg_shell_state: XdgShellState::new::<Uwc>(&dh),
             shm_state: ShmState::new::<Uwc>(&dh, vec![]),
             xdg_decoration_state: XdgDecorationState::new::<Uwc>(&dh),
@@ -294,7 +307,7 @@ impl Uwc {
             cursor_theme: crate::cursor::CursorTheme::new(&config.cursor_theme, config.cursor_size),
             seat_state,
             seat,
-            display_handle: dh,
+            display_handle: dh.clone(),
             loop_handle,
             loop_signal,
             socket_name,
@@ -312,6 +325,11 @@ impl Uwc {
             deco_commit: Default::default(),
             redraw: true,
             minimize_stamp: 0,
+            settled_zoom: 1.0,
+            seen_zoom: 1.0,
+            scale_gen: 0,
+            fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Uwc>(&dh),
+            viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Uwc>(&dh),
             fullscreen_bg_id: Id::new(),
             animating: false,
             ipc,

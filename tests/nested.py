@@ -58,6 +58,17 @@ cur, kf = move(100,100); check("hover fullscreen A", kf, {"window": A})
 cur, kf = move(900,250); check("pinned B hidden under fullscreen takes no pointer", kf, {"window": A})
 cmd(f"unfullscreen {A}"); time.sleep(0.5)
 check("bar back on top", color(px(600,10)), "bar")
+# Sharp zoom: a client that re-renders at its fractional scale shows 1 px stripes at 1 screen px when
+# zoomed 2x, once the zoom settled (stretched, they would be 2 px wide: half the transitions).
+cmd(f"minimize {A}"); cmd("home")
+spawn(["./target/debug/examples/paint","--stripes","S","300","200"], env=wenv); time.sleep(0.8)
+S = win("S")["id"]; cmd(f"move {S} 50 50"); cmd("zoom 2 0 0")
+time.sleep(0.8)  # zoom-settle-ms 200, then the client redraws
+subprocess.run(["import","-window","root",SP+"/scen.png"], env=env)
+row = [Image.open(SP+"/scen.png").convert("L").getpixel((x, 300)) for x in range(200, 240)]
+flips = sum(1 for a, b in zip(row, row[1:]) if (a < 128) != (b < 128))
+check("zoomed 2x stripes stay 1 px (sharp)", flips >= 35, True)
+cmd("zoom 1 0 0")
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

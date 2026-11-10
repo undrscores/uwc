@@ -20,6 +20,7 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1 as ws_group, ext_workspace_handle_v1 as ws_handle,
     ext_workspace_manager_v1 as ws_manager,
 };
+use wayland_protocols::wp::fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
@@ -145,6 +146,9 @@ struct App {
     ws_info: std::collections::HashMap<wayland_client::backend::ObjectId, WsInfo>,
     ws_done: usize,
     ws_group_outputs: usize,
+    /// The last fractional preferred scale (in 1/120) and integer preferred buffer scale told.
+    frac: Option<u32>,
+    buffer_scale: Option<i32>,
     closed: Vec<String>,
     /// The size the compositor last asked a toplevel for.
     asked: Option<(i32, i32)>,
@@ -196,6 +200,8 @@ impl Client {
             ws_info: Default::default(),
             ws_done: 0,
             ws_group_outputs: 0,
+            frac: None,
+            buffer_scale: None,
             closed: vec![],
             asked: None,
             layer_size: None,
@@ -453,7 +459,38 @@ impl Dispatch<ws_handle::ExtWorkspaceHandleV1, ()> for App {
         }
     }
 }
-noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_surface::WlSurface);
+noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer);
+noop!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+
+impl Dispatch<wl_surface::WlSurface, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wl_surface::WlSurface,
+        e: wl_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_surface::Event::PreferredBufferScale { factor } = e {
+            app.buffer_scale = Some(factor);
+        }
+    }
+}
+
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wp_fractional_scale_v1::WpFractionalScaleV1,
+        e: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = e {
+            app.frac = Some(scale);
+        }
+    }
+}
 
 // ---- tests ---------------------------------------------------------------------------------
 
@@ -1067,4 +1104,44 @@ fn uwc_msg_talks_to_the_compositor() {
     assert_eq!(next["monitors"][0]["viewport"]["x"], 7);
     let _ = sub.kill();
     let _ = sub.wait();
+}
+
+#[test]
+fn zoomed_windows_are_asked_to_render_sharper() {
+    let mut uwc = Uwc::start("sharp-zoom", Some("options { zoom-settle-ms 60 }"));
+    let mut c = uwc.connect();
+    let w = c.window("A", 300, 200);
+    uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let qh = c.queue.handle();
+    let mgr: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let _fs = mgr.get_fractional_scale(&w.surface, &qh, ());
+    c.sync();
+    assert_eq!(c.app.frac, Some(120), "scale 1 at zoom 1");
+
+    let settle = |c: &mut Client| {
+        std::thread::sleep(Duration::from_millis(150));
+        c.sync();
+    };
+    uwc.ok("zoom 2");
+    c.sync();
+    assert_eq!(c.app.frac, Some(120), "not while the zoom may still be moving");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(240), "2x once it settled");
+    assert_eq!(c.app.buffer_scale, Some(2), "and the integer preferred buffer scale for older clients");
+
+    uwc.ok("zoom 8");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(360), "capped at zoom-render-scale-max 3");
+    uwc.ok("zoom 0.5");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(120), "zoomed out: no lower than zoom-render-scale-min 1");
+    uwc.ok("set zoom-render-scale-min 0.5");
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(60), "unless that allows it");
+
+    // A pinned window is not zoomed, so it renders at the output scale.
+    let id = win(&uwc.state(), "A")["id"].as_u64().unwrap();
+    uwc.ok(&format!("pin {id}"));
+    settle(&mut c);
+    assert_eq!(c.app.frac, Some(120));
 }

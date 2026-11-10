@@ -46,6 +46,14 @@ options {
     pan-step 200                // canvas px for the pan-view action
     move-step 50                // canvas px for move-window / resize-window
     zoom-scroll 1.1             // zoom factor per scroll notch with Mod held
+    // Sharp zoom: windows are asked to render at output scale x zoom (fractional scale), so zooming in
+    // shows more detail instead of stretched pixels. They are asked once the zoom has stayed put for
+    // zoom-settle-ms. The zoom factor they render for is kept between zoom-render-scale-min (below 1:
+    // zoomed-out windows render smaller and cheaper, but are briefly soft when you zoom back in) and
+    // zoom-render-scale-max (above it, they are stretched; each step up costs memory).
+    zoom-settle-ms 200
+    zoom-render-scale-min 1
+    zoom-render-scale-max 3
     new-window-offset 32        // each new window on a tag is offset by this much from the last
     // Pointer image: the xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
     // Programs started afterwards inherit them through XCURSOR_THEME / XCURSOR_SIZE.

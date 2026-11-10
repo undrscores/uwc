@@ -198,6 +198,8 @@ impl XdgShellHandler for Uwc {
             prev_size: None,
             minimized: 0,
             open: Default::default(),
+            scale: 1.0,
+            sent_scale: None,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         });

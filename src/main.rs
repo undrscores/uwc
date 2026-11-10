@@ -15,6 +15,7 @@ mod options;
 mod protocol;
 mod render;
 mod rules;
+mod scale;
 mod state;
 mod sync;
 mod workspace;
@@ -193,6 +194,7 @@ fn run() -> Result<()> {
 
     event_loop.run(None, &mut state, |state| {
         state.udev_render();
+        state.sync_scales();
         state.workspace_refresh();
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();

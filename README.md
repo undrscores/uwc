@@ -16,6 +16,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Area | State |
 |---|---|
 | Canvas, viewport, zoom (about the pointer), pan, overview, fit/center | done |
+| Sharp zoom: windows are asked (fractional-scale-v1, viewporter, wl_surface v6 preferred buffer scale) to render at output scale x zoom once the zoom settles, so zooming in shows real detail; bounded by `zoom-render-scale-min`/`-max` | done |
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
 | xdg-shell toplevels and popups, xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
@@ -123,6 +124,7 @@ src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work ar
 src/rules.rs       window rules and the per-window decoration settings (`Deco`)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
 src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
+src/scale.rs       sharp zoom: preferred render scale per window (fractional scale)
 src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
 src/cursor.rs      the pointer image (xcursor theme, client surfaces, fallback arrow)
 src/backend/       udev (real session), winit (nested), headless (tests)
@@ -130,6 +132,9 @@ tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland client
 ```
 
 ## Differences from uwm worth knowing
+
+- Zoom is sharp: clients re-render at output scale x zoom with fractional scale (uwm stretches, or asks for an
+  integer scale), and the renderer draws the bigger buffer at its logical size.
 
 - Zoom is free: smithay draws a list of elements, so a window is a `RescaleRenderElement` around its surface tree.
   uwm needs `zoomtree()` to rewrite every scene node every frame.

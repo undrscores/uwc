@@ -208,6 +208,11 @@ pub struct Config {
     pub pan_step: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
+    /// Zoom is told to clients only after it stayed put this long.
+    pub zoom_settle_ms: f64,
+    /// Bounds of the zoom factor clients are asked to render for.
+    pub zoom_render_scale_min: f64,
+    pub zoom_render_scale_max: f64,
     pub new_window_offset: i32,
     /// xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
     pub cursor_theme: String,
@@ -305,6 +310,9 @@ impl Config {
             pan_step: 200.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
+            zoom_settle_ms: 200.0,
+            zoom_render_scale_min: 1.0,
+            zoom_render_scale_max: 3.0,
             new_window_offset: 32,
             cursor_theme: String::new(),
             cursor_size: 24,

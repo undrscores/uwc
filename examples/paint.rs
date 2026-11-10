@@ -3,6 +3,8 @@
 //!
 //!     cargo run --example paint -- "title" 400 300 ff3366
 //!     cargo run --example paint -- --bar 32 30a0d0     # a layer-shell bar along the top edge
+//!     cargo run --example paint -- --stripes "title" 300 200   # 1 px stripes, re-rendered at the
+//!                                                     # fractional scale it is told (a HiDPI client)
 
 use std::{io::Write, os::fd::AsFd};
 
@@ -17,10 +19,19 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 struct App {
     quit: bool,
     layer_size: Option<(u32, u32)>,
+    /// The preferred fractional scale (1/120) when it changed and was not drawn for yet.
+    new_scale: Option<u32>,
 }
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(String::as_str) == Some("--stripes") {
+        return stripes(
+            a.get(2).cloned().unwrap_or_else(|| "stripes".into()),
+            a.get(3).and_then(|s| s.parse().ok()).unwrap_or(300),
+            a.get(4).and_then(|s| s.parse().ok()).unwrap_or(200),
+        );
+    }
     if a.get(1).map(String::as_str) == Some("--bar") {
         return bar(
             a.get(2).and_then(|s| s.parse().ok()).unwrap_or(32),
@@ -38,7 +49,7 @@ fn main() {
     let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 4..=6, ()).unwrap();
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
     let wm: xdg_wm_base::XdgWmBase = globals.bind(&qh, 1..=6, ()).unwrap();
-    let mut app = App { quit: false, layer_size: None };
+    let mut app = App { quit: false, layer_size: None, new_scale: None };
 
     let surface = compositor.create_surface(&qh, ());
     let xdg = wm.get_xdg_surface(&surface, &qh, ());
@@ -68,6 +79,56 @@ fn main() {
     }
 }
 
+/// A window of 1-buffer-px black and white vertical stripes that redraws at whatever scale the
+/// compositor prefers, with a viewport keeping its logical size: what a HiDPI-aware toolkit does.
+fn stripes(title: String, w: i32, h: i32) {
+    use wayland_protocols::wp::{
+        fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        viewporter::client::wp_viewporter::WpViewporter,
+    };
+    let conn = Connection::connect_to_env().expect("WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).unwrap();
+    let qh = queue.handle();
+    let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 4..=6, ()).unwrap();
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
+    let wm: xdg_wm_base::XdgWmBase = globals.bind(&qh, 1..=6, ()).unwrap();
+    let fsm: WpFractionalScaleManagerV1 = globals.bind(&qh, 1..=1, ()).unwrap();
+    let vp: WpViewporter = globals.bind(&qh, 1..=1, ()).unwrap();
+    let mut app = App { quit: false, layer_size: None, new_scale: Some(120) };
+    let surface = compositor.create_surface(&qh, ());
+    let _fs = fsm.get_fractional_scale(&surface, &qh, ());
+    let viewport = vp.get_viewport(&surface, &qh, ());
+    let xdg = wm.get_xdg_surface(&surface, &qh, ());
+    let toplevel = xdg.get_toplevel(&qh, ());
+    toplevel.set_title(title);
+    toplevel.set_app_id("uwc.paint".into());
+    surface.commit();
+    queue.roundtrip(&mut app).unwrap();
+    let mut keep = Vec::new();
+    while !app.quit {
+        if let Some(s) = app.new_scale.take() {
+            let (bw, bh) = ((w as i64 * s as i64 / 120) as i32, (h as i64 * s as i64 / 120) as i32);
+            let mut px = Vec::with_capacity((bw * bh * 4) as usize);
+            for _ in 0..bh {
+                for x in 0..bw {
+                    let c = if x % 2 == 0 { 0 } else { 255 };
+                    px.extend_from_slice(&[c, c, c, 255]);
+                }
+            }
+            let mut f = tempfile_in_runtime();
+            f.write_all(&px).unwrap();
+            let pool = shm.create_pool(f.as_fd(), bw * bh * 4, &qh, ());
+            let buf = pool.create_buffer(0, bw, bh, bw * 4, wl_shm::Format::Argb8888, &qh, ());
+            viewport.set_destination(w, h);
+            surface.attach(Some(&buf), 0, 0);
+            surface.damage_buffer(0, 0, bw, bh);
+            surface.commit();
+            keep.push((pool, buf));
+        }
+        queue.blocking_dispatch(&mut app).unwrap();
+    }
+}
+
 fn bar(height: u32, color: &str) {
     let rgb = u32::from_str_radix(color, 16).unwrap_or(0x30a0d0);
     let conn = Connection::connect_to_env().expect("WAYLAND_DISPLAY");
@@ -76,7 +137,7 @@ fn bar(height: u32, color: &str) {
     let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 4..=6, ()).unwrap();
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
     let shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).unwrap();
-    let mut app = App { quit: false, layer_size: None };
+    let mut app = App { quit: false, layer_size: None, new_scale: None };
     let surface = compositor.create_surface(&qh, ());
     use zwlr_layer_surface_v1::Anchor;
     let layer = shell.get_layer_surface(&surface, None, zwlr_layer_shell_v1::Layer::Top, "bar".into(), &qh, ());
@@ -188,6 +249,25 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
         }
     }
 }
+impl Dispatch<wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1, ()>
+    for App
+{
+    fn event(
+        app: &mut Self,
+        _: &wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
+        e: wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::Event::PreferredScale {
+            scale,
+        } = e
+        {
+            app.new_scale = Some(scale);
+        }
+    }
+}
 macro_rules! noop {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for App {
@@ -196,4 +276,7 @@ macro_rules! noop {
     )*};
 }
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
+noop!(wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+noop!(wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter);
+noop!(wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport);
 noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_surface::WlSurface);
