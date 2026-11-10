@@ -346,10 +346,16 @@ impl Client {
 
     /// Open a toplevel the way a toolkit does: configure, ack, attach a buffer, commit.
     fn window(&mut self, title: &str, w: i32, h: i32) -> Window {
+        self.window_with_parent(title, w, h, None)
+    }
+
+    /// A toplevel that declares `parent` as the window it is a dialog of (xdg_toplevel.set_parent).
+    fn window_with_parent(&mut self, title: &str, w: i32, h: i32, parent: Option<&Window>) -> Window {
         let qh = self.queue.handle();
         let surface = self.app.compositor.create_surface(&qh, ());
         let xdg = self.app.wm.get_xdg_surface(&surface, &qh, ());
         let toplevel = xdg.get_toplevel(&qh, ());
+        toplevel.set_parent(parent.map(|p| &p.toplevel));
         toplevel.set_title(title.into());
         toplevel.set_app_id("uwc.test".into());
         surface.commit();
@@ -1010,6 +1016,23 @@ fn the_everyday_protocols_are_advertised() {
     ] {
         assert!(have.iter().any(|h| h == want), "missing global {want}; have {have:?}");
     }
+}
+
+#[test]
+fn dialogs_open_over_their_parent() {
+    let mut uwc = Uwc::start("dialog", None);
+    let mut c = uwc.connect();
+    let parent = c.window("parent", 400, 300);
+    // Move the parent far from where a new window would open.
+    let pid = win(&uwc.state(), "parent")["id"].as_u64().unwrap();
+    uwc.cmd(&format!("move {pid} 3000 2500"));
+    let _dialog = c.window_with_parent("dialog", 200, 100, Some(&parent));
+    let s = uwc.state();
+    let (p, d) = (win(&s, "parent"), win(&s, "dialog"));
+    // Centred over the parent, in canvas pixels, on its tags.
+    assert_eq!(num(&d["x"]) + 100.0, num(&p["x"]) + 200.0, "{d} {p}");
+    assert_eq!(num(&d["y"]) + 50.0, num(&p["y"]) + 150.0, "{d} {p}");
+    assert_eq!(d["tags"], p["tags"]);
 }
 
 #[test]
