@@ -56,6 +56,27 @@ impl ClientData for ClientState {
     fn disconnected(&self, _: ClientId, _: DisconnectReason) {}
 }
 
+/// How a window is drawn right now compared with where it rests: opacity and size factors and a
+/// canvas offset, easing back to `Fx::REST` (so it never touches `canvas`, which clients and IPC
+/// see). Driven by `Uwc::step_animations`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fx {
+    pub alpha: f64,
+    pub scale: f64,
+    pub off: (f64, f64),
+    /// How long the fade/grow and the glide take, as configured when they started.
+    pub fade_ms: f64,
+    pub move_ms: f64,
+}
+
+impl Fx {
+    pub const REST: Fx = Fx { alpha: 1.0, scale: 1.0, off: (0.0, 0.0), fade_ms: 0.0, move_ms: 0.0 };
+
+    pub fn at_rest(&self) -> bool {
+        self.alpha == 1.0 && self.scale == 1.0 && self.off == (0.0, 0.0)
+    }
+}
+
 /// A toplevel window and where it sits on the canvas.
 pub struct Client {
     pub id: u32,
@@ -79,6 +100,8 @@ pub struct Client {
     pub open: crate::rules::Open,
     /// The window's own scale on the canvas (1 = normal), on top of the view's zoom.
     pub scale: f64,
+    /// Open, move and tag-switch animation state (drawing only).
+    pub fx: Fx,
     /// Counts the window's commits (new content), for captures that wait for damage.
     pub commits: u64,
     /// The render scale it was last told (fractional scale / preferred buffer scale).
@@ -172,6 +195,8 @@ pub struct Monitor {
     pub overview: Option<Viewport>,
     /// Saved views per tag: `bookmarks[tag][n]`.
     pub bookmarks: [[Option<Viewport>; 9]; TAGCOUNT],
+    /// An eased move in progress: the tag and the view `vp[tag]` is heading for.
+    pub target: Option<(usize, Viewport)>,
 }
 
 impl Monitor {
@@ -179,8 +204,30 @@ impl Monitor {
         self.vp[lowest_tag(self.tagset)]
     }
 
+    /// Jump to where an eased move is heading.
+    pub fn settle(&mut self) {
+        if let Some((t, v)) = self.target.take() {
+            self.vp[t] = v;
+        }
+    }
+
+    /// For direct, instant changes: a pending eased move is finished first, so they build on the
+    /// view IPC reported and nothing is left to pull it back.
     pub fn viewport_mut(&mut self) -> &mut Viewport {
+        self.settle();
         &mut self.vp[lowest_tag(self.tagset)]
+    }
+
+    /// Where the view of `tag` is going: the end of an eased move, else the view itself.
+    pub fn view_of(&self, tag: usize) -> Viewport {
+        match self.target {
+            Some((t, v)) if t == tag => v,
+            _ => self.vp[tag],
+        }
+    }
+
+    pub fn target_viewport(&self) -> Viewport {
+        self.view_of(lowest_tag(self.tagset))
     }
 }
 
@@ -268,6 +315,8 @@ pub struct Uwc {
     pub fullscreen_bg_id: Id,
     /// Set while drawing a frame that is part of an animation: the backend asks for the next one.
     pub animating: bool,
+    /// When the eased view move last stepped.
+    pub anim_stepped: Instant,
     pub ipc: Ipc,
 }
 
@@ -360,6 +409,7 @@ impl Uwc {
             session_pool: Vec::new(),
             session_written: None,
             animating: false,
+            anim_stepped: Instant::now(),
             ipc,
         })
     }
@@ -416,12 +466,18 @@ impl Uwc {
             vp: [Viewport::default(); TAGCOUNT],
             overview: None,
             bookmarks: [[None; 9]; TAGCOUNT],
+            target: None,
         });
         self.cursor = (size.w as f64 / 2.0, size.h as f64 / 2.0).into();
     }
 
     pub fn viewport(&self) -> Viewport {
         self.mon.as_ref().map(|m| m.viewport()).unwrap_or_default()
+    }
+
+    /// The view an eased move is heading for (what IPC reports and relative moves build on).
+    pub fn target_viewport(&self) -> Viewport {
+        self.mon.as_ref().map(|m| m.target_viewport()).unwrap_or_default()
     }
 
     pub fn screen_size(&self) -> (f64, f64) {
@@ -432,16 +488,37 @@ impl Uwc {
         c.mapped && c.minimized == 0 && (c.pin.is_some() || self.mon.as_ref().is_some_and(|m| c.tags & m.tagset != 0))
     }
 
+    /// Where a window is drawn and hit right now: its placement with the open/move/tag animation on.
     pub fn place(&self, c: &Client) -> Place {
+        self.place_with(c, &c.fx)
+    }
+
+    /// Where it rests, for maths on the window's real position (anchoring a scale, drag factors).
+    pub fn place_at_rest(&self, c: &Client) -> Place {
+        self.place_with(c, &Fx::REST)
+    }
+
+    fn place_with(&self, c: &Client, fx: &Fx) -> Place {
         if c.fullscreen {
             return Place { origin: (0.0, 0.0).into(), zoom: 1.0, on_canvas: false };
         }
         // Pinned windows ignore the view's zoom but keep their own scale.
-        if let Some(p) = c.pin {
-            return Place { origin: p, zoom: c.scale, on_canvas: false };
+        let (mut origin, mut zoom, on_canvas, view_zoom) = match c.pin {
+            Some(p) => (p, c.scale, false, 1.0),
+            None => {
+                let vp = self.viewport();
+                (vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), vp.zoom * c.scale, true, vp.zoom)
+            }
+        };
+        // The animation on top: the glide offset, then the grow about the window's centre.
+        origin = (origin.x + fx.off.0 * view_zoom, origin.y + fx.off.1 * view_zoom).into();
+        if fx.scale != 1.0 {
+            let s = c.size();
+            let k = (1.0 - fx.scale) / 2.0;
+            origin = (origin.x + s.w as f64 * zoom * k, origin.y + s.h as f64 * zoom * k).into();
+            zoom *= fx.scale;
         }
-        let vp = self.viewport();
-        Place { origin: vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), zoom: vp.zoom * c.scale, on_canvas: true }
+        Place { origin, zoom, on_canvas }
     }
 
     /// Scale a window on the canvas by `factor` (its own scale, 0.1 to 4), keeping screen point
@@ -457,7 +534,7 @@ impl Uwc {
         }
         let new = scale.clamp(0.1, 4.0);
         let old = self.clients[i].scale;
-        let pl = self.place(&self.clients[i]);
+        let pl = self.place_at_rest(&self.clients[i]);
         let size = self.clients[i].size();
         let anchor = anchor.unwrap_or_else(|| {
             (pl.origin.x + size.w as f64 * pl.zoom / 2.0, pl.origin.y + size.h as f64 * pl.zoom / 2.0).into()
@@ -496,14 +573,132 @@ impl Uwc {
         self.damage();
     }
 
-    /// Smooth viewport changes are not animated yet: IPC and key pans are instant.
+    /// Like `with_viewport`, but the view eases to the result over `view-ms` (builds on where an
+    /// earlier eased move is heading, so repeated key pans add up).
+    pub fn with_viewport_eased(&mut self, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        if self.config.view_ms <= 0.0 {
+            return self.with_viewport(f);
+        }
+        let area = self.work_area();
+        let idle = !self.anim_running();
+        let Some(m) = self.mon.as_mut() else { return };
+        m.overview = None;
+        let tag = lowest_tag(m.tagset);
+        let mut v = m.target_viewport();
+        f(&mut v, area);
+        m.target = (v != m.vp[tag]).then_some((tag, v));
+        if idle {
+            self.begin_anim();
+        }
+        self.damage();
+    }
+
+    /// One step of an eased move, called when a frame is drawn: the view closes in on its target
+    /// (the centre of the screen and the log of the zoom move by the same fraction, so the time
+    /// does not matter and a new target mid-move just bends the path). True while still moving.
+    fn step_view(&mut self, dt: f64) -> bool {
+        let tau = (self.config.view_ms / 1000.0 / 4.0).max(1e-4);
+        let Some(m) = self.mon.as_mut() else { return false };
+        let Some((tag, goal)) = m.target else { return false };
+        let cur = m.vp[tag];
+        let dz = (goal.zoom / cur.zoom).ln();
+        // The pivot: the screen point both views show the same canvas point at (a scroll zoom's
+        // pointer), found per axis from p/z0 + x0 = p/z1 + x1. Scaling about it reaches the goal
+        // exactly and keeps that point still. Without a zoom change the screen centre will do.
+        let centre = (m.size.w as f64 / 2.0, m.size.h as f64 / 2.0);
+        let d = 1.0 / cur.zoom - 1.0 / goal.zoom;
+        let (w, h) = if dz.abs() > 1e-3 { ((goal.x - cur.x) / d, (goal.y - cur.y) / d) } else { centre };
+        let (c, g) = (cur.screen_to_canvas((w, h)), goal.screen_to_canvas((w, h)));
+        let near = {
+            let (cc, gc) = (cur.screen_to_canvas(centre), goal.screen_to_canvas(centre));
+            (gc.0 - cc.0).abs() * cur.zoom < 0.25 && (gc.1 - cc.1).abs() * cur.zoom < 0.25 && dz.abs() < 1e-3
+        };
+        let moving = if tag != lowest_tag(m.tagset) || near || self.config.view_ms <= 0.0 {
+            m.vp[tag] = goal;
+            m.target = None;
+            false
+        } else {
+            let k = 1.0 - (-dt / tau).exp();
+            let zoom = cur.zoom * (dz * k).exp();
+            let c = (c.0 + (g.0 - c.0) * k, c.1 + (g.1 - c.1) * k);
+            m.vp[tag] = Viewport { x: c.0 - w / zoom, y: c.1 - h / zoom, zoom };
+            true
+        };
+        self.refresh_pointer();
+        self.redraw = true;
+        if !moving {
+            self.ipc.dirty = true;
+        }
+        moving
+    }
+
+    /// Something is easing (the view or a window).
+    pub fn anim_running(&self) -> bool {
+        self.mon.as_ref().is_some_and(|m| m.target.is_some()) || self.clients.iter().any(|c| !c.fx.at_rest())
+    }
+
+    /// Call before starting an animation when none was running: time counts from now, not from the
+    /// last frame, which may have been long ago.
+    pub fn begin_anim(&mut self) {
+        self.anim_stepped = Instant::now();
+    }
+
+    /// Everything that eases, stepped once per drawn frame. True while something is still moving.
+    pub fn step_animations(&mut self) -> bool {
+        let now = Instant::now();
+        let dt = now.duration_since(self.anim_stepped).as_secs_f64().min(0.05);
+        self.anim_stepped = now;
+        let view = self.step_view(dt);
+        let fx = self.step_fx(dt);
+        view || fx
+    }
+
+    /// Windows' open, move and tag fades close in on rest, each by the same fraction per time.
+    fn step_fx(&mut self, dt: f64) -> bool {
+        let mut moving = false;
+        let mut finished = false;
+        for c in self.clients.iter_mut().filter(|c| !c.fx.at_rest()) {
+            let f = &mut c.fx;
+            let k = |ms: f64| 1.0 - (-dt / (ms / 1000.0 / 4.0).max(1e-4)).exp();
+            let (kf, km) = (k(f.fade_ms), k(f.move_ms));
+            f.alpha += (1.0 - f.alpha) * kf;
+            f.scale += (1.0 - f.scale) * kf;
+            f.off = (f.off.0 - f.off.0 * km, f.off.1 - f.off.1 * km);
+            if (1.0 - f.alpha) < 0.01 {
+                f.alpha = 1.0;
+            }
+            if (1.0 - f.scale).abs() < 0.002 {
+                f.scale = 1.0;
+            }
+            if f.off.0.abs() < 0.25 && f.off.1.abs() < 0.25 {
+                f.off = (0.0, 0.0);
+            }
+            if f.at_rest() {
+                *f = Fx::REST;
+                finished = true;
+            } else {
+                moving = true;
+            }
+        }
+        if moving || finished {
+            // Fades change how the shader elements look without changing their geometry.
+            self.deco_commit.increment();
+            self.refresh_pointer();
+            self.redraw = true;
+        }
+        if finished && !moving {
+            self.ipc.dirty = true;
+        }
+        moving
+    }
+
     pub fn pan_canvas(&mut self, dx: f64, dy: f64) {
-        self.with_viewport(|v, _| v.pan_canvas(dx, dy));
+        self.with_viewport_eased(|v, _| v.pan_canvas(dx, dy));
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
         let c = (self.cursor.x, self.cursor.y);
-        self.with_viewport(|v, _| v.zoom_at(factor, c));
+        self.with_viewport_eased(|v, _| v.zoom_at(factor, c));
     }
 
     // ---- windows ------------------------------------------------------------------------
@@ -580,14 +775,14 @@ impl Uwc {
         }
         let r = self.clients[i].rect();
         let (ax, ay, aw, ah) = self.work_area();
-        let vp = self.viewport();
+        let vp = self.target_viewport();
         let (sx, sy) = vp.canvas_to_screen((r.loc.x, r.loc.y));
         let (ex, ey) = vp.canvas_to_screen((r.loc.x + r.size.w, r.loc.y + r.size.h));
         if sx >= ax && sy >= ay && ex <= ax + aw && ey <= ay + ah {
             return;
         }
         let c = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0);
-        self.with_viewport(|v, s| v.center_on(c, s));
+        self.with_viewport_eased(|v, s| v.center_on(c, s));
     }
 
     pub fn focus_and_reveal(&mut self, id: u32) {
@@ -670,6 +865,26 @@ impl Uwc {
         }
     }
 
+    /// `move_client`, but the window glides there over `move-ms` (keys and IPC; drags are instant).
+    pub fn move_client_eased(&mut self, id: u32, x: f64, y: f64) {
+        let Some(i) = self.client_index(id) else { return };
+        let idle = !self.anim_running();
+        // Where it is drawn now, in the space `fx.off` is in: canvas px, or screen px when pinned.
+        let before =
+            self.clients[i].pin.map(|p| (p.x, p.y)).unwrap_or((self.clients[i].canvas.x, self.clients[i].canvas.y));
+        self.move_client(id, x, y);
+        let c = &mut self.clients[i];
+        let after = c.pin.map(|p| (p.x, p.y)).unwrap_or((c.canvas.x, c.canvas.y));
+        if self.config.move_ms > 0.0 && !c.fullscreen && before != after {
+            c.fx.off = (c.fx.off.0 + before.0 - after.0, c.fx.off.1 + before.1 - after.1);
+            c.fx.move_ms = self.config.move_ms;
+            if idle {
+                self.begin_anim();
+            }
+            self.damage();
+        }
+    }
+
     pub fn resize_client(&mut self, id: u32, w: i32, h: i32) {
         if let Some(i) = self.client_index(id) {
             if let Some(t) = self.clients[i].window.toplevel() {
@@ -692,11 +907,28 @@ impl Uwc {
         if tags == 0 {
             return;
         }
+        let idle = !self.anim_running();
+        let was: Vec<bool> = self.clients.iter().map(|c| self.visible(c)).collect();
         let Some(m) = self.mon.as_mut() else { return };
         if m.tagset != tags {
             m.prev_tagset = m.tagset;
             m.tagset = tags;
             m.overview = None;
+        }
+        // Windows that just came into view fade in.
+        if self.config.tag_ms > 0.0 {
+            let now: Vec<bool> = self.clients.iter().map(|c| self.visible(c)).collect();
+            let mut any = false;
+            for ((c, was), now) in self.clients.iter_mut().zip(was).zip(now) {
+                if now && !was {
+                    c.fx.alpha = 0.0;
+                    c.fx.fade_ms = self.config.tag_ms;
+                    any = true;
+                }
+            }
+            if any && idle {
+                self.begin_anim();
+            }
         }
         // Keyboard focus follows the tag: keep it if still visible, else take the top window.
         let keep = self.focus.and_then(|id| self.client_index(id)).is_some_and(|i| self.visible(&self.clients[i]));
@@ -781,7 +1013,7 @@ impl Uwc {
     pub fn bookmark_save(&mut self, n: usize) {
         if let Some(m) = self.mon.as_mut() {
             let t = crate::canvas::lowest_tag(m.tagset);
-            m.bookmarks[t][n] = Some(m.viewport());
+            m.bookmarks[t][n] = Some(m.target_viewport());
             self.ipc.dirty = true;
         }
     }
@@ -791,7 +1023,7 @@ impl Uwc {
         let Some(v) = self.mon.as_ref().and_then(|m| m.bookmarks[crate::canvas::lowest_tag(m.tagset)][n]) else {
             return false;
         };
-        self.with_viewport(|vp, _| *vp = v);
+        self.with_viewport_eased(|vp, _| *vp = v);
         true
     }
 
@@ -896,7 +1128,7 @@ impl Uwc {
                     let s = self.config.move_step;
                     let c = self.clients[i].canvas;
                     let id = self.clients[i].id;
-                    self.move_client(id, c.x + v.0 * s, c.y + v.1 * s);
+                    self.move_client_eased(id, c.x + v.0 * s, c.y + v.1 * s);
                 }
             }
             Action::ResizeWindow(d) => {
@@ -916,19 +1148,19 @@ impl Uwc {
             Action::Zoom(f) => self.zoom_by(*f),
             Action::ZoomReset => {
                 let c = (self.cursor.x, self.cursor.y);
-                self.with_viewport(|v, _| v.set_zoom_at(1.0, c));
+                self.with_viewport_eased(|v, _| v.set_zoom_at(1.0, c));
             }
             Action::CenterWindow => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let r = self.clients[i].rect();
                     let c = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0);
-                    self.with_viewport(|v, s| v.center_on(c, s));
+                    self.with_viewport_eased(|v, s| v.center_on(c, s));
                 }
             }
             Action::FitWindow => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let r = self.clients[i].rect();
-                    self.with_viewport(|v, s| v.fit((r.loc.x, r.loc.y, r.size.w, r.size.h), s, 40.0));
+                    self.with_viewport_eased(|v, s| v.fit((r.loc.x, r.loc.y, r.size.w, r.size.h), s, 40.0));
                 }
             }
             Action::ToggleOverview => self.toggle_overview(),

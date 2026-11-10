@@ -163,7 +163,7 @@ impl Uwc {
         let zooms = |s: &Uwc, id: u32| -> (f64, f64) {
             match s.client_index(id) {
                 Some(i) => {
-                    let pl = s.place(&s.clients[i]);
+                    let pl = s.place_at_rest(&s.clients[i]);
                     (pl.zoom / s.clients[i].scale, pl.zoom)
                 }
                 None => (1.0, 1.0),

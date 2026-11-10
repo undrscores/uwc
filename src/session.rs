@@ -138,7 +138,7 @@ impl Uwc {
         Session {
             version: VERSION,
             tagset: m.tagset,
-            viewports: m.vp.iter().map(|v| (*v).into()).collect(),
+            viewports: (0..m.vp.len()).map(|i| m.view_of(i).into()).collect(),
             bookmarks: m.bookmarks.iter().map(|b| b.iter().map(|v| v.map(Into::into)).collect()).collect(),
             windows,
         }

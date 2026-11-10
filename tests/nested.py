@@ -61,6 +61,15 @@ cur, kf = move(100,100); check("hover fullscreen A", kf, {"window": A})
 cur, kf = move(900,250); check("pinned B hidden under fullscreen takes no pointer", kf, {"window": A})
 cmd(f"unfullscreen {A}"); time.sleep(0.5)
 check("bar back on top", color(px(600,10)), "bar")
+# Eased view moves: IPC reports the target at once, the drawn view gets there over view-ms through the
+# real frame loop. A (canvas 100,100) is drawn at 50,50 at zoom 0.5; after pan 200 it is at -50.
+cmd("pan 200 0")
+check("eased pan starts moving", cmd("state")["monitors"][0]["view_moving"], True)
+time.sleep(0.8)
+check("and settles", cmd("state")["monitors"][0]["view_moving"], False)
+check("A drawn at its panned spot", (color(px(100,100)), color(px(240,190))), ("red", "root"))
+cmd("pan -200 0"); time.sleep(0.8)
+check("pan back: A where it was", color(px(240,190)), "red")
 # Sharp zoom: a client that re-renders at its fractional scale shows 1 px stripes at 1 screen px when
 # zoomed 2x, once the zoom settled (stretched, they would be 2 px wide: half the transitions).
 cmd(f"minimize {A}"); cmd("home")
@@ -151,6 +160,17 @@ im = Image.open(SP+"/cap.ppm").convert("RGB")
 check("a region over the bar has the bar in its top rows", im.getpixel((50,5)) != im.getpixel((50,55)), True)
 rc, _ = capture(["--region", "5000", "5000", "10", "10"])
 check("a region off the output fails", rc, 2)
+# Window animations: a new window fades in over open-ms through the real frame loop (a slow one here so a
+# screenshot can catch it), and ends up exactly its own colour; its reported position never moves.
+cmd("set open-ms 3000"); cmd("set background-shader \"\"")
+spawn(["./target/debug/examples/paint","F","300","200","d0d030"], env=wenv); time.sleep(0.7)
+st=cmd("state"); fw=win("F"); vp=st["monitors"][0]["viewport"]
+fx_, fy_ = int((fw["x"]-vp["x"])*vp["zoom"]+fw["width"]*vp["zoom"]/2), int((fw["y"]-vp["y"])*vp["zoom"]+fw["height"]*vp["zoom"]/2)
+mid = px(fx_, fy_)
+check("a new window is still fading in", (st["monitors"][0]["animating"], mid != (0xd0,0xd0,0x30)), (True, True))
+time.sleep(6)
+check("fade finished: animating off", cmd("state")["monitors"][0]["animating"], False)
+check("and the window is fully its colour", px(fx_, fy_), (0xd0,0xd0,0x30))
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

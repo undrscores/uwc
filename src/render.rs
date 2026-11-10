@@ -4,6 +4,7 @@
 //! window (no scene graph to fight, unlike wlroots). Decoration (corners, border, shadow, dim,
 //! backdrop) comes from the shaders in `deco.rs`; without them, borders are four solid rects.
 
+use crate::config::Color;
 use smithay::{
     backend::renderer::{
         element::{
@@ -59,6 +60,9 @@ impl Uwc {
     /// The whole picture of the output; `with_cursor` false leaves the pointer out (screencopy).
     pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, scale: f64, with_cursor: bool) -> Vec<UwcElement> {
         use smithay::wayland::shell::wlr_layer::Layer;
+        if self.step_animations() {
+            self.animating = true;
+        }
         // A spinning gradient border changes every frame: new content, and another frame after this one.
         if self.spinning_border_visible() {
             self.deco_commit.increment();
@@ -188,12 +192,25 @@ impl Uwc {
         } else {
             (o.shadow_size, o.shadow_color)
         };
+        // A window fading in or out: everything it draws fades with it.
+        let fade = c.fx.alpha as f32;
+        let faded = |mut c: Color| {
+            c[3] *= fade;
+            c
+        };
+        let border = match border {
+            Paint::Solid(c) => Paint::Solid(faded(c)),
+            Paint::Gradient(mut g, spin) => {
+                g.colors = g.colors.into_iter().map(faded).collect();
+                Paint::Gradient(g, spin)
+            }
+        };
         Look {
             border,
-            alpha: if focused { o.opacity } else { o.inactive_opacity } as f32,
-            dim: if focused { 0.0 } else { o.inactive_dim },
+            alpha: if focused { o.opacity } else { o.inactive_opacity } as f32 * fade,
+            dim: if focused { 0.0 } else { o.inactive_dim } * c.fx.alpha,
             shadow_size,
-            shadow_color,
+            shadow_color: faded(shadow_color),
         }
     }
 
@@ -289,7 +306,7 @@ impl Uwc {
                 out.extend(self.solid_border(c, o, &look, scale));
                 continue;
             };
-            if o.backdrop_color[3] > 0.0 {
+            if o.backdrop_color[3] > 0.0 && c.fx.alpha > 0.0 {
                 out.push(UwcElement::from(ShaderElement::rounded_box(
                     s,
                     backdrop_id,
@@ -297,7 +314,11 @@ impl Uwc {
                     content.to_i32_round(),
                     inner_radius,
                     0.0,
-                    &Paint::Solid(o.backdrop_color),
+                    &Paint::Solid({
+                        let mut b = o.backdrop_color;
+                        b[3] *= c.fx.alpha as f32;
+                        b
+                    }),
                 )));
             }
             if bw > 0.0 {

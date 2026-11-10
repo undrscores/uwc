@@ -160,6 +160,18 @@ impl Uwc {
             let (x, y) = open.position.unwrap_or(centred);
             c.canvas = (x.round(), y.round()).into();
         }
+        if self.config.open_ms > 0.0 && !open.minimized && !self.clients[i].fullscreen {
+            if !self.anim_running() {
+                self.begin_anim();
+            }
+            let c = &mut self.clients[i];
+            c.fx = crate::state::Fx {
+                alpha: 0.0,
+                scale: self.config.open_scale,
+                fade_ms: self.config.open_ms,
+                ..crate::state::Fx::REST
+            };
+        }
         if open.minimized {
             self.minimize_stamp += 1;
             self.clients[i].minimized = self.minimize_stamp;
@@ -209,6 +221,7 @@ impl XdgShellHandler for Uwc {
             minimized: 0,
             open: Default::default(),
             scale: 1.0,
+            fx: crate::state::Fx::REST,
             sent_scale: None,
             commits: 0,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),

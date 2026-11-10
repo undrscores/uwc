@@ -711,6 +711,79 @@ fn panning_moves_the_view_not_the_windows() {
 }
 
 #[test]
+fn view_moves_ease_to_their_target() {
+    let mut uwc = Uwc::start("ease", None);
+    // IPC shows where the view is going at once; the view itself follows over view-ms.
+    uwc.ok("pan 400 0");
+    let s = uwc.state();
+    assert_eq!(s["monitors"][0]["viewport"]["x"], 400.0);
+    assert_eq!(s["monitors"][0]["view_moving"], true);
+    // A second pan builds on the target, not on wherever the view is by now.
+    uwc.ok("pan 100 0");
+    assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 500.0);
+    uwc.wait("the view to settle", |s| s["monitors"][0]["view_moving"] == false);
+    assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 500.0);
+    // Zoom eases too, about its anchor, and builds on the target like pans do.
+    uwc.ok("panto 0 0");
+    uwc.ok("zoom 2 100 100");
+    uwc.ok("zoom 4 100 100");
+    let s = uwc.state();
+    let v = &s["monitors"][0]["viewport"];
+    let f = |k: &str| v[k].as_f64().unwrap();
+    assert_eq!((f("x"), f("y"), f("zoom")), (75.0, 75.0, 4.0), "{s:#}");
+    assert_eq!(s["monitors"][0]["view_moving"], true);
+    let s = uwc.wait("the zoom to settle", |s| s["monitors"][0]["view_moving"] == false);
+    assert_eq!(s["monitors"][0]["viewport"]["zoom"], 4.0);
+    // An instant change (the overview) in the middle of a move finishes it first.
+    uwc.ok("panto 300 0");
+    uwc.ok("overview");
+    uwc.ok("overview");
+    assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 300.0);
+    // view-ms 0 jumps.
+    uwc.ok("set view-ms 0");
+    uwc.ok("pan 40 0");
+    assert_eq!(uwc.state()["monitors"][0]["view_moving"], false);
+}
+
+#[test]
+fn windows_animate_in_moves_and_tag_switches() {
+    let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
+    let mut c = uwc.connect();
+    let _w = c.window("A", 300, 200);
+    // Opening fades and grows in; the reported position is the resting one throughout.
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let id = win(&s, "A")["id"].as_u64().unwrap();
+    assert_eq!((num(&win(&s, "A")["x"]), num(&win(&s, "A")["y"])), (350.0, 200.0));
+    assert_eq!(s["monitors"][0]["animating"], true, "{s:#}");
+    let s = uwc.wait("the open to finish", |s| s["monitors"][0]["animating"] == false);
+    assert_eq!(num(&win(&s, "A")["x"]), 350.0);
+    // A move by IPC reports its target at once and glides there.
+    uwc.ok(&format!("move {id} 600 400"));
+    let s = uwc.state();
+    assert_eq!((num(&win(&s, "A")["x"]), num(&win(&s, "A")["y"])), (600.0, 400.0));
+    assert_eq!(s["monitors"][0]["animating"], true);
+    let s = uwc.wait("the glide to finish", |s| s["monitors"][0]["animating"] == false);
+    assert_eq!(num(&win(&s, "A")["x"]), 600.0);
+    // A window that comes into view with a tag switch fades in; going away is instant.
+    uwc.ok("view 2");
+    assert_eq!(uwc.state()["monitors"][0]["animating"], false);
+    uwc.ok("view 1");
+    assert_eq!(uwc.state()["monitors"][0]["animating"], true);
+    uwc.wait("the fade to finish", |s| s["monitors"][0]["animating"] == false);
+    // The options turn each off.
+    uwc.ok("set move-ms 0");
+    uwc.ok("set tag-ms 0");
+    uwc.ok(&format!("move {id} 100 100"));
+    uwc.ok("view 2");
+    uwc.ok("view 1");
+    assert_eq!(uwc.state()["monitors"][0]["animating"], false);
+    uwc.ok("set open-ms 0");
+    let _b = c.window("B", 200, 100);
+    let s = uwc.wait("B", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(s["monitors"][0]["animating"], false);
+}
+
+#[test]
 fn move_resize_focus_close() {
     let mut uwc = Uwc::start("wm", None);
     let mut c = uwc.connect();
@@ -1277,6 +1350,7 @@ fn zoomed_windows_are_asked_to_render_sharper() {
         std::thread::sleep(Duration::from_millis(150));
         c.sync();
     };
+    uwc.ok("set view-ms 0"); // these are about render scale, not easing
     uwc.ok("zoom 2");
     c.sync();
     assert_eq!(c.app.frac, Some(120), "not while the zoom may still be moving");
@@ -1324,6 +1398,7 @@ fn windows_have_their_own_scale_on_the_canvas() {
     let qh = c.queue.handle();
     let mgr: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
     let _fs = mgr.get_fractional_scale(&w.surface, &qh, ());
+    uwc.ok("set view-ms 0"); // these are about render scale, not easing
     uwc.ok("zoom 4");
     std::thread::sleep(Duration::from_millis(120));
     c.sync();
