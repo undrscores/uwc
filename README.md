@@ -101,7 +101,9 @@ None of this has run on NVIDIA hardware yet.
 
 Config: `-c FILE`, else `$UWC_CONFIG`, else `~/.config/uwc/config.kdl`. `config.def.kdl` is the built-in default and the
 documentation; a file only needs what it changes, and it is reloaded when saved. Control socket: `$UWC_SOCKET`
-(`$XDG_RUNTIME_DIR/uwc-<wayland display>.sock`); `socat - UNIX-CONNECT:$UWC_SOCKET` then type `state`.
+(`$XDG_RUNTIME_DIR/uwc-<wayland display>.sock`). `uwc msg state`, `uwc msg -p get`, `uwc msg subscribe`,
+`uwc msg set focus-color "#ff8800"`; `uwc msg --help` lists every command. The protocol is text lines in, one JSON
+object per line out (`src/protocol.rs`), so `socat - UNIX-CONNECT:$UWC_SOCKET` works too.
 
 ## Layout
 
@@ -115,7 +117,8 @@ src/state.rs       Uwc state: windows, tags, viewport, focus, actions
 src/handlers.rs    wayland protocol handlers
 src/input.rs       keyboard/pointer/drag handling, backend-independent
 src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
-src/ipc.rs         control socket
+src/protocol.rs    the IPC protocol, typed: Request (parsed from a line), the snapshot and events (serde)
+src/ipc.rs         control socket: connections, subscriptions, running requests
 src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
 src/rules.rs       window rules and the per-window decoration settings (`Deco`)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content

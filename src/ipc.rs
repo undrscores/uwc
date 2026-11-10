@@ -9,10 +9,14 @@ use std::{
     path::PathBuf,
 };
 
-use serde_json::{json, Value};
+use serde_json::{Map, Value};
 use smithay::reexports::calloop::{generic::Generic, Interest, LoopHandle, Mode, PostAction};
 
-use crate::{canvas::TAGCOUNT, state::Uwc};
+use crate::{
+    canvas::{Viewport, TAGCOUNT},
+    protocol as P,
+    state::Uwc,
+};
 
 const MAX_LINE: usize = 511;
 
@@ -62,11 +66,6 @@ impl Ipc {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Ipc { path, conns: Vec::new(), next: 1, dirty: false })
     }
-}
-
-/// Decoration settings under their option names, as `get` reports them.
-fn deco_json(d: &crate::rules::Deco) -> Value {
-    Value::Object(crate::options::json(crate::options::DECO, d))
 }
 
 impl Uwc {
@@ -155,7 +154,12 @@ impl Uwc {
     }
 
     pub fn ipc_state(&self) -> Value {
-        let screen = self.screen_size();
+        serde_json::to_value(self.snapshot()).expect("the snapshot serializes")
+    }
+
+    fn snapshot(&self) -> P::Event {
+        let view = |v: &Viewport| P::View { x: v.x.round() as i64, y: v.y.round() as i64, zoom: v.zoom };
+        let (sw, sh) = self.screen_size();
         let wa = self.work_area();
         let ts = self.tagset();
         let (mut occ, mut urg) = (0u32, 0u32);
@@ -165,40 +169,36 @@ impl Uwc {
                 urg |= c.tags;
             }
         }
-        let mons: Vec<Value> = self
+        let monitors = self
             .mon
             .iter()
-            .map(|m| {
-                let vp = m.viewport();
-                let tags: Vec<Value> = (0..TAGCOUNT)
-                    .map(|i| {
-                        json!({
-                            "n": i + 1,
-                            "active": ts & (1 << i) != 0,
-                            "occupied": occ & (1 << i) != 0,
-                            "urgent": urg & (1 << i) != 0,
-                            "viewport": {"x": m.vp[i].x.round() as i64, "y": m.vp[i].y.round() as i64, "zoom": m.vp[i].zoom},
-                            "bookmarks": m.bookmarks[i].iter().enumerate().filter_map(|(n, b)| b.map(|v| json!({
-                                "n": n + 1, "x": v.x.round() as i64, "y": v.y.round() as i64, "zoom": v.zoom,
-                            }))).collect::<Vec<_>>(),
-                        })
+            .map(|m| P::Monitor {
+                name: m.output.name(),
+                focused: true,
+                layout: "><>",
+                rect: P::Rect { x: 0, y: 0, width: sw as i64, height: sh as i64 },
+                scale: m.output.current_scale().fractional_scale(),
+                viewport: view(&m.viewport()),
+                work_area: P::Rect { x: wa.0 as i64, y: wa.1 as i64, width: wa.2 as i64, height: wa.3 as i64 },
+                layers: self.layer_info(),
+                tags: (0..TAGCOUNT)
+                    .map(|i| P::Tag {
+                        n: i + 1,
+                        active: ts & (1 << i) != 0,
+                        occupied: occ & (1 << i) != 0,
+                        urgent: urg & (1 << i) != 0,
+                        viewport: view(&m.vp[i]),
+                        bookmarks: m.bookmarks[i]
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(n, b)| b.as_ref().map(|v| P::Bookmark { n: n + 1, view: view(v) }))
+                            .collect(),
                     })
-                    .collect();
-                json!({
-                    "name": m.output.name(),
-                    "focused": true,
-                    "layout": "><>",
-                    "x": 0, "y": 0, "width": screen.0 as i64, "height": screen.1 as i64,
-                    "scale": m.output.current_scale().fractional_scale(),
-                    "viewport": {"x": vp.x.round() as i64, "y": vp.y.round() as i64, "zoom": vp.zoom},
-                    "work_area": {"x": wa.0 as i64, "y": wa.1 as i64, "width": wa.2 as i64, "height": wa.3 as i64},
-                    "layers": self.layer_info(),
-                    "tags": tags,
-                })
+                    .collect(),
             })
             .collect();
         let name = self.mon.as_ref().map(|m| m.output.name()).unwrap_or_default();
-        let windows: Vec<Value> = self
+        let windows = self
             .clients
             .iter()
             .filter(|c| c.mapped)
@@ -208,129 +208,103 @@ impl Uwc {
                 if let Some(p) = c.pin {
                     r.loc = self.viewport().screen_to_canvas((p.x, p.y)).into();
                 }
-                json!({
-                    "id": c.id,
-                    "title": c.title(),
-                    "app_id": c.app_id(),
-                    "monitor": name,
-                    "tags": c.tags,
-                    "focused": self.focus == Some(c.id),
-                    "floating": true,
-                    "fullscreen": c.fullscreen,
-                    "urgent": c.urgent,
-                    "x": r.loc.x.round() as i64, "y": r.loc.y.round() as i64, "width": r.size.w as i64, "height": r.size.h as i64,
-                    "pinned": c.pin.is_some(),
-                    "minimized": c.minimized != 0,
-                })
+                P::Window {
+                    id: c.id,
+                    title: c.title(),
+                    app_id: c.app_id(),
+                    monitor: name.clone(),
+                    tags: c.tags,
+                    focused: self.focus == Some(c.id),
+                    floating: true,
+                    fullscreen: c.fullscreen,
+                    urgent: c.urgent,
+                    rect: P::Rect {
+                        x: r.loc.x.round() as i64,
+                        y: r.loc.y.round() as i64,
+                        width: r.size.w as i64,
+                        height: r.size.h as i64,
+                    },
+                    pinned: c.pin.is_some(),
+                    minimized: c.minimized != 0,
+                    scale: 1.0,
+                }
             })
             .collect();
-        json!({
-            "event": "state",
-            "selmon": name,
-            "config_error": self.config_error,
-            "config_rev": self.config_rev,
-            "backend": self.backend.name(),
-            "keyboard_focus": self.keyboard_focus_json(),
-            "monitors": mons,
-            "cursor": {"x": self.cursor.x.round() as i64, "y": self.cursor.y.round() as i64, "hidden": false},
-            "windows": windows,
-        })
+        P::Event::State {
+            selmon: name,
+            config_error: self.config_error.clone(),
+            config_rev: self.config_rev,
+            backend: self.backend.name(),
+            keyboard_focus: self.keyboard_focus(),
+            monitors,
+            cursor: P::Cursor { x: self.cursor.x.round() as i64, y: self.cursor.y.round() as i64, hidden: false },
+            windows,
+        }
     }
 
-    /// Where the seat's keyboard really is: `{"window": id}`, `{"layer": namespace}` or null.
-    fn keyboard_focus_json(&self) -> Value {
-        let Some(f) = self.keyboard().current_focus() else { return Value::Null };
+    /// Where the seat's keyboard really is.
+    fn keyboard_focus(&self) -> Option<P::KeyboardFocus> {
+        let f = self.keyboard().current_focus()?;
         if let Some(i) = self.client_by_surface(&f) {
-            return json!({"window": self.clients[i].id});
+            return Some(P::KeyboardFocus::Window(self.clients[i].id));
         }
         if let Some(o) = self.output() {
             let map = smithay::desktop::layer_map_for_output(&o);
             if let Some(l) = map.layer_for_surface(&f, smithay::desktop::WindowSurfaceType::TOPLEVEL) {
-                return json!({"layer": l.namespace()});
+                return Some(P::KeyboardFocus::Layer(l.namespace().to_string()));
             }
         }
-        json!({"other": true})
+        Some(P::KeyboardFocus::Other(true))
     }
 
-    fn ipc_options(&self) -> Value {
+    fn ipc_options(&self) -> Map<String, Value> {
         use crate::options::{json, DECO, GLOBAL};
         let mut all = json(GLOBAL, &self.config);
         all.extend(json(DECO, &self.config.deco));
-        Value::Object(all)
+        all
     }
 
     fn ipc_line(&mut self, id: u32, line: &str) {
-        let reply = match self.ipc_command(id, line) {
+        let reply = match P::Request::parse(line).and_then(|r| self.ipc_exec(id, r)) {
             Ok(Some(v)) => v,
-            Ok(None) => json!({"ok": true}),
-            Err(e) => json!({"error": e}),
+            Ok(None) => serde_json::to_value(P::Ok { ok: true }).unwrap(),
+            Err(error) => serde_json::to_value(P::Error { error }).unwrap(),
         };
         self.ipc_send(id, &reply);
     }
 
-    fn ipc_command(&mut self, id: u32, line: &str) -> Result<Option<Value>, String> {
-        let mut it = line.split_whitespace();
-        let cmd = it.next().unwrap_or("");
-        let args: Vec<&str> = it.collect();
-        let num = |i: usize| -> Result<f64, String> {
-            let v: f64 = args.get(i).ok_or("missing argument")?.parse().map_err(|_| "not a number".to_string())?;
-            if v.is_finite() {
-                Ok(v)
-            } else {
-                Err("not a finite number".into())
-            }
-        };
-        let win = |s: &Uwc, i: usize| -> Result<u32, String> {
-            let w = num(i)? as u32;
-            s.client_index(w).map(|_| w).ok_or_else(|| format!("no window {w}"))
-        };
-        let tag = |i: usize| -> Result<usize, String> {
-            let t = num(i)?;
-            if t.fract() == 0.0 && t >= 1.0 && t <= TAGCOUNT as f64 {
-                Ok(t as usize - 1)
-            } else {
-                Err(format!("tag must be 1 to {TAGCOUNT}"))
-            }
-        };
-        match cmd {
-            "state" => return Ok(Some(self.ipc_state())),
-            "subscribe" => {
+    fn event(e: P::Event) -> Result<Option<Value>, String> {
+        Ok(Some(serde_json::to_value(e).expect("events serialize")))
+    }
+
+    fn ipc_exec(&mut self, id: u32, req: P::Request) -> Result<Option<Value>, String> {
+        use P::Request as R;
+        let window = |s: &Uwc, w: u32| s.client_index(w).ok_or_else(|| format!("no window {w}"));
+        match req {
+            R::State => return Ok(Some(self.ipc_state())),
+            R::Subscribe => {
                 if let Some(c) = self.ipc.conns.iter_mut().find(|c| c.id == id) {
                     c.subscribed = true;
                 }
                 return Ok(Some(self.ipc_state()));
             }
-            "get" => {
-                let all = self.ipc_options();
-                return match args.first() {
-                    None => Ok(Some(json!({"event": "options", "options": all}))),
-                    Some(name) => match all.get(*name) {
-                        Some(v) => Ok(Some(json!({"event": "option", "name": name, "value": v}))),
-                        None => Err(format!("unknown option `{name}`")),
-                    },
-                };
+            R::Get(None) => return Self::event(P::Event::Options { options: self.ipc_options() }),
+            R::Get(Some(name)) => {
+                let value = self.ipc_options().remove(&name).ok_or_else(|| format!("unknown option `{name}`"))?;
+                return Self::event(P::Event::Option { name, value });
             }
-            "set" => {
-                // Everything after the command name, as one line of the options block.
-                let rest = line.trim_start().strip_prefix("set").unwrap_or("").trim();
-                if rest.is_empty() {
-                    return Err("set needs an option and a value, e.g. set focus-color \"#ff8800\"".into());
-                }
-                match self.config.set_line(rest) {
-                    Ok(c) => {
-                        self.config = c;
-                        // Like a reload for whoever follows config_rev, without re-reading the file.
-                        self.config_rev += 1;
-                        self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
-                        self.deco_commit.increment();
-                        self.damage();
-                    }
-                    Err(e) => return Err(format!("{e:#}")),
-                }
+            R::Set(line) => {
+                let c = self.config.set_line(&line).map_err(|e| format!("{e:#}"))?;
+                self.config = c;
+                // Like a reload for whoever follows config_rev, without re-reading the file.
+                self.config_rev += 1;
+                self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
+                self.deco_commit.increment();
+                self.damage();
             }
-            "rule" => {
+            R::Rule(line) => {
                 // The line is itself KDL: `rule { match app-id="mpv"; opacity 0.9 }`, or `rule clear`.
-                let nodes = crate::kdl::parse(line).map_err(|e| e.to_string())?;
+                let nodes = crate::kdl::parse(&line).map_err(|e| e.to_string())?;
                 let [n] = nodes.as_slice() else { return Err("expected one rule".into()) };
                 if n.arg_str(0) == Some("clear") && n.kids.is_empty() {
                     self.ipc_rules.clear();
@@ -344,110 +318,71 @@ impl Uwc {
                 self.deco_commit.increment();
                 self.damage();
             }
-            "get-window" => {
+            R::Rules => {
+                return Self::event(P::Event::Rules { file: self.config.rules.len(), ipc: self.ipc_rules.len() })
+            }
+            R::GetWindow(w) => {
                 // A window's decoration as its rules make it right now.
-                let w = win(self, 0)?;
-                let c = &self.clients[self.client_index(w).unwrap()];
-                return Ok(Some(json!({"event": "window-options", "id": w, "options": deco_json(&self.deco_for(c))})));
+                let i = window(self, w)?;
+                let options = crate::options::json(crate::options::DECO, &self.deco_for(&self.clients[i]));
+                return Self::event(P::Event::WindowOptions { id: w, options });
             }
-            "rules" => {
-                return Ok(Some(json!({
-                    "event": "rules",
-                    "file": self.config.rules.len(),
-                    "ipc": self.ipc_rules.len(),
-                })));
-            }
-            "bookmark" => {
-                let n = num(1)?;
-                if n.fract() != 0.0 || !(1.0..=9.0).contains(&n) {
-                    return Err("bookmarks are 1 to 9".into());
-                }
-                match args.first().copied() {
-                    Some("save") => self.bookmark_save(n as usize - 1),
-                    Some("goto") => {
-                        if !self.bookmark_goto(n as usize - 1) {
-                            return Err(format!("bookmark {n} is not set on this tag"));
-                        }
-                    }
-                    _ => return Err("bookmark save|goto N".into()),
+            R::Bookmark { save: true, n } => self.bookmark_save(n),
+            R::Bookmark { save: false, n } => {
+                if !self.bookmark_goto(n) {
+                    return Err(format!("bookmark {} is not set on this tag", n + 1));
                 }
             }
-            "pan" => {
-                let (dx, dy) = (num(0)?, num(1)?);
-                self.pan_canvas(dx, dy);
-            }
-            "panto" => {
-                let (x, y) = (num(0)?, num(1)?);
-                self.with_viewport(|v, _| {
-                    v.x = x;
-                    v.y = y;
-                });
-            }
-            "zoom" => {
-                let z = num(0)?;
-                if z <= 0.0 {
-                    return Err("zoom must be positive".into());
-                }
-                let at = if args.len() >= 3 {
-                    (num(1)?, num(2)?)
-                } else {
-                    (self.screen_size().0 / 2.0, self.screen_size().1 / 2.0)
-                };
+            R::Pan(dx, dy) => self.pan_canvas(dx, dy),
+            R::PanTo(x, y) => self.with_viewport(|v, _| {
+                v.x = x;
+                v.y = y;
+            }),
+            R::Zoom(z, at) => {
+                let (sw, sh) = self.screen_size();
+                let at = at.unwrap_or((sw / 2.0, sh / 2.0));
                 self.with_viewport(|v, _| v.set_zoom_at(z, at));
             }
-            "view" => {
-                let t = tag(0)?;
-                self.set_tagset(1 << t);
-            }
-            "toggleview" => {
-                let t = tag(0)?;
+            R::View(t) => self.set_tagset(1 << t),
+            R::ToggleView(t) => {
                 let ts = self.tagset() ^ (1 << t);
                 self.set_tagset(ts);
             }
-            "focus" => {
-                let w = win(self, 0)?;
+            R::Focus(w) => {
+                window(self, w)?;
                 self.focus_and_reveal(w);
             }
-            "close" => {
-                let w = win(self, 0)?;
+            R::Close(w) => {
+                window(self, w)?;
                 self.close_client(w);
             }
-            "move" => {
-                let w = win(self, 0)?;
-                let (x, y) = (num(1)?, num(2)?);
+            R::Move(w, x, y) => {
+                window(self, w)?;
                 self.move_client(w, x, y);
             }
-            "resize" => {
-                let w = win(self, 0)?;
-                let (cw, ch) = (num(1)?, num(2)?);
-                if cw < 1.0 || ch < 1.0 || cw > 1e5 || ch > 1e5 {
-                    return Err("size out of range".into());
-                }
-                self.resize_client(w, cw as i32, ch as i32);
+            R::Resize(w, cw, ch) => {
+                window(self, w)?;
+                self.resize_client(w, cw, ch);
             }
-            "overview" => self.toggle_overview(),
-            "pin" | "unpin" => {
-                let w = win(self, 0)?;
-                if cmd == "pin" && self.clients[self.client_index(w).unwrap()].fullscreen {
+            R::Pin(w, on) => {
+                let i = window(self, w)?;
+                if on && self.clients[i].fullscreen {
                     return Err("a fullscreen window cannot be pinned".into());
                 }
-                self.set_pinned(w, cmd == "pin");
+                self.set_pinned(w, on);
             }
-            "minimize" | "restore" => {
-                let w = win(self, 0)?;
-                self.set_minimized(w, cmd == "minimize");
+            R::Minimize(w, on) => {
+                window(self, w)?;
+                self.set_minimized(w, on);
             }
-            "fullscreen" | "unfullscreen" => {
-                let w = win(self, 0)?;
-                self.set_fullscreen(w, cmd == "fullscreen");
+            R::Fullscreen(w, on) => {
+                window(self, w)?;
+                self.set_fullscreen(w, on);
             }
-            "home" => self.with_viewport(|v, _| *v = Default::default()),
-            "reload" => {
-                self.reload_config()?;
-            }
-            "quit" => self.loop_signal.stop(),
-            "" => return Err("empty command".into()),
-            other => return Err(format!("unknown command `{other}`")),
+            R::Overview => self.toggle_overview(),
+            R::Home => self.with_viewport(|v, _| *v = Default::default()),
+            R::Reload => self.reload_config()?,
+            R::Quit => self.loop_signal.stop(),
         }
         Ok(None)
     }

@@ -1019,3 +1019,52 @@ fn bookmarks_remember_views_per_tag() {
         assert!(uwc.cmd(bad).get("error").is_some(), "should refuse: {bad}");
     }
 }
+
+#[test]
+fn uwc_msg_talks_to_the_compositor() {
+    let mut uwc = Uwc::start("msg", None);
+    let sock = uwc.dir.join(format!("uwc-{}.sock", uwc.display));
+    let msg = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_uwc")).arg("msg").args(args).env("UWC_SOCKET", &sock).output().unwrap()
+    };
+    let out = msg(&["state"]);
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["event"], "state");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 1, "one JSON line");
+
+    // Arguments are joined into the command line; a shell-unquoted color is a bare KDL string.
+    assert!(msg(&["set", "focus-color", "#ff0000"]).status.success());
+    assert_eq!(uwc.cmd("get focus-color")["value"], "#ff0000ff");
+    assert!(msg(&["rule", "{ match app-id=\"mpv\"; opacity 0.9 }"]).status.success());
+    assert_eq!(uwc.cmd("rules")["ipc"], 1);
+
+    // Errors: caught locally before connecting, or reported by the compositor; both exit 1.
+    let bad = msg(&["pan", "x"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("not a number"));
+    let bad = msg(&["focus", "999"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("no window 999"));
+
+    let pretty = msg(&["-p", "get", "corner-radius"]);
+    assert!(String::from_utf8_lossy(&pretty.stdout).lines().count() > 1);
+    let help = msg(&["--help"]);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("bookmark save N"));
+
+    // subscribe streams: the first snapshot arrives, then one per change.
+    let mut sub = Command::new(env!("CARGO_BIN_EXE_uwc"))
+        .args(["msg", "subscribe"])
+        .env("UWC_SOCKET", &sock)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(sub.stdout.take().unwrap()).lines();
+    let first: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(first["event"], "state");
+    uwc.ok("pan 7 0");
+    let next: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(next["monitors"][0]["viewport"]["x"], 7);
+    let _ = sub.kill();
+    let _ = sub.wait();
+}
