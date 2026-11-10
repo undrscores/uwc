@@ -53,6 +53,11 @@ impl Uwc {
     /// surfaces, the canvas, then bottom and background layer surfaces.
     /// `scale` is the output scale (physical px per logical px).
     pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
+        self.scene_elements(renderer, scale, true)
+    }
+
+    /// The whole picture of the output; `with_cursor` false leaves the pointer out (screencopy).
+    pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, scale: f64, with_cursor: bool) -> Vec<UwcElement> {
         use smithay::wayland::shell::wlr_layer::Layer;
         // A spinning gradient border changes every frame: new content, and another frame after this one.
         if self.spinning_border_visible() {
@@ -83,7 +88,7 @@ impl Uwc {
             self.deco_commit.increment();
             self.animating = true;
         }
-        let mut out = self.cursor_elements(renderer, scale);
+        let mut out = if with_cursor { self.cursor_elements(renderer, scale) } else { Vec::new() };
         out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
         let fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true);

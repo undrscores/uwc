@@ -1788,15 +1788,18 @@ name = "uwc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitflags 2.13.2",
  "calloop 0.14.5",
  "serde",
  "serde_json",
  "smithay",
  "tracing",
  "tracing-subscriber",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+ "wayland-scanner",
  "xcursor",
 ]
 

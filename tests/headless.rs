@@ -22,7 +22,13 @@ use wayland_protocols::ext::workspace::v1::client::{
 };
 use wayland_protocols::wp::fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1 as tl_handle, zwlr_foreign_toplevel_manager_v1 as tl_manager,
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1 as sc_frame, zwlr_screencopy_manager_v1 as sc_manager,
+};
 
 // ---- the compositor under test -----------------------------------------------------------
 
@@ -147,6 +153,24 @@ fn num(v: &Value) -> f64 {
 
 // ---- a minimal Wayland client ------------------------------------------------------------
 
+mod hyprland {
+    #![allow(dead_code, non_camel_case_types, unused_unsafe, unused_variables, non_upper_case_globals)]
+    #![allow(non_snake_case, unused_imports, missing_docs, clippy::all)]
+    use wayland_client;
+    use wayland_client::protocol::*;
+    use wayland_protocols_wlr::foreign_toplevel::v1::client::*;
+    pub mod __interfaces {
+        use wayland_client::protocol::__interfaces::*;
+        use wayland_protocols_wlr::foreign_toplevel::v1::client::__interfaces::*;
+        wayland_scanner::generate_interfaces!("protocols/hyprland-toplevel-export-v1.xml");
+    }
+    use self::__interfaces::*;
+    wayland_scanner::generate_client_code!("protocols/hyprland-toplevel-export-v1.xml");
+}
+use hyprland::{
+    hyprland_toplevel_export_frame_v1 as export_frame, hyprland_toplevel_export_manager_v1 as export_manager,
+};
+
 struct App {
     compositor: wl_compositor::WlCompositor,
     shm: wl_shm::WlShm,
@@ -159,12 +183,30 @@ struct App {
     ws_group_outputs: usize,
     /// The last fractional preferred scale (in 1/120) and integer preferred buffer scale told.
     frac: Option<u32>,
+    /// wlr-foreign-toplevel: handles in announcement order and what was said about each.
+    tl: Vec<tl_handle::ZwlrForeignToplevelHandleV1>,
+    /// hyprland-toplevel-export: the last frame's buffer offer, and how it ended.
+    export_buffer: Option<(u32, u32, u32, u32)>,
+    export_done: bool,
+    export_failed: bool,
+    export_ready: bool,
+    tl_info: std::collections::HashMap<wayland_client::backend::ObjectId, TlInfo>,
     buffer_scale: Option<i32>,
     closed: Vec<String>,
     /// The size the compositor last asked a toplevel for.
     asked: Option<(i32, i32)>,
     /// The size the last layer-surface configure gave.
     layer_size: Option<(u32, u32)>,
+}
+
+#[derive(Default, Debug, Clone)]
+struct TlInfo {
+    title: String,
+    app_id: String,
+    states: Vec<u32>,
+    outputs: usize,
+    done: usize,
+    closed: bool,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -212,6 +254,12 @@ impl Client {
             ws_done: 0,
             ws_group_outputs: 0,
             frac: None,
+            tl: vec![],
+            export_buffer: None,
+            export_done: false,
+            export_failed: false,
+            export_ready: false,
+            tl_info: Default::default(),
             buffer_scale: None,
             closed: vec![],
             asked: None,
@@ -307,6 +355,13 @@ impl Client {
         let o = self.globals.bind(&qh, 1..=4, ()).expect("wl_output");
         self.sync();
         o
+    }
+
+    /// The foreign-toplevel handle titled `title` and what was said about it.
+    fn tl(&self, title: &str) -> (tl_handle::ZwlrForeignToplevelHandleV1, TlInfo) {
+        let h = self.app.tl.iter().find(|h| self.app.tl_info[&h.id()].title == title).unwrap().clone();
+        let i = self.app.tl_info[&h.id()].clone();
+        (h, i)
     }
 
     /// The workspace named `name` and its state bits.
@@ -410,6 +465,95 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
 }
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(wl_output::WlOutput);
+noop!(wayland_client::protocol::wl_seat::WlSeat);
+noop!(export_manager::HyprlandToplevelExportManagerV1);
+noop!(sc_manager::ZwlrScreencopyManagerV1);
+
+impl Dispatch<sc_frame::ZwlrScreencopyFrameV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &sc_frame::ZwlrScreencopyFrameV1,
+        e: sc_frame::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            sc_frame::Event::Buffer { format, width, height, stride } => {
+                app.export_buffer = Some((format.into(), width, height, stride))
+            }
+            sc_frame::Event::BufferDone => app.export_done = true,
+            sc_frame::Event::Failed => app.export_failed = true,
+            sc_frame::Event::Ready { .. } => app.export_ready = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<export_frame::HyprlandToplevelExportFrameV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &export_frame::HyprlandToplevelExportFrameV1,
+        e: export_frame::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            export_frame::Event::Buffer { format, width, height, stride } => {
+                app.export_buffer = Some((format.into(), width, height, stride))
+            }
+            export_frame::Event::BufferDone => app.export_done = true,
+            export_frame::Event::Failed => app.export_failed = true,
+            export_frame::Event::Ready { .. } => app.export_ready = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<tl_manager::ZwlrForeignToplevelManagerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &tl_manager::ZwlrForeignToplevelManagerV1,
+        e: tl_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let tl_manager::Event::Toplevel { toplevel } = e {
+            app.tl_info.insert(toplevel.id(), TlInfo::default());
+            app.tl.push(toplevel);
+        }
+    }
+
+    wayland_client::event_created_child!(App, tl_manager::ZwlrForeignToplevelManagerV1, [
+        tl_manager::EVT_TOPLEVEL_OPCODE => (tl_handle::ZwlrForeignToplevelHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<tl_handle::ZwlrForeignToplevelHandleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        h: &tl_handle::ZwlrForeignToplevelHandleV1,
+        e: tl_handle::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let i = app.tl_info.entry(h.id()).or_default();
+        match e {
+            tl_handle::Event::Title { title } => i.title = title,
+            tl_handle::Event::AppId { app_id } => i.app_id = app_id,
+            tl_handle::Event::State { state } => {
+                i.states = state.chunks_exact(4).map(|c| u32::from_ne_bytes(c.try_into().unwrap())).collect()
+            }
+            tl_handle::Event::OutputEnter { .. } => i.outputs += 1,
+            tl_handle::Event::Done => i.done += 1,
+            tl_handle::Event::Closed => i.closed = true,
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<ws_manager::ExtWorkspaceManagerV1, ()> for App {
     fn event(
@@ -1278,4 +1422,122 @@ fn the_canvas_comes_back_after_a_restart() {
     assert!(uwc.cmd("session").get("error").is_some());
     drop(uwc);
     let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn taskbars_list_and_control_windows() {
+    const ACTIVATED: u32 = 2;
+    const MINIMIZED: u32 = 1;
+    const FULLSCREEN: u32 = 3;
+    let mut uwc = Uwc::start("foreign-toplevel", None);
+    let mut c = uwc.connect();
+    let wa = c.window("A", 300, 200);
+    let _wb = c.window("B", 300, 200);
+    let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (a, b) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "B")["id"].as_u64().unwrap());
+    let qh = c.queue.handle();
+    let seat: wayland_client::protocol::wl_seat::WlSeat = c.globals.bind(&qh, 1..=7, ()).unwrap();
+    let _o: wl_output::WlOutput = c.globals.bind(&qh, 1..=4, ()).unwrap();
+    let _m: tl_manager::ZwlrForeignToplevelManagerV1 = c.globals.bind(&qh, 1..=3, ()).unwrap();
+    c.sync();
+
+    // The list, at once on bind.
+    assert_eq!(c.app.tl.len(), 2);
+    let (ha, ia) = c.tl("A");
+    let (hb, ib) = c.tl("B");
+    assert_eq!((ia.app_id.as_str(), ia.outputs, ia.done >= 1), ("uwc.test", 1, true));
+    assert!(ib.states.contains(&ACTIVATED) && !ia.states.contains(&ACTIVATED), "B has focus");
+
+    // A taskbar click.
+    ha.activate(&seat);
+    c.sync();
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], a);
+    c.sync();
+    assert!(c.tl("A").1.states.contains(&ACTIVATED) && !c.tl("B").1.states.contains(&ACTIVATED), "the bar is told");
+
+    ha.set_minimized();
+    c.sync();
+    assert_eq!(win(&uwc.state(), "A")["minimized"], true);
+    c.sync();
+    assert!(c.tl("A").1.states.contains(&MINIMIZED));
+    ha.activate(&seat);
+    c.sync();
+    assert_eq!(win(&uwc.state(), "A")["minimized"], false, "activating a minimized window restores it");
+
+    hb.set_fullscreen(None);
+    c.sync();
+    assert_eq!(win(&uwc.state(), "B")["fullscreen"], true);
+    c.sync();
+    assert!(c.tl("B").1.states.contains(&FULLSCREEN));
+
+    // Close asks the app; when its window goes, the handle is closed.
+    hb.close();
+    c.sync();
+    c.dispatch_pending();
+    assert_eq!(c.app.closed.len(), 1);
+    wa.toplevel.destroy();
+    wa.xdg.destroy();
+    wa.surface.destroy();
+    c.sync();
+    uwc.wait("A gone", |s| s["windows"].as_array().unwrap().len() == 1);
+    c.sync();
+    assert!(c.tl("A").1.closed);
+
+    // A window opened later shows up.
+    let _wc = c.window("C", 100, 100);
+    uwc.wait("C", |s| s["windows"].as_array().unwrap().len() == 2);
+    c.sync();
+    assert_eq!(c.tl("C").1.title, "C");
+    let _ = b;
+}
+
+#[test]
+fn window_previews_offer_the_window_and_fail_cleanly_without_a_renderer() {
+    let mut uwc = Uwc::start("export", None);
+    let mut c = uwc.connect();
+    let _a = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A")["id"].as_u64().unwrap() as u32;
+    let qh = c.queue.handle();
+    let m: export_manager::HyprlandToplevelExportManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+
+    let frame = m.capture_toplevel(0, a, &qh, ());
+    c.sync();
+    // ARGB8888 (0) at the window's size, stride 4 per pixel, then buffer_done (v2).
+    assert_eq!(c.app.export_buffer, Some((0, 300, 200, 1200)));
+    assert!(c.app.export_done);
+    let buf = c.buffer("cap", 300, 200);
+    frame.copy(&buf, 1);
+    c.sync();
+    assert!(c.app.export_failed && !c.app.export_ready, "headless has no renderer: failed, not a hang");
+
+    c.app.export_failed = false;
+    let _f2 = m.capture_toplevel(0, 9999, &qh, ());
+    c.sync();
+    assert!(c.app.export_failed, "an unknown window fails at once");
+}
+
+#[test]
+fn screencopy_offers_the_output_and_fails_cleanly_without_a_renderer() {
+    let uwc = Uwc::start("screencopy", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let out: wl_output::WlOutput = c.globals.bind(&qh, 1..=4, ()).unwrap();
+    let m: sc_manager::ZwlrScreencopyManagerV1 = c.globals.bind(&qh, 1..=3, ()).unwrap();
+    let frame = m.capture_output(0, &out, &qh, ());
+    c.sync();
+    assert_eq!(c.app.export_buffer, Some((0, 1000, 600, 4000)), "the whole output, ARGB8888");
+    assert!(c.app.export_done, "buffer_done (v3)");
+    let buf = c.buffer("sc", 1000, 600);
+    frame.copy(&buf);
+    c.sync();
+    assert!(c.app.export_failed && !c.app.export_ready, "headless: failed, not a hang");
+
+    // A region, in logical px.
+    c.app.export_buffer = None;
+    let _f = m.capture_output_region(0, &out, 10, 20, 300, 200, &qh, ());
+    c.sync();
+    assert_eq!(c.app.export_buffer, Some((0, 300, 200, 1200)));
+    drop(uwc);
 }
