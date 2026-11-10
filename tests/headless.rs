@@ -1646,6 +1646,116 @@ fn a_frame_is_dragged_by_its_title_strip_and_resized_by_its_corner() {
 }
 
 #[test]
+fn dragged_windows_snap_to_other_windows_and_to_a_grid() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc =
+        Uwc::start("snap", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }\nbinds { MouseRight { drag-move; } }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _a = c.window("Anchor", 200, 150);
+    let _b = c.window("Mover", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Anchor")["id"].as_u64().unwrap(), win(&s, "Mover")["id"].as_u64().unwrap());
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let at = |uwc: &mut Uwc, who: &str| {
+        let s = uwc.state();
+        let w = win(&s, who);
+        (num(&w["x"]), num(&w["y"]))
+    };
+    // Put the mover at (500, 300) and drag it by (dx, dy) from its centre.
+    let drag = |uwc: &mut Uwc, c: &mut Client, dx: f64, dy: f64| {
+        uwc.ok(&format!("move {b} 500 300"));
+        let s = uwc.state();
+        let vp = &s["monitors"][0]["viewport"];
+        let (px, py) = ((500.0 - num(&vp["x"]) + 100.0) as u32, (300.0 - num(&vp["y"]) + 75.0) as u32);
+        p.motion_absolute(0, px, py, 1000, 600);
+        p.frame();
+        p.button(1, 0x111, ButtonState::Pressed);
+        p.motion(2, dx, dy);
+        p.frame();
+        p.button(3, 0x111, ButtonState::Released);
+        p.frame();
+        c.sync();
+    };
+    uwc.ok(&format!("move {a} 100 100"));
+    // Within 8 px of the anchor's right edge (300) and top (100): both snap flush.
+    drag(&mut uwc, &mut c, 305.0 - 500.0, 103.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (300.0, 100.0));
+    // Its own right edge to the anchor's left edge (100): 100 - 200 = -100 for its x.
+    drag(&mut uwc, &mut c, -97.0 - 500.0, 250.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover").0, -100.0);
+    // Out of range: left alone.
+    drag(&mut uwc, &mut c, 320.0 - 500.0, 130.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (320.0, 130.0));
+    // snap-distance 0 turns window snapping off, and the grid then rounds.
+    uwc.ok("set snap-distance 0");
+    drag(&mut uwc, &mut c, 305.0 - 500.0, 103.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (305.0, 103.0));
+    uwc.ok("set snap-grid 50");
+    drag(&mut uwc, &mut c, 277.0 - 500.0, 331.0 - 300.0);
+    assert_eq!(at(&mut uwc, "Mover"), (300.0, 350.0));
+}
+
+#[test]
+fn dragging_a_window_under_another_moves_that_window() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start(
+        "dragunder",
+        Some("options { open-ms 0\n move-ms 0\n view-ms 0\n snap-distance 0 }\nbinds {\nMouseRight { drag-move; }\nMouseMiddle { drag-resize; }\n}"),
+    );
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _a = c.window("Below", 200, 150);
+    let _b = c.window("Above", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Below")["id"].as_u64().unwrap(), win(&s, "Above")["id"].as_u64().unwrap());
+    uwc.ok(&format!("move {a} 100 100"));
+    uwc.ok(&format!("move {b} 600 100"));
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], b, "Above is on top and focused");
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let (px, py) = ((200.0 - num(&vp["x"])) as u32, (175.0 - num(&vp["y"])) as u32);
+    // Press on the lower window: focusing it raises it (the window list is reordered), and it is that
+    // window that moves, not whichever took its place in the list.
+    p.motion_absolute(0, px, py, 1000, 600);
+    p.frame();
+    p.button(1, 0x111, ButtonState::Pressed);
+    p.motion(2, 30.0, 20.0);
+    p.frame();
+    p.button(3, 0x111, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], a);
+    assert_eq!((num(&win(&s, "Below")["x"]), num(&win(&s, "Below")["y"])), (130.0, 120.0));
+    assert_eq!((num(&win(&s, "Above")["x"]), num(&win(&s, "Above")["y"])), (600.0, 100.0), "the other one stayed");
+    // The same for a resize drag started on a window that is not on top.
+    let (px, py) = ((600.0 + 100.0 - num(&vp["x"])) as u32, (100.0 + 75.0 - num(&vp["y"])) as u32);
+    c.app.asked = None;
+    p.motion_absolute(4, px, py, 1000, 600);
+    p.frame();
+    p.button(5, 0x112, ButtonState::Pressed);
+    p.motion(6, 40.0, 30.0);
+    p.frame();
+    p.button(7, 0x112, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!(s["keyboard_focus"]["window"], b);
+    // The client is asked for the new size (this test client does not redraw at it).
+    assert_eq!(c.app.asked, Some((240, 180)), "{}", s["windows"]);
+}
+
+#[test]
 fn windows_animate_in_moves_and_tag_switches() {
     let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
     let mut c = uwc.connect();

@@ -33,6 +33,7 @@ mod scale;
 mod screencopy;
 mod session;
 mod sessionlock;
+mod snap;
 mod state;
 mod sync;
 mod toplevels;

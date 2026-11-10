@@ -266,6 +266,20 @@ ex, ey = int((e["x"]-vp["x"])*vp["zoom"])+150, int((e["y"]-vp["y"])*vp["zoom"])+
 check("a window inside is drawn over the frame, untinted", px(ex, ey), (0x30,0xd0,0xd0))
 cmd(f"frame remove {cmd('state')['frames'][0]['id']}"); time.sleep(0.4)
 check("removing the frame removes its drawing", px(sx+1, sy+e["height"]+100), (32,32,32))
+# Snap guides: dragging a window within snap-distance of a frame's edge snaps flush and draws a guide line.
+cmd('set snap-color "#ff6ac1"'); cmd("set snap-distance 8"); cmd("zoom 1 0 0"); time.sleep(0.4)
+st = cmd("state"); vp = st["monitors"][0]["viewport"]; e = win("E")
+cmd(f"frame add {e['x']+400} {e['y']-60} 300 300 snap"); time.sleep(0.3)
+ecx, ecy = int(e["x"]-vp["x"])+150, int(e["y"]-vp["y"])+100
+subprocess.run(["xdotool","keydown","Alt_L","mousemove",str(ecx),str(ecy),"mousedown","1"], env=env); time.sleep(0.3)
+subprocess.run(["xdotool","mousemove",str(ecx+150),str(ecy)], env=env); time.sleep(0.3)
+subprocess.run(["xdotool","mousemove",str(ecx+397),str(ecy)], env=env); time.sleep(0.5)
+snapped = count_color((255,106,193))
+subprocess.run(["xdotool","mouseup","1","keyup","Alt_L"], env=env); time.sleep(0.4)
+check("a guide line is drawn while snapped", snapped > 100, True)
+check("the window snapped flush with the frame's left edge", win("E")["x"], e["x"]+400)
+check("the guide goes when the drag ends", count_color((255,106,193)), 0)
+cmd(f"frame remove {cmd('state')['frames'][0]['id']}")
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,

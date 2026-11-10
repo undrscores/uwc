@@ -18,6 +18,7 @@ IPC, improved where uwm was awkward.
   re-render at the zoomed size instead of being stretched. Panning never resizes or refocuses a window.
 - **Tags, not just workspaces.** Nine tags, each with its own canvas, viewport and zoom; view, toggle and send windows
   to any combination.
+- **Snaps.** Dragged windows snap to the edges and centres of their neighbours, with guide lines.
 - **Frames.** Label a region of the canvas (`Mod+B`), drag it by its title strip and its windows go with it, and
   jump the view from frame to frame with `Mod+]` and `Mod+[`: lay a canvas out into places.
 - **Find any window.** `Mod+/` labels every window and jumps to the one you type; `uwc msg jump firefox` fuzzy-finds by

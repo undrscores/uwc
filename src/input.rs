@@ -387,7 +387,14 @@ impl Uwc {
                         self.clients[i].pin = Some((orig.x + dx, orig.y + dy).into());
                         self.refresh_pointer();
                     }
-                    _ => self.move_client(id, orig.x + dx, orig.y + dy),
+                    _ => {
+                        let (x, y, guides) = self.snap_move(id, orig.x + dx, orig.y + dy);
+                        if guides != self.guides.list {
+                            self.guides.list = guides;
+                            self.deco_commit.increment();
+                        }
+                        self.move_client(id, x, y)
+                    }
                 }
             }
             Drag::Resize { id, start, orig } => {
@@ -456,17 +463,22 @@ impl Uwc {
                 self.config.mouse.iter().find(|b| b.button == button && b.mods == mods).map(|b| b.action.clone());
             match bind {
                 // Over nothing, a move or resize bind falls through to the click handling below.
+                // Focusing raises the window, which reorders `clients`: find it again by id.
                 Some(Action::DragMove) => {
-                    if let Some(i) = under {
-                        self.focus_client(Some(self.clients[i].id));
-                        self.begin_move(i);
+                    if let Some(id) = under.map(|i| self.clients[i].id) {
+                        self.focus_client(Some(id));
+                        if let Some(i) = self.client_index(id) {
+                            self.begin_move(i);
+                        }
                         return;
                     }
                 }
                 Some(Action::DragResize) => {
-                    if let Some(i) = under {
-                        self.focus_client(Some(self.clients[i].id));
-                        self.begin_resize(i);
+                    if let Some(id) = under.map(|i| self.clients[i].id) {
+                        self.focus_client(Some(id));
+                        if let Some(i) = self.client_index(id) {
+                            self.begin_resize(i);
+                        }
                         return;
                     }
                 }
@@ -513,6 +525,11 @@ impl Uwc {
                 _ => {}
             }
         } else if self.drag.take().is_some() {
+            // The alignment lines go with the drag.
+            if !std::mem::take(&mut self.guides.list).is_empty() {
+                self.deco_commit.increment();
+                self.damage();
+            }
             // The press that started the drag never reached a client, so neither does its release.
             self.refresh_pointer();
             return;

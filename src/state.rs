@@ -503,6 +503,8 @@ pub struct Uwc {
     pub fling: Option<Fling>,
     /// Labelled regions of the canvas (frames.rs).
     pub frames: crate::frames::Frames,
+    /// Alignment lines drawn while a window is dragged (snap.rs).
+    pub guides: crate::snap::Guides,
     /// Hint mode (`jump-hints`) while it is up.
     pub hints: Option<crate::hints::Hints>,
     /// `drag_motion` is running (see `pointer_motion_to`).
@@ -657,6 +659,7 @@ impl Uwc {
             gesture: None,
             fling: None,
             frames: Default::default(),
+            guides: Default::default(),
             hints: None,
             in_drag_motion: false,
             pan_vel: (0.0, 0.0),

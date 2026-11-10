@@ -63,6 +63,11 @@ options {
     tag-ms 140                  // windows that come into view with a tag switch fade in over this long; 0 = at once
     close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
     pan-momentum-ms 600         // let go of a touchpad swipe or a touch drag while moving and the view glides on, losing most of its speed in about this long; 0 = stops dead. Not uwm's option
+    // Dragging a window snaps its edges and centre lines to other windows and frames within this many screen px
+    // (so it feels the same at any zoom), drawing a guide line; hold Ctrl to drag freely. 0 = off. Not uwm's option.
+    snap-distance 8
+    snap-grid 0                 // also snap to a grid of this many canvas px (0 = no grid); windows' edges win over the grid
+    snap-color "#ff6ac1"        // the guide lines
     // Frames: labelled regions of the canvas behind the windows (frame-new draws one around the focused window).
     // Drag a frame by its title strip and its windows go with it; drag the bottom-right corner to resize.
     frame-color "#7aa2f7"       // border, title strip and label badge
