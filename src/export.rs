@@ -153,6 +153,14 @@ impl Dispatch<HyprlandToplevelExportManagerV1, ()> for Uwc {
         init: &mut DataInit<'_, Uwc>,
     ) {
         use hyprland_toplevel_export_manager_v1::Request as R;
+        // No window previews while the session is locked: nothing must be captured.
+        if state.is_locked() {
+            if let R::CaptureToplevel { frame, .. } | R::CaptureToplevelWithWlrToplevelHandle { frame, .. } = request {
+                let frame = init.init(frame, FrameData { window: 0, used: Mutex::new(true) });
+                frame.failed();
+            }
+            return;
+        }
         let (frame, window) = match request {
             // The plain-number form: uwc's own window id.
             R::CaptureToplevel { frame, handle, .. } => (frame, Some(handle)),

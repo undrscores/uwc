@@ -42,6 +42,44 @@ render_elements! {
     RoundedGhost=RoundedElement<RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>>,
 }
 
+impl crate::state::Client {
+    /// The top-left of the window geometry inside its surface (client-side shadows and such).
+    pub fn geo_loc(&self) -> Point<i32, smithay::utils::Logical> {
+        match &self.shell {
+            crate::state::Shell::Wayland(w) => w.geometry().loc,
+            crate::state::Shell::X11(s) => s.geometry().loc,
+        }
+    }
+
+    /// The window's content as render elements at `origin` (physical px).
+    pub fn render_content(
+        &self,
+        renderer: &mut GlesRenderer,
+        origin: Point<i32, Physical>,
+        scale: f64,
+        alpha: f32,
+    ) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
+        match &self.shell {
+            crate::state::Shell::Wayland(w) => {
+                AsRenderElements::<GlesRenderer>::render_elements(w, renderer, origin, Scale::from(scale), alpha)
+            }
+            crate::state::Shell::X11(s) => s
+                .wl_surface()
+                .map(|surf| {
+                    render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                        renderer,
+                        &surf,
+                        origin,
+                        Scale::from(scale),
+                        alpha,
+                        Kind::Unspecified,
+                    )
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// How one window looks right now, resolved from the options and its focus.
 struct Look {
     border: Paint,
@@ -52,16 +90,30 @@ struct Look {
 }
 
 impl Uwc {
-    /// Everything on one output for one frame, front to back: the pointer, overlay and top layer
+    /// Everything on one monitor for one frame, front to back: the pointer, overlay and top layer
     /// surfaces, the canvas, then bottom and background layer surfaces.
-    /// `scale` is the output scale (physical px per logical px).
-    pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
-        self.scene_elements(renderer, scale, true)
+    pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, m: usize) -> Vec<UwcElement> {
+        self.scene_elements(renderer, m, true)
     }
 
-    /// The whole picture of the output; `with_cursor` false leaves the pointer out (screencopy).
-    pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, scale: f64, with_cursor: bool) -> Vec<UwcElement> {
+    /// The whole picture of monitor `m`; `with_cursor` false leaves the pointer out (screencopy).
+    pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, m: usize, with_cursor: bool) -> Vec<UwcElement> {
         use smithay::wayland::shell::wlr_layer::Layer;
+        let scale = self.output_scale_of(m);
+        // A monitor asked to be off draws nothing.
+        if !self.monitors.get(m).is_some_and(|x| x.powered) {
+            return Vec::new();
+        }
+        // A session lock covers everything: only the lock surface and the pointer are drawn.
+        if self.is_locked() {
+            let mut out = if with_cursor && self.mon_at(self.cursor) == m {
+                self.cursor_elements_at(renderer, scale, self.cursor - self.origin_of(m))
+            } else {
+                Vec::new()
+            };
+            out.extend(self.lock_surface_elements(renderer, m, scale));
+            return out;
+        }
         if self.step_animations() {
             self.animating = true;
         }
@@ -76,9 +128,11 @@ impl Uwc {
         let wanted: Vec<String> = self
             .clients
             .iter()
-            .filter(|c| self.visible(c) && !c.fullscreen)
+            .filter(|c| self.visible_on(m, c) && !c.fullscreen)
             .map(|c| self.deco_for(c).border_shader)
-            .chain(self.ghosts.iter().filter(|g| !g.fullscreen).map(|g| g.deco.border_shader.clone()))
+            .chain(
+                self.ghosts.iter().filter(|g| !g.fullscreen && g.visible_on(m)).map(|g| g.deco.border_shader.clone()),
+            )
             .filter(|s| !s.is_empty())
             .collect();
         let mut animated = false;
@@ -95,11 +149,16 @@ impl Uwc {
             self.deco_commit.increment();
             self.animating = true;
         }
-        let mut out = if with_cursor { self.cursor_elements(renderer, scale) } else { Vec::new() };
-        out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay]));
+        // The pointer is drawn by the monitor it is on, in that monitor's coordinates.
+        let mut out = if with_cursor && self.mon_at(self.cursor) == m {
+            self.cursor_elements_at(renderer, scale, self.cursor - self.origin_of(m))
+        } else {
+            Vec::new()
+        };
+        out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
-        let mut fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true);
-        fullscreen.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, true));
+        let mut fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, m, true);
+        fullscreen.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, m, true));
         if !fullscreen.is_empty() {
             out.extend(fullscreen);
             let (w, h) = self.screen_size();
@@ -112,13 +171,13 @@ impl Uwc {
                 Kind::Unspecified,
             )));
         }
-        out.extend(self.layer_elements(renderer, scale, &[Layer::Top]));
-        out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, false));
-        out.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, false));
-        out.extend(self.layer_elements(renderer, scale, &[Layer::Bottom, Layer::Background]));
+        out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Top]));
+        out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, m, false));
+        out.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, m, false));
+        out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Bottom, Layer::Background]));
         if let Some((program, _)) = background {
             let (w, h) = self.screen_size();
-            let vp = self.viewport();
+            let vp = self.viewport_of(m);
             out.push(UwcElement::from(ShaderElement::user_background(
                 &program,
                 &self.background_id,
@@ -129,6 +188,24 @@ impl Uwc {
                 vp.zoom * scale,
             )));
         }
+        // Override-redirect X11 windows (menus, tooltips) sit on top of everything.
+        for w in self.or_windows.iter().rev() {
+            let Some(r) = self.or_geometry(w) else { continue };
+            let at = (r.loc.x - self.origin_of(m).x, r.loc.y - self.origin_of(m).y);
+            out.extend(
+                render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                    renderer,
+                    &w.wl_surface().expect("or window with a surface"),
+                    Point::<f64, Physical>::from((at.0 * scale, at.1 * scale)).to_i32_round(),
+                    Scale::from(scale),
+                    1.0,
+                    Kind::Unspecified,
+                )
+                .into_iter()
+                .map(UwcElement::Layer),
+            );
+        }
+        out.extend(self.ime_popup_elements(renderer, m, scale));
         out
     }
 
@@ -222,29 +299,30 @@ impl Uwc {
         }
     }
 
-    /// The visible windows that are fullscreen (or the ones that are not), with their popups and
-    /// decoration, topmost first.
+    /// The windows visible on monitor `m` that are fullscreen (or the ones that are not), with their
+    /// popups and decoration, topmost first.
     pub fn render_elements(
         &self,
         renderer: &mut GlesRenderer,
         shaders: Option<&Shaders>,
         user: &HashMap<String, GlesPixelProgram>,
         scale: f64,
+        m: usize,
         fullscreen: bool,
     ) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
         let commit = self.deco_commit;
 
-        for c in self.clients.iter().rev().filter(|c| self.visible(c) && c.fullscreen == fullscreen) {
+        for c in self.clients.iter().rev().filter(|c| self.visible_on(m, c) && c.fullscreen == fullscreen) {
             // The options with this window's rules applied.
             let deco = self.deco_for(c);
             let o = &deco;
             let look = self.look(c, o);
-            let pl = self.place(c);
+            let pl = self.place_on(m, c, &c.fx);
             // Window px to physical output px.
             let z = pl.zoom;
             let k = z * scale;
-            let g = c.window.geometry().loc;
+            let g = c.geo_loc();
             let size = c.size();
             // The content box (the window geometry) and the outer (border) box, physical px.
             let content = Rectangle::new(
@@ -268,19 +346,23 @@ impl Uwc {
             let [dim_id, backdrop_id, border_id, shadow_id] = &c.deco_ids;
 
             // Popups sit above their toplevel; `Space` does the same placement.
-            let g = c.window.geometry().loc;
-            for (popup, offset) in smithay::desktop::PopupManager::popups_for_surface(c.surface()) {
-                let rel: Point<i32, smithay::utils::Logical> = g + offset - popup.geometry().loc;
-                let at = origin + rel.to_f64().to_physical(scale).to_i32_round();
-                let els = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
-                    renderer,
-                    popup.wl_surface(),
-                    at,
-                    Scale::from(scale),
-                    look.alpha,
-                    Kind::Unspecified,
-                );
-                out.extend(els.into_iter().map(|e| UwcElement::from(RescaleRenderElement::from_element(e, origin, z))));
+            let g = c.geo_loc();
+            if let Some(surface) = c.surface() {
+                for (popup, offset) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
+                    let rel: Point<i32, smithay::utils::Logical> = g + offset - popup.geometry().loc;
+                    let at = origin + rel.to_f64().to_physical(scale).to_i32_round();
+                    let els = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                        renderer,
+                        popup.wl_surface(),
+                        at,
+                        Scale::from(scale),
+                        look.alpha,
+                        Kind::Unspecified,
+                    );
+                    out.extend(
+                        els.into_iter().map(|e| UwcElement::from(RescaleRenderElement::from_element(e, origin, z))),
+                    );
+                }
             }
 
             if let (Some(s), true) = (shaders, decorated && look.dim > 0.0) {
@@ -295,13 +377,7 @@ impl Uwc {
                 )));
             }
 
-            let els = AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                &c.window,
-                renderer,
-                origin,
-                Scale::from(scale),
-                look.alpha,
-            );
+            let els = c.render_content(renderer, origin, scale, look.alpha);
             for e in els {
                 let e = RescaleRenderElement::from_element(e, origin, z);
                 out.push(RoundedElement::wrap(e, shaders, content, inner_radius, Scale::from(scale)));
@@ -311,7 +387,7 @@ impl Uwc {
                 continue;
             }
             let Some(s) = shaders else {
-                out.extend(self.solid_border(c, o, &look, scale));
+                out.extend(self.solid_border(m, c, o, &look, scale));
                 continue;
             };
             if o.backdrop_color[3] > 0.0 && c.fx.alpha > 0.0 {
@@ -379,13 +455,14 @@ impl Uwc {
         shaders: Option<&Shaders>,
         user: &HashMap<String, GlesPixelProgram>,
         scale: f64,
+        m: usize,
         fullscreen: bool,
     ) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
         let commit = self.deco_commit;
-        let vp = self.viewport();
+        let vp = self.viewport_of(m);
 
-        for g in self.ghosts.iter().filter(|g| g.fullscreen == fullscreen) {
+        for g in self.ghosts.iter().filter(|g| g.fullscreen == fullscreen && g.visible_on(m)) {
             let o = &g.deco;
             let look = self.look_of(g.focused, g.alpha, o);
             let pl = g.place(vp);
@@ -500,12 +577,12 @@ impl Uwc {
     }
 
     /// Square solid borders, for when the shaders are not available.
-    fn solid_border(&self, c: &Client, o: &Deco, look: &Look, scale: f64) -> Vec<UwcElement> {
+    fn solid_border(&self, m: usize, c: &Client, o: &Deco, look: &Look, scale: f64) -> Vec<UwcElement> {
         let bw = o.border_width;
         if bw <= 0 {
             return vec![];
         }
-        let pl = self.place(c);
+        let pl = self.place_on(m, c, &c.fx);
         // Window px (relative to the geometry's top-left) to physical px.
         let phys = |x: f64, y: f64| -> Point<i32, Physical> {
             (((pl.origin.x + x * pl.zoom) * scale).round() as i32, ((pl.origin.y + y * pl.zoom) * scale).round() as i32)

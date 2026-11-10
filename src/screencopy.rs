@@ -23,6 +23,8 @@ use smithay::{
 use crate::{capture, state::Uwc};
 
 pub struct FrameData {
+    /// Which monitor is captured.
+    mon: usize,
     /// The part of the output, physical px.
     region: Rectangle<i32, Physical>,
     cursor: bool,
@@ -32,6 +34,7 @@ pub struct FrameData {
 struct Pending {
     frame: ZwlrScreencopyFrameV1,
     buffer: WlBuffer,
+    mon: usize,
     region: Rectangle<i32, Physical>,
     cursor: bool,
     /// Answered once more frames than this have been drawn.
@@ -51,10 +54,10 @@ impl Screencopy {
 }
 
 impl Uwc {
-    /// The output's size in physical px.
-    fn output_pixels(&self) -> Size<i32, Physical> {
-        let (w, h) = self.screen_size();
-        let s = self.output_scale();
+    /// A monitor's size in physical px.
+    fn output_pixels(&self, m: usize) -> Size<i32, Physical> {
+        let (w, h) = self.monitors.get(m).map(|x| (x.size.w as f64, x.size.h as f64)).unwrap_or((1280.0, 720.0));
+        let s = self.output_scale_of(m);
         ((w * s).round() as i32, (h * s).round() as i32).into()
     }
 
@@ -62,16 +65,17 @@ impl Uwc {
         &mut self,
         frame: &ZwlrScreencopyFrameV1,
         buffer: &WlBuffer,
+        mon: usize,
         region: Rectangle<i32, Physical>,
         cursor: bool,
         damage: bool,
     ) {
-        let size = self.output_pixels();
-        let scale = self.output_scale();
+        let size = self.output_pixels(mon);
+        let scale = self.output_scale_of(mon);
         // The root color is the real output's clear color, not an element: the picture needs it too.
         let clear = self.config.root_color;
         let res = self.with_renderer(|state, r| {
-            let elements = state.scene_elements(r, scale, cursor);
+            let elements = state.scene_elements(r, mon, cursor);
             capture::render_region_to_shm(r, &elements, size, region, scale, clear, buffer)
         });
         match res.unwrap_or_else(|| Err("this backend cannot render (headless)".into())) {
@@ -100,7 +104,7 @@ impl Uwc {
             std::mem::take(&mut self.screencopy.pending).into_iter().partition(|p| drawn > p.after);
         self.screencopy.pending = rest;
         for p in now {
-            self.screencopy_now(&p.frame, &p.buffer, p.region, p.cursor, true);
+            self.screencopy_now(&p.frame, &p.buffer, p.mon, p.region, p.cursor, true);
         }
     }
 }
@@ -128,28 +132,37 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Uwc {
         _: &DisplayHandle,
         init: &mut DataInit<'_, Uwc>,
     ) {
+        use smithay::output::Output as SOutput;
         use zwlr_screencopy_manager_v1::Request as R;
-        let full = Rectangle::from_size(state.output_pixels());
-        let ours = |o: &smithay::reexports::wayland_server::protocol::wl_output::WlOutput| {
-            state.mon.as_ref().is_some_and(|m| m.output.owns(o))
+        // The output the request names; one without one is the pointer's monitor.
+        let named = |o: &smithay::reexports::wayland_server::protocol::wl_output::WlOutput| {
+            SOutput::from_resource(o).and_then(|o| state.mon_by_output(&o))
         };
+        let mon = match &request {
+            R::CaptureOutput { output, .. } | R::CaptureOutputRegion { output, .. } => {
+                named(output).unwrap_or(state.cur)
+            }
+            _ => return,
+        };
+        let full = Rectangle::from_size(state.output_pixels(mon));
         let (frame, cursor, region, valid) = match request {
-            R::CaptureOutput { frame, overlay_cursor, output } => (frame, overlay_cursor != 0, full, ours(&output)),
-            R::CaptureOutputRegion { frame, overlay_cursor, output, x, y, width, height } => {
+            R::CaptureOutput { frame, overlay_cursor, .. } => (frame, overlay_cursor != 0, full, true),
+            R::CaptureOutputRegion { frame, overlay_cursor, x, y, width, height, .. } => {
                 // Logical px of the output, to physical, kept inside it.
-                let s = state.output_scale();
+                let s = state.output_scale_of(mon);
                 let r = Rectangle::<f64, Physical>::new(
                     (x as f64 * s, y as f64 * s).into(),
                     (width as f64 * s, height as f64 * s).into(),
                 )
                 .to_i32_round();
                 let r = r.intersection(full).unwrap_or_default();
-                (frame, overlay_cursor != 0, r, ours(&output) && !r.is_empty())
+                (frame, overlay_cursor != 0, r, !r.is_empty())
             }
             _ => return,
         };
-        let frame = init.init(frame, FrameData { region, cursor, used: Mutex::new(false) });
-        if !valid {
+        let frame = init.init(frame, FrameData { mon, region, cursor, used: Mutex::new(false) });
+        // Nothing on screen can be captured while the session is locked.
+        if state.is_locked() || !valid {
             frame.failed();
             return;
         }
@@ -192,12 +205,13 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Uwc {
             state.screencopy.pending.push(Pending {
                 frame: frame.clone(),
                 buffer,
+                mon: data.mon,
                 region: data.region,
                 cursor: data.cursor,
                 after,
             });
         } else {
-            state.screencopy_now(frame, &buffer, data.region, data.cursor, false);
+            state.screencopy_now(frame, &buffer, data.mon, data.region, data.cursor, false);
         }
     }
 

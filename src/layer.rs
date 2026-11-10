@@ -62,14 +62,28 @@ pub fn layer_name(l: WlrLayer) -> &'static str {
 }
 
 impl Uwc {
+    /// The cursor monitor's output.
     pub fn output(&self) -> Option<Output> {
-        self.mon.as_ref().map(|m| m.output.clone())
+        self.output_of(self.cur)
     }
 
-    /// The screen minus what layer surfaces reserve (logical px).
+    pub fn output_of(&self, m: usize) -> Option<Output> {
+        self.monitors.get(m).map(|x| x.output.clone())
+    }
+
+    /// The monitor an output belongs to.
+    pub fn mon_by_output(&self, o: &Output) -> Option<usize> {
+        self.monitors.iter().position(|m| m.output.name() == o.name())
+    }
+
+    /// The screen minus what layer surfaces reserve (logical px), on the cursor monitor.
     pub fn work_area(&self) -> Area {
-        let (sw, sh) = self.screen_size();
-        let Some(o) = self.output() else { return (0.0, 0.0, sw, sh) };
+        self.work_area_of(self.cur)
+    }
+
+    pub fn work_area_of(&self, m: usize) -> Area {
+        let (sw, sh) = self.monitors.get(m).map(|x| (x.size.w as f64, x.size.h as f64)).unwrap_or((1280.0, 720.0));
+        let Some(o) = self.output_of(m) else { return (0.0, 0.0, sw, sh) };
         let z = layer_map_for_output(&o).non_exclusive_zone();
         if z.size.w <= 0 || z.size.h <= 0 {
             return (0.0, 0.0, sw, sh);
@@ -86,30 +100,52 @@ impl Uwc {
         Some(Under::Layer { root: l.wl_surface().clone(), surface, origin: (geo.loc + loc).to_f64(), interactive })
     }
 
-    /// Topmost thing under screen point `p`, in drawing order: overlay layer, fullscreen windows, top
-    /// layer, windows, bottom and background layers.
+    /// Topmost thing under global point `p` (the monitors side by side), in drawing order: overlay
+    /// layer, fullscreen windows, top layer, windows, bottom and background layers — all on the
+    /// monitor the point is on, in that monitor's coordinates.
     pub fn under(&self, p: Point<f64, Logical>) -> Option<Under> {
-        let o = self.output();
+        let p_global = p;
+        let m = self.mon_at(p);
+        let o = self.output_of(m);
+        let p = p - self.monitors.get(m).map(|x| x.origin).unwrap_or((0.0, 0.0).into());
         let window = |h: crate::state::WindowHit| Under::Window {
             idx: h.idx,
             surface: h.surface,
             origin: h.origin,
             location: h.location,
         };
+        // Override-redirect X11 windows (menus, tooltips) are on top of everything.
+        for w in self.or_windows.iter().rev() {
+            if let Some(r) = self.or_geometry(w) {
+                if r.contains((p_global.x, p_global.y)) {
+                    if let Some(surface) = w.wl_surface() {
+                        return Some(Under::Layer {
+                            root: surface.clone(),
+                            surface,
+                            origin: r.loc,
+                            interactive: false,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(u) = self.ime_popup_under(p_global) {
+            return Some(u);
+        }
         if let Some(u) = o.as_ref().and_then(|o| self.layer_under(o, WlrLayer::Overlay, p)) {
             return Some(u);
         }
-        if let Some(h) = self.window_under(p, true) {
+        if let Some(h) = self.window_under(m, p, true) {
             return Some(window(h));
         }
         // Under a fullscreen window everything is covered by fullscreen-bg: nothing there takes the pointer.
-        if self.clients.iter().any(|c| c.fullscreen && self.visible(c)) {
+        if self.clients.iter().any(|c| c.fullscreen && self.visible_on(m, c)) {
             return None;
         }
         if let Some(u) = o.as_ref().and_then(|o| self.layer_under(o, WlrLayer::Top, p)) {
             return Some(u);
         }
-        if let Some(h) = self.window_under(p, false) {
+        if let Some(h) = self.window_under(m, p, false) {
             return Some(window(h));
         }
         if let Some(o) = &o {
@@ -123,11 +159,15 @@ impl Uwc {
     }
 
     /// Point the keyboard at the focused layer surface if there is one, else at the focused window.
+    /// A session lock takes it over: the lock surface of the pointer's monitor gets every key.
     pub fn update_keyboard_focus(&mut self) {
-        let target = self
-            .layer_focus
-            .clone()
-            .or_else(|| self.focus.and_then(|id| self.client_index(id)).map(|i| self.clients[i].surface().clone()));
+        let target = if self.is_locked() {
+            self.lock_surface_on(self.cur).map(|s| s.wl_surface().clone())
+        } else {
+            self.layer_focus
+                .clone()
+                .or_else(|| self.focus.and_then(|id| self.client_index(id)).and_then(|i| self.clients[i].surface()))
+        };
         let kb = self.keyboard();
         if kb.current_focus() != target {
             kb.set_focus(self, target, SERIAL_COUNTER.next_serial());
@@ -144,8 +184,12 @@ impl Uwc {
 
     /// The focused layer surface wants the keyboard for itself (exclusive, on top or overlay).
     pub fn layer_focus_is_exclusive(&self) -> bool {
-        let (Some(f), Some(o)) = (&self.layer_focus, self.output()) else { return false };
-        let map = layer_map_for_output(&o);
+        let Some(f) = &self.layer_focus else { return false };
+        self.monitors.iter().any(|m| self.layer_exclusive_on(&m.output, f))
+    }
+
+    fn layer_exclusive_on(&self, o: &Output, f: &WlSurface) -> bool {
+        let map = layer_map_for_output(o);
         map.layer_for_surface(f, WindowSurfaceType::TOPLEVEL).is_some_and(|l| {
             l.cached_state().keyboard_interactivity == KeyboardInteractivity::Exclusive
                 && matches!(l.layer(), WlrLayer::Top | WlrLayer::Overlay)
@@ -155,7 +199,14 @@ impl Uwc {
     /// A commit on a layer surface: lay the layers out again, configure, and follow its keyboard wishes.
     /// Returns false if `root` is not a layer surface.
     pub fn layer_commit(&mut self, root: &WlSurface) -> bool {
-        let Some(o) = self.output() else { return false };
+        let Some(o) = self
+            .monitors
+            .iter()
+            .map(|m| m.output.clone())
+            .find(|o| layer_map_for_output(o).layer_for_surface(root, WindowSurfaceType::TOPLEVEL).is_some())
+        else {
+            return false;
+        };
         let mut map = layer_map_for_output(&o);
         let Some(layer) = map.layer_for_surface(root, WindowSurfaceType::TOPLEVEL).cloned() else {
             return false;
@@ -188,8 +239,14 @@ impl Uwc {
     }
 
     /// Layer surfaces of `layers` (in that order, each topmost first) as elements, popups above their parent.
-    pub fn layer_elements(&self, renderer: &mut GlesRenderer, scale: f64, layers: &[WlrLayer]) -> Vec<UwcElement> {
-        let Some(o) = self.output() else { return vec![] };
+    pub fn layer_elements_on(
+        &self,
+        m: usize,
+        renderer: &mut GlesRenderer,
+        scale: f64,
+        layers: &[WlrLayer],
+    ) -> Vec<UwcElement> {
+        let Some(o) = self.output_of(m) else { return vec![] };
         let map = layer_map_for_output(&o);
         let mut out = Vec::new();
         for &which in layers {
@@ -245,14 +302,14 @@ impl Uwc {
         new.arrange();
     }
 
-    /// For IPC: the layer surfaces on the output.
+    /// For IPC: the layer surfaces on every output.
     pub fn layer_info(&self) -> Vec<crate::protocol::Layer> {
-        let Some(o) = self.output() else { return vec![] };
-        let map = layer_map_for_output(&o);
-        map.layers()
-            .filter_map(|l| {
-                let g = map.layer_geometry(l)?;
-                Some(crate::protocol::Layer {
+        let mut out = Vec::new();
+        for m in &self.monitors {
+            let map = layer_map_for_output(&m.output);
+            for l in map.layers() {
+                let Some(g) = map.layer_geometry(l) else { continue };
+                out.push(crate::protocol::Layer {
                     namespace: l.namespace().to_string(),
                     layer: layer_name(l.layer()),
                     rect: crate::protocol::Rect {
@@ -262,9 +319,10 @@ impl Uwc {
                         height: g.size.h as i64,
                     },
                     keyboard: self.layer_focus.as_ref() == Some(l.wl_surface()),
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        out
     }
 }
 
@@ -297,8 +355,8 @@ impl WlrLayerShellHandler for Uwc {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
-        if let Some(o) = self.output() {
-            let mut map = layer_map_for_output(&o);
+        for m in &self.monitors {
+            let mut map = layer_map_for_output(&m.output);
             let found = map.layers().find(|l| l.layer_surface() == &surface).cloned();
             if let Some(l) = found {
                 map.unmap_layer(&l);

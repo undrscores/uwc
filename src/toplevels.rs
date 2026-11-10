@@ -65,7 +65,10 @@ impl Uwc {
         if c.fullscreen {
             states.push(TlState::Fullscreen as u32);
         }
-        let outputs = self.mon.as_ref().map(|m| m.output.client_outputs(client).collect()).unwrap_or_default();
+        let outputs: Vec<_> = (0..self.monitors.len())
+            .filter(|&m| self.visible_on(m, c))
+            .flat_map(|m| self.monitors[m].output.client_outputs(client).collect::<Vec<_>>())
+            .collect();
         Info { title: c.title(), app_id: c.app_id(), states, outputs }
     }
 

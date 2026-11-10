@@ -221,6 +221,9 @@ pub struct Open {
     pub focus: Option<bool>,
     /// The window's own scale on the canvas.
     pub scale: Option<f64>,
+    /// The monitor a pinned spot is on, and the one a fullscreen window covers (session restore).
+    pub pin_mon: usize,
+    pub fs_mon: usize,
 }
 
 impl Open {
@@ -234,6 +237,8 @@ impl Open {
         self.minimized |= o.minimized;
         self.focus = o.focus.or(self.focus);
         self.scale = o.scale.or(self.scale);
+        self.pin_mon = o.pin_mon;
+        self.fs_mon = o.fs_mon;
     }
 
     fn parse(n: &Node) -> Result<Open> {

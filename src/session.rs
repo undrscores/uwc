@@ -39,6 +39,11 @@ pub struct SavedWindow {
     pub scale: f64,
     pub minimized: bool,
     pub fullscreen: bool,
+    /// The monitor a pinned spot is on, and the one a fullscreen window covers.
+    #[serde(default)]
+    pub pin_mon: usize,
+    #[serde(default)]
+    pub fs_mon: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -60,11 +65,24 @@ impl From<SavedView> for Viewport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedMonitor {
+    pub name: String,
+    pub viewports: Vec<SavedView>,
+    pub bookmarks: Vec<Vec<Option<SavedView>>>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
     pub tagset: u32,
+    /// Per-monitor views. Sessions written before it existed have top-level `viewports` and
+    /// `bookmarks` instead, which load onto the first monitor.
+    #[serde(default)]
+    pub monitors: Vec<SavedMonitor>,
+    #[serde(default)]
     pub viewports: Vec<SavedView>,
+    #[serde(default)]
     pub bookmarks: Vec<Vec<Option<SavedView>>>,
     pub windows: Vec<SavedWindow>,
 }
@@ -98,13 +116,14 @@ impl SavedWindow {
         open.scale = Some(self.scale);
         open.minimized = self.minimized;
         open.fullscreen = self.fullscreen;
+        open.pin_mon = self.pin_mon;
+        open.fs_mon = self.fs_mon;
     }
 }
 
 impl Uwc {
     /// The session as it is now: views, and the windows that are open plus the entries no window claimed.
     pub fn session_snapshot(&self) -> Session {
-        let Some(m) = &self.mon else { return Session::default() };
         let mut windows: Vec<SavedWindow> = self
             .clients
             .iter()
@@ -129,6 +148,8 @@ impl Uwc {
                     scale: c.scale,
                     minimized: c.minimized != 0,
                     fullscreen: c.fullscreen,
+                    pin_mon: c.pin_mon,
+                    fs_mon: c.fs_mon,
                 }
             })
             .collect();
@@ -138,9 +159,18 @@ impl Uwc {
         }
         Session {
             version: VERSION,
-            tagset: m.tagset,
-            viewports: (0..m.vp.len()).map(|i| m.view_of(i).into()).collect(),
-            bookmarks: m.bookmarks.iter().map(|b| b.iter().map(|v| v.map(Into::into)).collect()).collect(),
+            tagset: self.tagset,
+            monitors: self
+                .monitors
+                .iter()
+                .map(|m| SavedMonitor {
+                    name: m.output.name().to_string(),
+                    viewports: (0..TAGCOUNT).map(|i| m.view_of(i, self.tagset).into()).collect(),
+                    bookmarks: m.bookmarks.iter().map(|b| b.iter().map(|v| v.map(Into::into)).collect()).collect(),
+                })
+                .collect(),
+            viewports: Vec::new(),
+            bookmarks: Vec::new(),
             windows,
         }
     }
@@ -183,18 +213,26 @@ impl Uwc {
         if s.version != VERSION {
             return;
         }
-        if let Some(m) = self.mon.as_mut() {
-            for (i, v) in s.viewports.iter().take(TAGCOUNT).enumerate() {
+        // Old sessions name no monitors: their views load onto the first one.
+        let saved: Vec<SavedMonitor> = if s.monitors.is_empty() {
+            vec![SavedMonitor { name: String::new(), viewports: s.viewports.clone(), bookmarks: s.bookmarks.clone() }]
+        } else {
+            s.monitors.clone()
+        };
+        for m in &mut self.monitors {
+            let sm = saved.iter().find(|sm| sm.name == m.output.name()).or_else(|| saved.first());
+            let Some(sm) = sm else { continue };
+            for (i, v) in sm.viewports.iter().take(TAGCOUNT).enumerate() {
                 m.vp[i] = (*v).into();
             }
-            for (i, bs) in s.bookmarks.iter().take(TAGCOUNT).enumerate() {
+            for (i, bs) in sm.bookmarks.iter().take(TAGCOUNT).enumerate() {
                 for (n, b) in bs.iter().take(9).enumerate() {
                     m.bookmarks[i][n] = b.map(Into::into);
                 }
             }
-            if s.tagset & crate::canvas::ALLTAGS != 0 {
-                m.tagset = s.tagset & crate::canvas::ALLTAGS;
-            }
+        }
+        if s.tagset & crate::canvas::ALLTAGS != 0 {
+            self.tagset = s.tagset & crate::canvas::ALLTAGS;
         }
         tracing::info!("session: {} remembered windows from {}", s.windows.len(), path.display());
         self.session_pool = s.windows;
@@ -229,6 +267,8 @@ mod tests {
             scale: 1.0,
             minimized: false,
             fullscreen: false,
+            pin_mon: 0,
+            fs_mon: 0,
         }
     }
 
@@ -248,11 +288,24 @@ mod tests {
         let s = Session {
             version: VERSION,
             tagset: 0b101,
-            viewports: vec![SavedView { x: 1.0, y: 2.0, zoom: 0.5 }],
-            bookmarks: vec![vec![None, Some(SavedView { x: 3.0, y: 4.0, zoom: 2.0 })]],
+            monitors: vec![SavedMonitor {
+                name: "DP-1".into(),
+                viewports: vec![SavedView { x: 1.0, y: 2.0, zoom: 0.5 }],
+                bookmarks: vec![vec![None, Some(SavedView { x: 3.0, y: 4.0, zoom: 2.0 })]],
+            }],
+            viewports: Vec::new(),
+            bookmarks: Vec::new(),
             windows: vec![w("foot", "a")],
         };
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_v1_session_loads_onto_the_first_monitor() {
+        let old = "{\"version\":1,\"tagset\":1,\"viewports\":[{\"x\":1.0,\"y\":2.0,\"zoom\":0.5}],\"bookmarks\":[[null]],\"windows\":[]}";
+        let s: Session = serde_json::from_str(old).unwrap();
+        assert!(s.monitors.is_empty());
+        assert_eq!(s.viewports.len(), 1);
     }
 }

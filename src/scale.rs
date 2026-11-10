@@ -41,60 +41,73 @@ fn apply(surface: &WlSurface, scale: f64) {
 
 impl Uwc {
     pub fn output_scale(&self) -> f64 {
-        self.mon.as_ref().map(|m| m.output.current_scale().fractional_scale()).unwrap_or(1.0)
+        self.output_scale_of(self.cur)
     }
 
-    /// The scale a window should render at: output scale x its settled zoom (bounded), in the
-    /// protocol's 1/120 steps.
+    pub fn output_scale_of(&self, m: usize) -> f64 {
+        self.monitors.get(m).map(|x| x.output.current_scale().fractional_scale()).unwrap_or(1.0)
+    }
+
+    /// The scale a window should render at: its monitor's output scale x its settled zoom there
+    /// (bounded), in the protocol's 1/120 steps.
     pub fn render_scale(&self, c: &Client) -> f64 {
         let o = &self.config;
+        let m = self.mon_of(c);
         let zoom = if c.fullscreen {
             1.0
         } else if c.pin.is_some() {
             c.scale
         } else {
-            self.settled_zoom * c.scale
+            self.monitors.get(m).map(|x| x.settled_zoom).unwrap_or(1.0) * c.scale
         };
-        let s = self.output_scale() * zoom.clamp(o.zoom_render_scale_min, o.zoom_render_scale_max);
+        let s = self.output_scale_of(m) * zoom.clamp(o.zoom_render_scale_min, o.zoom_render_scale_max);
         (s * 120.0).round().max(1.0) / 120.0
     }
 
     /// Once per event-loop turn: notice zoom changes (and let them settle), then tell windows whose
     /// render scale changed.
     pub fn sync_scales(&mut self) {
-        let zoom = self.viewport().zoom;
-        if zoom != self.seen_zoom {
-            self.seen_zoom = zoom;
-            self.scale_gen += 1;
-            let generation = self.scale_gen;
-            let wait = Duration::from_millis(self.config.zoom_settle_ms as u64);
-            let _ = self.loop_handle.insert_source(Timer::from_duration(wait), move |_, _, state| {
-                // Only the last change of a burst counts.
-                if state.scale_gen == generation {
-                    state.settled_zoom = state.seen_zoom;
-                }
-                TimeoutAction::Drop
-            });
+        // Each monitor settles its own zoom (only the last change of a burst counts).
+        for m in 0..self.monitors.len() {
+            let zoom = self.viewport_of(m).zoom;
+            if zoom != self.monitors[m].seen_zoom {
+                self.monitors[m].seen_zoom = zoom;
+                self.scale_gen += 1;
+                let generation = self.scale_gen;
+                let wait = Duration::from_millis(self.config.zoom_settle_ms as u64);
+                let _ = self.loop_handle.insert_source(Timer::from_duration(wait), move |_, _, state| {
+                    if state.scale_gen == generation {
+                        if let Some(mon) = state.monitors.get_mut(m) {
+                            mon.settled_zoom = mon.seen_zoom;
+                        }
+                    }
+                    TimeoutAction::Drop
+                });
+            }
         }
         for i in 0..self.clients.len() {
             if !self.clients[i].mapped && self.clients[i].sent_scale.is_none() {
                 // Before the first commit the output scale is right; set it once so the first
                 // buffer already has it.
-                let s = self.output_scale();
-                apply(self.clients[i].surface(), s);
+                let s = self.output_scale_of(self.mon_of(&self.clients[i]));
+                if let Some(surface) = self.clients[i].surface() {
+                    apply(&surface, s);
+                }
                 self.clients[i].sent_scale = Some(s);
                 continue;
             }
             let s = self.render_scale(&self.clients[i]);
             if self.clients[i].sent_scale != Some(s) {
-                apply(self.clients[i].surface(), s);
+                if let Some(surface) = self.clients[i].surface() {
+                    apply(&surface, s);
+                }
                 self.clients[i].sent_scale = Some(s);
             }
         }
-        // Layer surfaces are never zoomed: the output scale.
-        if let Some(o) = self.output() {
-            let s = self.output_scale();
-            for l in smithay::desktop::layer_map_for_output(&o).layers() {
+        // Layer surfaces are never zoomed: their output's scale.
+        for m in &self.monitors {
+            let s = self.output_scale_of(self.mon_by_output(&m.output).unwrap_or(0));
+            for l in smithay::desktop::layer_map_for_output(&m.output).layers() {
                 apply(l.wl_surface(), s);
             }
         }

@@ -25,9 +25,17 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
 | xdg-shell toplevels and popups (with grabs: a click outside a menu closes it, and is not also a focus change or a drag), xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
 | xdg-activation (apps ask for focus: a fresh token focuses the window and reveals it, an unseen one goes `urgent`, answered by focusing), ext-idle-notify + zwp-idle-inhibit (idle daemons; video players keep the screen on; real input resets the timers) | done |
+| ext-session-lock-v1 (swaylock, waylock, Quickshell's lock screen): the lock surface covers every output and takes all input; nothing else is drawn, key bindings do not run, screencopy and window previews fail while locked; a lock client that dies without unlocking leaves the screen blank (locked) | done |
+| zwp-pointer-constraints-v1 + zwp-relative-pointer-manager-v1 (games, 3D apps): a confined pointer is kept inside the window (or the region it names), a locked one holds the cursor still (uwc's cursor is not drawn) and hands the motion to the client as relative deltas; constraints activate when the pointer is on the surface and deactivate when it leaves | done |
+| Xwayland (`xwayland true`, needs the Xwayland binary; real sessions only): X11 windows become clients like any other -- pinned to the monitor they asked for, with uwc's decoration, focus, move / resize / fullscreen and the IPC; override-redirect windows (X menus, tooltips) are drawn on top and take the pointer by their own geometry; the clipboard and primary selection are bridged both ways (an X selection is re-published to wayland clients, a wayland one is offered to X clients) | done |
+| IME: zwp-text-input-v3 (clients) + zwp-input-method-v2 (fcitx5 and friends): text input enters and leaves with the keyboard focus; while an input method holds the keyboard grab every key goes to it first and it answers through text input (uwc's own key bindings do not fire then); its popups (candidate lists) are drawn on top, under the focused window's corner, and take the pointer | done |
+| Gestures: a three-finger touchpad swipe pans the view and a three-finger pinch zooms it; gestures with fewer fingers (a browser's two-finger pinch) are forwarded to the client under the pointer (zwp-pointer-gestures-v1) | done |
+| Multiple monitors: all outputs tiled left to right, one shared canvas and tagset, a viewport and bookmarks per monitor per tag; the pointer's monitor is where view actions, new windows and pins land; a window is drawn on every monitor whose view shows it, fullscreen covers the monitor it is on | done |
+| zwlr-output-management-v1 (wdisplays, wlr-randr, Quickshell's OutputManager): heads with modes, enabled, transform, scale; an apply reconfigures the outputs (positions are accepted but ignored -- uwc tiles) and rescans the connectors; a headless or winit session can only change scale and transform | done |
+| zwlr-output-power-management-v1 (swayidle's DPMS): `on`/`off` per output; an output that is off draws nothing (blank), so idle blanking costs no redraws | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
 | Mouse: Mod+drag move / resize / pan, empty-canvas drag pans, Mod+scroll zooms | done |
-| Pointer drawn by uwc: xcursor theme (`cursor-theme`, `cursor-size`), client cursor surfaces, built-in fallback arrow | done |
+| Pointer drawn by uwc: xcursor theme (`cursor-theme`, `cursor-size`), client cursor surfaces, built-in fallback arrow; animated cursors cycle their frames (redraws keep coming while one is shown) | done |
 | Config: KDL (uwm's parser, ported), `include`, `vars`, validation as a whole, live reload | done |
 | `input { keyboard / touchpad / mouse }` (XKB layout, repeat, libinput settings), `monitor "NAME" { mode scale transform off }` | done |
 | IPC: `state` (also `work_area`, `layers`, `keyboard_focus`, `backend`), `subscribe`, `get`, `set` (any option but `mod-key`, live until the next reload), `pan`, `panto`, `zoom`, `view`, `toggleview`, `focus`, `close`, `move`, `resize`, `overview`, `home`, `reload`, `quit` | done |
@@ -49,20 +57,19 @@ types and was reviewed against smithay's source, but the machine it was written 
 run on a real TTY to turn up something. What it does: libseat session (VT switching with Ctrl+Alt+F1..F12, pause and
 resume), the primary GPU via udev, KMS through smithay's `DrmOutputManager` (hardware cursor plane when available),
 connector hotplug, libinput with the config's touchpad/mouse settings, linux-dmabuf with feedback for GL clients.
-Limits: one GPU, and one output at a time (the first connected one not marked `off`) until multi-monitor.
+Limits: one GPU. Multiple outputs are scanned out per connector (each gets its own view of the shared
+canvas), but the machine this was written on has no GPU or seat, so the udev path is untested on hardware.
 
 Not yet (roughly in the order to do them):
 
-1. Multiple monitors (the state has one `Monitor`; on hold).
-2. Gestures (`swipe`, `pinch`, touchpad pan/zoom); `theme` and `palette` come with the ricing below.
-3. The rest of the animations (momentum; open, move, tag fade, the close fade and eased pan and zoom are done), driven
+1. The rest of the animations (momentum; open, move, tag fade, the close fade and eased pan and zoom are done), driven
    from the frame callback, never timers.
-4. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
+2. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.
-5. Session-lock, pointer constraints, Xwayland, input-method/text-input, output-management (popup grabs,
-   xdg-activation and idle-inhibit/idle-notify are done).
-6. Multi-GPU, animated cursors, DPMS.
+3. Multi-GPU (output-management, clipboard bridging for Xwayland, animated cursors, DPMS/output
+   power, popup grabs, xdg-activation, idle-inhibit/idle-notify, session-lock, pointer constraints,
+   Xwayland and IME are done).
 
 ## Build and run
 
@@ -143,7 +150,10 @@ src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
 src/scale.rs       sharp zoom: preferred render scale per window (fractional scale)
 src/session.rs     session restore (serde, JSON in XDG_STATE_HOME)
 src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
-src/cursor.rs      the pointer image (xcursor theme, client surfaces, fallback arrow)
+src/cursor.rs      the pointer image (xcursor theme, animated cursors, client surfaces, fallback arrow)
+src/output_management.rs  zwlr-output-management-v1: heads and apply
+src/output_power.rs       zwlr-output-power-management-v1: DPMS blanking
+src/xwayland.rs    Xwayland: X11 windows as clients, clipboard/primary bridging
 src/backend/       udev (real session), winit (nested), headless (tests)
 tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland clients, drive over IPC
 ```

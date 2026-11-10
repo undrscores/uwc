@@ -16,7 +16,7 @@ use smithay::{
         },
     },
     input::pointer::{CursorImageStatus, CursorImageSurfaceData},
-    utils::{IsAlive, Physical, Point, Scale, Transform},
+    utils::{IsAlive, Logical, Physical, Point, Scale, Transform},
     wayland::compositor::with_states,
 };
 
@@ -28,12 +28,41 @@ pub struct CursorImage {
     pub hotspot: (i32, i32),
 }
 
+/// An icon's frames: one for a plain cursor, several (with their delays) for an animated one.
+pub struct CursorFrames {
+    frames: Vec<CursorImage>,
+    /// How long each frame shows, ms.
+    delays: Vec<u32>,
+    total: u32,
+}
+
+impl CursorFrames {
+    /// The frame to show `ms` into the animation (looping).
+    fn at(&self, ms: u64) -> &CursorImage {
+        if self.frames.len() == 1 {
+            return &self.frames[0];
+        }
+        let mut left = (ms % self.total.max(1) as u64) as u32;
+        for (i, d) in self.delays.iter().enumerate() {
+            if left < *d {
+                return &self.frames[i];
+            }
+            left -= *d;
+        }
+        &self.frames[0]
+    }
+
+    fn animated(&self) -> bool {
+        self.frames.len() > 1
+    }
+}
+
 pub struct CursorTheme {
     name: String,
     size: u32,
     theme: xcursor::CursorTheme,
-    /// (icon name, pixel size) -> image; `None` means the theme has no such icon.
-    cache: HashMap<(String, u32), Option<CursorImage>>,
+    /// (icon name, pixel size) -> frames; `None` means the theme has no such icon.
+    cache: HashMap<(String, u32), Option<CursorFrames>>,
     fallback: HashMap<u32, CursorImage>,
 }
 
@@ -56,20 +85,26 @@ impl CursorTheme {
         }
     }
 
-    /// The image for `icon` at `scale`, falling back to the theme's default, then to a built-in arrow.
-    pub fn image(&mut self, icon: &str, scale: f64) -> &CursorImage {
+    /// The image for `icon` at `scale` (falling back to the theme's default, then to a built-in
+    /// arrow), `ms` into the animation for an animated cursor.
+    pub fn image(&mut self, icon: &str, scale: f64, ms: u64) -> (&CursorImage, bool) {
         let px = ((self.size as f64) * scale).round().max(1.0) as u32;
+        // Load first, so the lookups below borrow the cache only immutably.
         for name in [icon, "default", "left_ptr"] {
             let key = (name.to_string(), px);
             if !self.cache.contains_key(&key) {
                 let img = load(&self.theme, name, px);
-                self.cache.insert(key.clone(), img);
-            }
-            if self.cache[&key].is_some() {
-                return self.cache[&key].as_ref().unwrap();
+                self.cache.insert(key, img);
             }
         }
-        self.fallback.entry(px).or_insert_with(|| arrow(px))
+        for name in [icon, "default", "left_ptr"] {
+            let key = &(name.to_string(), px);
+            if let Some(f) = self.cache[key].as_ref() {
+                return (f.at(ms), f.animated());
+            }
+        }
+        self.fallback.entry(px).or_insert_with(|| arrow(px));
+        (&self.fallback[&px], false)
     }
 }
 
@@ -80,22 +115,30 @@ fn theme_name(name: &str) -> String {
     std::env::var("XCURSOR_THEME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "default".into())
 }
 
-fn load(theme: &xcursor::CursorTheme, name: &str, px: u32) -> Option<CursorImage> {
+fn load(theme: &xcursor::CursorTheme, name: &str, px: u32) -> Option<CursorFrames> {
     let path = theme.load_icon(name)?;
     let data = std::fs::read(path).ok()?;
     let images = xcursor::parser::parse_xcursor(&data)?;
-    // The nominal size nearest to what we want; the first frame of an animated cursor.
+    // The nominal size nearest to what we want; every image of that size is a frame of the
+    // animation (one for a plain cursor).
     let best = images.iter().min_by_key(|i| (i.size as i64 - px as i64).abs())?;
-    let img = images.iter().find(|i| i.size == best.size)?;
-    let buffer = MemoryRenderBuffer::from_slice(
-        &img.pixels_rgba,
-        Fourcc::Abgr8888,
-        (img.width as i32, img.height as i32),
-        1,
-        Transform::Normal,
-        None,
-    );
-    Some(CursorImage { buffer, hotspot: (img.xhot as i32, img.yhot as i32) })
+    let frames: Vec<&xcursor::parser::Image> = images.iter().filter(|i| i.size == best.size).collect();
+    let mut out = Vec::new();
+    let mut delays = Vec::new();
+    for img in frames {
+        let buffer = MemoryRenderBuffer::from_slice(
+            &img.pixels_rgba,
+            Fourcc::Abgr8888,
+            (img.width as i32, img.height as i32),
+            1,
+            Transform::Normal,
+            None,
+        );
+        out.push(CursorImage { buffer, hotspot: (img.xhot as i32, img.yhot as i32) });
+        delays.push(img.delay.max(1));
+    }
+    let total = delays.iter().sum::<u32>().max(1);
+    Some(CursorFrames { frames: out, delays, total })
 }
 
 /// A plain arrow (white with a black outline) for systems without a cursor theme.
@@ -126,9 +169,18 @@ fn arrow(px: u32) -> CursorImage {
 }
 
 impl Uwc {
-    /// The pointer as render elements at output scale `scale` (empty when hidden).
-    pub fn cursor_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
-        let pos: Point<f64, Physical> = (self.cursor.x * scale, self.cursor.y * scale).into();
+    /// The pointer as render elements at output scale `scale` (empty when hidden, and while
+    /// a locked pointer holds it still).
+    pub fn cursor_elements_at(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        scale: f64,
+        pos: Point<f64, Logical>,
+    ) -> Vec<UwcElement> {
+        if self.pointer_locked() {
+            return vec![];
+        }
+        let pos: Point<f64, Physical> = (pos.x * scale, pos.y * scale).into();
         match &self.cursor_status {
             CursorImageStatus::Hidden => vec![],
             CursorImageStatus::Surface(surface) if surface.alive() => {
@@ -154,7 +206,12 @@ impl Uwc {
                     CursorImageStatus::Named(icon) => icon.name(),
                     _ => "default",
                 };
-                let img = self.cursor_theme.image(icon, scale);
+                let ms = self.start_time.elapsed().as_millis() as u64;
+                let (img, animated) = self.cursor_theme.image(icon, scale, ms);
+                if animated {
+                    // Keep drawing frames while an animated cursor is showing.
+                    self.animating = true;
+                }
                 let at = pos - Point::<f64, Physical>::from((img.hotspot.0 as f64, img.hotspot.1 as f64));
                 match MemoryRenderBufferRenderElement::from_buffer(
                     renderer,

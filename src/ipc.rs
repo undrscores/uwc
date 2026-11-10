@@ -159,8 +159,6 @@ impl Uwc {
 
     fn snapshot(&self) -> P::Event {
         let view = |v: &Viewport| P::View { x: v.x.round() as i64, y: v.y.round() as i64, zoom: v.zoom };
-        let (sw, sh) = self.screen_size();
-        let wa = self.work_area();
         let ts = self.tagset();
         let (mut occ, mut urg) = (0u32, 0u32);
         for c in &self.clients {
@@ -170,36 +168,44 @@ impl Uwc {
             }
         }
         let monitors = self
-            .mon
+            .monitors
             .iter()
-            .map(|m| P::Monitor {
-                name: m.output.name(),
-                focused: true,
-                layout: "><>",
-                rect: P::Rect { x: 0, y: 0, width: sw as i64, height: sh as i64 },
-                scale: m.output.current_scale().fractional_scale(),
-                viewport: view(&m.target_viewport()),
-                view_moving: m.target.is_some(),
-                animating: self.anim_running(),
-                work_area: P::Rect { x: wa.0 as i64, y: wa.1 as i64, width: wa.2 as i64, height: wa.3 as i64 },
-                layers: self.layer_info(),
-                tags: (0..TAGCOUNT)
-                    .map(|i| P::Tag {
-                        n: i + 1,
-                        active: ts & (1 << i) != 0,
-                        occupied: occ & (1 << i) != 0,
-                        urgent: urg & (1 << i) != 0,
-                        viewport: view(&m.view_of(i)),
-                        bookmarks: m.bookmarks[i]
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(n, b)| b.as_ref().map(|v| P::Bookmark { n: n + 1, view: view(v) }))
-                            .collect(),
-                    })
-                    .collect(),
+            .enumerate()
+            .map(|(mi, m)| {
+                let wa = self.work_area_of(mi);
+                P::Monitor {
+                    name: m.output.name(),
+                    focused: mi == self.cur,
+                    layout: "><>",
+                    rect: P::Rect {
+                        x: m.origin.x as i64,
+                        y: m.origin.y as i64,
+                        width: m.size.w as i64,
+                        height: m.size.h as i64,
+                    },
+                    scale: m.output.current_scale().fractional_scale(),
+                    viewport: view(&m.target_viewport(ts)),
+                    view_moving: m.target.is_some(),
+                    animating: self.anim_running(),
+                    work_area: P::Rect { x: wa.0 as i64, y: wa.1 as i64, width: wa.2 as i64, height: wa.3 as i64 },
+                    layers: self.layer_info(),
+                    tags: (0..TAGCOUNT)
+                        .map(|i| P::Tag {
+                            n: i + 1,
+                            active: ts & (1 << i) != 0,
+                            occupied: occ & (1 << i) != 0,
+                            urgent: urg & (1 << i) != 0,
+                            viewport: view(&m.view_of(i, ts)),
+                            bookmarks: m.bookmarks[i]
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(n, b)| b.as_ref().map(|v| P::Bookmark { n: n + 1, view: view(v) }))
+                                .collect(),
+                        })
+                        .collect(),
+                }
             })
             .collect();
-        let name = self.mon.as_ref().map(|m| m.output.name()).unwrap_or_default();
         let windows = self
             .clients
             .iter()
@@ -208,8 +214,9 @@ impl Uwc {
                 let mut r = c.rect();
                 // A pinned window's canvas position is wherever its screen spot is over the canvas now.
                 if let Some(p) = c.pin {
-                    r.loc = self.target_viewport().screen_to_canvas((p.x, p.y)).into();
+                    r.loc = self.target_viewport_of(c.pin_mon).screen_to_canvas((p.x, p.y)).into();
                 }
+                let name = self.monitors.get(self.mon_of(c)).map(|m| m.output.name()).unwrap_or_default();
                 P::Window {
                     id: c.id,
                     title: c.title(),
@@ -233,8 +240,10 @@ impl Uwc {
                 }
             })
             .collect();
+        // The monitor the pointer is on, the way bars pick theirs.
+        let selmon = self.monitors.get(self.cur).map(|m| m.output.name()).unwrap_or_default();
         P::Event::State {
-            selmon: name,
+            selmon,
             config_error: self.config_error.clone(),
             config_rev: self.config_rev,
             shader_errors: self.shader_errors.clone(),

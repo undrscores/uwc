@@ -17,6 +17,7 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::ext::idle_notify::v1::client::{ext_idle_notification_v1, ext_idle_notifier_v1};
+use wayland_protocols::ext::session_lock::v1::client::{ext_session_lock_surface_v1, ext_session_lock_v1};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1 as ws_group, ext_workspace_handle_v1 as ws_handle,
     ext_workspace_manager_v1 as ws_manager,
@@ -24,6 +25,8 @@ use wayland_protocols::ext::workspace::v1::client::{
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
+    pointer_constraints::zv1::client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
+    text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::{
@@ -56,11 +59,21 @@ impl Uwc {
 
     /// With the session file under `state` (it outlives this compositor).
     fn start_with_state(name: &str, config: Option<&str>, state: &std::path::Path) -> Uwc {
+        Uwc::start_full(name, config, state, "1000x600")
+    }
+
+    /// Several virtual outputs: `screens` is a `--headless` size list.
+    fn start_screens(name: &str, screens: &str) -> Uwc {
+        let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
+        Uwc::start_full(name, None, &dir.join("state"), screens)
+    }
+
+    fn start_full(name: &str, config: Option<&str>, state: &std::path::Path, screens: &str) -> Uwc {
         let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uwc"));
         cmd.arg("--headless")
-            .arg("1000x600")
+            .arg(screens)
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
             .stdout(Stdio::null())
@@ -212,6 +225,16 @@ struct App {
     idle_resumed: Vec<u32>,
     /// popup_done arrived for the grabbed popup.
     popup_done: bool,
+    /// ext-session-lock: the events so far ("locked", "finished", "configure WxH"), and the
+    /// serial to ack.
+    lock_events: Vec<String>,
+    lock_serial: Option<u32>,
+    /// zwp-pointer-constraints: the events so far ("confined", "locked", "unconfined",
+    /// "unlocked").
+    constraint_events: Vec<String>,
+    /// zwp-text-input-v3: enter / leave.
+    ti_enter: bool,
+    ti_leave: bool,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -283,6 +306,11 @@ impl Client {
             idle_fired: vec![],
             idle_resumed: vec![],
             popup_done: false,
+            lock_events: vec![],
+            lock_serial: None,
+            constraint_events: vec![],
+            ti_enter: false,
+            ti_leave: false,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -426,6 +454,74 @@ impl Client {
         let m = self.globals.bind(&qh, 1..=1, ()).expect("zwp_idle_inhibit_manager_v1");
         self.sync();
         m
+    }
+
+    /// Lock the session over `output` (a lock screen client): returns the lock, the surface
+    /// covering the output and its buffer.
+    fn lock(&mut self, output: &wl_output::WlOutput) -> ext_session_lock_v1::ExtSessionLockV1 {
+        let qh = self.queue.handle();
+        let manager = self
+            .globals
+            .bind::<wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1, _, _>(&qh, 1..=1, ())
+            .expect("ext_session_lock_manager_v1");
+        let lock = manager.lock(&qh, ());
+        let surface = self.app.compositor.create_surface(&qh, ());
+        let _ls = lock.get_lock_surface(&surface, output, &qh, ());
+        self.sync();
+        // The configure told the output's size; draw a frame over it.
+        let (w, h) = self
+            .app
+            .lock_events
+            .iter()
+            .find_map(|e| {
+                e.strip_prefix("configure ")
+                    .and_then(|s| s.split_once('x'))
+                    .map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap()))
+            })
+            .expect("lock surface configure");
+        let buf = self.buffer("lock", w, h);
+        surface.attach(Some(&buf), 0, 0);
+        surface.commit();
+        self.sync();
+        lock
+    }
+
+    /// Roundtrips until the text input got a leave event.
+    fn wait_ti_leave(&mut self) {
+        let start = Instant::now();
+        while !self.app.ti_leave {
+            self.sync();
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for text input leave");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Roundtrips until a pointer-constraint event named `what` arrives.
+    fn wait_constraint(&mut self, what: &str) {
+        let start = Instant::now();
+        while !self.app.constraint_events.iter().any(|e| e == what) {
+            self.sync();
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timed out waiting for {what}: {:?}",
+                self.app.constraint_events
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Roundtrips until a lock event named `what` arrives.
+    fn wait_lock(&mut self, what: &str) {
+        let start = Instant::now();
+        while !self.app.lock_events.iter().any(|e| e == what) {
+            self.sync();
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timed out waiting for {what}: {:?}",
+                self.app.lock_events
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A grabbed popup (a menu opened by a click): created, grabbed and committed.
@@ -587,6 +683,84 @@ impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, u32> for App {
         }
     }
 }
+impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_session_lock_v1::ExtSessionLockV1,
+        e: ext_session_lock_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ext_session_lock_v1::Event::Locked => app.lock_events.push("locked".into()),
+            ext_session_lock_v1::Event::Finished => app.lock_events.push("finished".into()),
+            _ => {}
+        }
+    }
+}
+impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        s: &ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+        e: ext_session_lock_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_session_lock_surface_v1::Event::Configure { serial, width, height } = e {
+            s.ack_configure(serial);
+            app.lock_events.push(format!("configure {width}x{height}"));
+            app.lock_serial = Some(serial);
+        }
+    }
+}
+impl Dispatch<zwp_confined_pointer_v1::ZwpConfinedPointerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        e: zwp_confined_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_confined_pointer_v1::Event::Confined = e {
+            app.constraint_events.push("confined".into());
+        }
+    }
+}
+impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        e: zwp_locked_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            zwp_locked_pointer_v1::Event::Locked => app.constraint_events.push("locked".into()),
+            zwp_locked_pointer_v1::Event::Unlocked => app.constraint_events.push("unlocked".into()),
+            _ => {}
+        }
+    }
+}
+impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &zwp_text_input_v3::ZwpTextInputV3,
+        e: zwp_text_input_v3::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            zwp_text_input_v3::Event::Enter { .. } => app.ti_enter = true,
+            zwp_text_input_v3::Event::Leave { .. } => app.ti_leave = true,
+            _ => {}
+        }
+    }
+}
 impl Dispatch<xdg_popup::XdgPopup, ()> for App {
     fn event(
         app: &mut Self,
@@ -604,11 +778,18 @@ impl Dispatch<xdg_popup::XdgPopup, ()> for App {
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
+noop!(wayland_client::protocol::wl_pointer::WlPointer);
 noop!(export_manager::HyprlandToplevelExportManagerV1);
 noop!(sc_manager::ZwlrScreencopyManagerV1);
 noop!(xdg_activation_v1::XdgActivationV1);
 noop!(ext_idle_notifier_v1::ExtIdleNotifierV1);
+noop!(wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1);
+noop!(wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1);
+noop!(
+    wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+);
 noop!(zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1);
+noop!(zwp_text_input_manager_v3::ZwpTextInputManagerV3);
 noop!(zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
 noop!(xdg_positioner::XdgPositioner);
 
@@ -1917,4 +2098,101 @@ fn popup_grabs_are_taken_and_end_cleanly() {
     c.sync();
     let s = uwc.wait("the window gone", |s| s["windows"].as_array().unwrap().is_empty());
     assert_eq!(s["monitors"][0]["animating"], false);
+}
+
+#[test]
+fn multiple_monitors_share_the_canvas() {
+    let mut uwc = Uwc::start_screens("multi", "1000x600,1000x600");
+    let mut c = uwc.connect();
+    let _a = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+
+    // Two outputs tiled left to right; the pointer's monitor is the focused one.
+    let ms = s["monitors"].as_array().unwrap();
+    assert_eq!(ms.len(), 2);
+    assert_eq!((num(&ms[0]["width"]), num(&ms[1]["x"])), (1000.0, 1000.0));
+    assert_eq!(ms[0]["focused"], true);
+    assert_eq!(ms[1]["focused"], false);
+
+    // A pan moves only the pointer's monitor's view; the window follows the monitor that
+    // shows it.
+    uwc.ok("pan 700 0");
+    let s = uwc.wait("monitor 1 panned", |s| s["monitors"][0]["viewport"]["x"] == 700.0);
+    assert_eq!(s["monitors"][1]["viewport"]["x"], 0.0, "the other monitor keeps its view");
+    uwc.wait("the pan to settle", |s| s["monitors"][0]["view_moving"] == false);
+    assert_eq!(win(&uwc.state(), "A")["monitor"], "HEADLESS-2");
+}
+
+#[test]
+fn a_session_lock_covers_the_screen_and_unlocks() {
+    let mut uwc = Uwc::start("lock", None);
+    let mut c = uwc.connect();
+    let _w = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let id = win(&s, "A")["id"].clone();
+
+    // A lock screen client: the lock is confirmed once it covers the output, and it takes
+    // the keyboard (no window has focus while the session is locked).
+    let output = c.bind_output();
+    let lock = c.lock(&output);
+    c.wait_lock("locked");
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], serde_json::Value::Null);
+
+    // Unlocking ends the lock: the window has the keyboard again.
+    lock.unlock_and_destroy();
+    c.sync();
+    let s = uwc.wait("unlocked", |s| s["keyboard_focus"]["window"] == id);
+    assert_eq!(s["keyboard_focus"]["window"], id);
+}
+
+#[test]
+fn pointer_constraints_activate_over_the_window() {
+    let mut uwc = Uwc::start("constraints", None);
+    let mut c = uwc.connect();
+    let w = c.window("A", 300, 200);
+    uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let seat = c.bind_seat();
+    let qh = c.queue.handle();
+    let manager = c
+        .globals
+        .bind::<wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1, _, _>(&qh, 1..=1, ())
+        .expect("zwp_pointer_constraints_v1");
+
+    let pointer = seat.get_pointer(&qh, ());
+    use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::Lifetime;
+
+    // The pointer sits over the window, so a confinement activates right away.
+    let confined = manager.confine_pointer(&w.surface, &pointer, None, Lifetime::Oneshot, &qh, ());
+    c.wait_constraint("confined");
+    confined.destroy();
+    c.sync();
+
+    // A lock takes over: the cursor is held still and the client reads the deltas.
+    let _locked = manager.lock_pointer(&w.surface, &pointer, None, Lifetime::Oneshot, &qh, ());
+    c.wait_constraint("locked");
+}
+
+#[test]
+fn text_input_follows_the_keyboard_focus() {
+    let mut uwc = Uwc::start("textinput", None);
+    let mut c = uwc.connect();
+    let seat = c.bind_seat();
+    let qh = c.queue.handle();
+    let manager = c
+        .globals
+        .bind::<zwp_text_input_manager_v3::ZwpTextInputManagerV3, _, _>(&qh, 1..=1, ())
+        .expect("zwp_text_input_manager_v3");
+
+    // Like a toolkit: the text input exists before the window takes the keyboard, and the
+    // compositor enters it when the focus arrives.
+    let _ti = manager.get_text_input(&seat, &qh, ());
+    let _w = c.window("A", 300, 200);
+    uwc.wait("ti enter", |s| !s["windows"].as_array().unwrap().is_empty());
+    c.sync();
+    assert!(c.app.ti_enter, "text input entered the focused window");
+
+    // Closing the window takes the keyboard, and the text input leaves with it.
+    uwc.ok("close 1");
+    c.wait_ti_leave();
+    assert!(c.app.ti_leave, "text input left with the focus");
 }

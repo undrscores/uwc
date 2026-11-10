@@ -1,10 +1,15 @@
 //! Wayland protocol handlers: wl_compositor, xdg-shell (+ decoration), shm, seat, data device, output.
 
+use std::os::unix::io::OwnedFd;
+
 use smithay::{
     backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
-    delegate_output, delegate_seat, delegate_shm, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_input_method_manager, delegate_output, delegate_pointer_constraints, delegate_pointer_gestures,
+    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_session_lock, delegate_shm,
+    delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_xwayland_shell,
     desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
     input::{
         pointer::{CursorImageStatus, Focus},
@@ -32,19 +37,21 @@ use smithay::{
             data_device::{
                 set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             },
-            SelectionHandler,
+            primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+            SelectionHandler, SelectionSource, SelectionTarget,
         },
         shell::xdg::{
             decoration::XdgDecorationHandler, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
             XdgShellState, XdgToplevelSurfaceData,
         },
         shm::{ShmHandler, ShmState},
+        text_input::TextInputSeat,
     },
 };
 
 use crate::{
     canvas::ALLTAGS,
-    state::{Client as UClient, ClientState, Uwc},
+    state::{Client as UClient, ClientState, Shell, Uwc},
 };
 
 impl CompositorHandler for Uwc {
@@ -53,7 +60,11 @@ impl CompositorHandler for Uwc {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(d) = client.get_data::<ClientState>() {
+            return &d.compositor_state;
+        }
+        // The Xwayland server's client carries its own.
+        &client.get_data::<smithay::xwayland::XWaylandClientData>().unwrap().compositor_state
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
@@ -78,24 +89,30 @@ impl CompositorHandler for Uwc {
         }
 
         if let Some(i) = self.client_by_surface(&root) {
-            self.clients[i].window.on_commit();
             self.clients[i].commits += 1;
-            let toplevel = self.clients[i].window.toplevel().unwrap().clone();
-            let sent = with_states(&root, |s| {
-                s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap().initial_configure_sent
-            });
-            if !sent {
-                self.open_rules(i);
-                toplevel.send_configure();
-            }
-            if root == *surface {
-                if !self.clients[i].mapped {
-                    if attached && self.clients[i].window.geometry().size.w > 0 {
-                        self.map_client(i);
+            match self.clients[i].shell.clone() {
+                Shell::Wayland(w) => {
+                    w.on_commit();
+                    let toplevel = w.toplevel().unwrap().clone();
+                    let sent = with_states(&root, |s| {
+                        s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap().initial_configure_sent
+                    });
+                    if !sent {
+                        self.open_rules(i);
+                        toplevel.send_configure();
                     }
-                } else if removed {
-                    self.unmap_client(i);
+                    if root == *surface {
+                        if !self.clients[i].mapped {
+                            if attached && w.geometry().size.w > 0 {
+                                self.map_client(i);
+                            }
+                        } else if removed {
+                            self.unmap_client(i);
+                        }
+                    }
                 }
+                // An X11 window maps when the X server asks for it, not on a commit.
+                Shell::X11(_) => {}
             }
             self.ipc.dirty = true;
             let id = self.clients[i].id;
@@ -132,21 +149,24 @@ impl Uwc {
                 saved.apply(&mut open);
             }
         }
-        let screen = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
+        let screen = self.monitors.get(self.cur).map(|m| m.size).unwrap_or((1280, 720).into());
         let c = &mut self.clients[i];
-        if let Some(t) = c.window.toplevel() {
-            t.with_pending_state(|s| {
-                if let Some((w, h)) = open.size {
-                    s.size = Some((w, h).into());
-                }
-                if open.fullscreen {
-                    s.states.set(State::Fullscreen);
-                    s.size = Some(screen);
-                }
-            });
+        if let Shell::Wayland(w) = &c.shell {
+            if let Some(t) = w.toplevel() {
+                t.with_pending_state(|s| {
+                    if let Some((w, h)) = open.size {
+                        s.size = Some((w, h).into());
+                    }
+                    if open.fullscreen {
+                        s.states.set(State::Fullscreen);
+                        s.size = Some(screen);
+                    }
+                });
+            }
         }
         if open.fullscreen {
             c.fullscreen = true;
+            c.fs_mon = open.fs_mon.min(self.monitors.len().saturating_sub(1));
             c.prev_size = open.size.map(Into::into);
         }
         c.open = open;
@@ -168,10 +188,11 @@ impl Uwc {
             let centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
             let c = &mut self.clients[i];
             c.scale = open.scale.unwrap_or(1.0);
-            c.tags = open.tags.unwrap_or(self.mon.as_ref().map(|m| m.tagset).unwrap_or(1));
+            c.tags = open.tags.unwrap_or(self.tagset);
             if open.pinned && !c.fullscreen {
-                // A pinned window's position is a screen position.
+                // A pinned window's position is a screen position, on the monitor it opens on.
                 let at = open.position.unwrap_or(vp.canvas_to_screen(centred));
+                c.pin_mon = open.pin_mon.min(self.monitors.len().saturating_sub(1));
                 c.pin = Some(at.into());
                 c.canvas = vp.screen_to_canvas(at).into();
                 c.tags = ALLTAGS;
@@ -196,9 +217,11 @@ impl Uwc {
                 self.clients[i].minimized = self.minimize_stamp;
             }
         }
-        if let Some(m) = &self.mon {
-            let rect = Rectangle::from_size(m.size);
-            output_update(&m.output, Some(rect), self.clients[i].surface());
+        if let Some(surface) = self.clients[i].surface() {
+            for m in &self.monitors {
+                let rect = Rectangle::from_size(m.size);
+                output_update(&m.output, Some(rect), &surface);
+            }
         }
         let id = self.clients[i].id;
         // It takes the keyboard unless a rule says not to, or it opened out of sight.
@@ -249,14 +272,16 @@ impl XdgShellHandler for Uwc {
         self.next_id += 1;
         self.clients.push(UClient {
             id,
-            window: Window::new_wayland_window(surface),
+            shell: Shell::Wayland(Window::new_wayland_window(surface)),
             canvas: (0.0, 0.0).into(),
             tags: self.tagset(),
             mapped: false,
             ever_mapped: false,
             urgent: false,
             pin: None,
+            pin_mon: 0,
             fullscreen: false,
+            fs_mon: 0,
             prev_size: None,
             minimized: 0,
             open: Default::default(),
@@ -304,32 +329,7 @@ impl XdgShellHandler for Uwc {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
-            // Keep the last frame to fade out over close-ms: the one captured when the close was
-            // asked for, else one captured now if the surface is still alive (skipped without a
-            // renderer, so closing stays instant headless).
-            let idle = !self.anim_running();
-            let g = self.pending_ghosts.remove(&self.clients[i].id).or_else(|| self.closing_ghost(i));
-            if let Some(g) = g {
-                self.ghosts.push(g);
-                if idle {
-                    self.begin_anim();
-                }
-                self.damage();
-            }
-            let gone = self.clients.remove(i);
-            self.export_on_close(gone.id);
-            if self.focus == Some(gone.id) {
-                self.focus = None;
-                let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
-                self.focus_client(top);
-            }
-            if let Some(crate::state::Drag::Move { id, .. } | crate::state::Drag::Resize { id, .. }) = self.drag {
-                if id == gone.id {
-                    self.drag = None;
-                }
-            }
-            self.refresh_pointer();
-            self.damage();
+            self.remove_client(i);
         }
     }
 
@@ -423,6 +423,13 @@ impl SeatHandler for Uwc {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client);
+        // Text input follows the keyboard focus, so the IME knows where its text goes.
+        let ti = seat.text_input();
+        ti.leave();
+        ti.set_focus(focused.cloned());
+        if focused.is_some() {
+            ti.enter();
+        }
         self.ipc.dirty = true;
     }
 
@@ -434,7 +441,32 @@ impl SeatHandler for Uwc {
 
 impl SelectionHandler for Uwc {
     type SelectionUserData = ();
+
+    // A wayland client took (or cleared) a selection: remember the owner and tell the X server,
+    // so X clients see it.
+    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+        self.selection_owner[crate::state::sel_idx(ty)] =
+            if source.is_some() { crate::state::SelectionOwner::Wayland } else { crate::state::SelectionOwner::None };
+        if let Some(xwm) = self.xwm.as_mut() {
+            let _ = xwm.new_selection(ty, source.map(|s| s.mime_types()));
+        }
+    }
+
+    // A wayland client reads an X11-owned selection: forward the request to the X server.
+    fn send_selection(&mut self, ty: SelectionTarget, mime_type: String, fd: OwnedFd, _seat: Seat<Self>, _: &()) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            let _ = xwm.send_selection(ty, mime_type, fd, self.loop_handle.clone());
+        }
+    }
 }
+
+impl PrimarySelectionHandler for Uwc {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection
+    }
+}
+
+delegate_primary_selection!(Uwc);
 
 impl DataDeviceHandler for Uwc {
     fn data_device_state(&self) -> &DataDeviceState {
@@ -470,5 +502,12 @@ delegate_data_device!(Uwc);
 delegate_output!(Uwc);
 delegate_dmabuf!(Uwc);
 delegate_xdg_activation!(Uwc);
+delegate_session_lock!(Uwc);
+delegate_pointer_constraints!(Uwc);
+delegate_relative_pointer!(Uwc);
+delegate_xwayland_shell!(Uwc);
+delegate_text_input_manager!(Uwc);
+delegate_pointer_gestures!(Uwc);
+delegate_input_method_manager!(Uwc);
 delegate_idle_notify!(Uwc);
 delegate_idle_inhibit!(Uwc);

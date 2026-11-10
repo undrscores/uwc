@@ -3,12 +3,16 @@
 
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
+        GesturePinchUpdateEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
+        PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     input::{
         keyboard::{FilterResult, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
+            GesturePinchEndEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, MotionEvent,
+        },
     },
     utils::{Logical, Point, SERIAL_COUNTER},
 };
@@ -16,7 +20,7 @@ use smithay::{
 use crate::{
     config::{Action, ModKey, Mods, BTN_LEFT},
     layer::Under,
-    state::{Drag, Uwc},
+    state::{Drag, Gesture, Uwc},
 };
 
 fn mods_of(m: &ModifiersState) -> Mods {
@@ -40,7 +44,7 @@ impl Uwc {
                     serial,
                     time,
                     |state, modifiers, handle| {
-                        if pressed {
+                        if pressed && !state.is_locked() {
                             let m = mods_of(modifiers);
                             for bind in &state.config.keys {
                                 if bind.mods == m
@@ -59,16 +63,25 @@ impl Uwc {
             }
             InputEvent::PointerMotion { event } => {
                 let t = Event::time_msec(&event);
-                let (sw, sh) = self.screen_size();
-                let p: Point<f64, Logical> = (self.cursor.x + event.delta_x(), self.cursor.y + event.delta_y()).into();
-                self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
-                self.real_motion(t);
+                let (dx, dy) = (event.delta_x(), event.delta_y());
+                let (sw, sh) = self.global_size();
+                let p: Point<f64, Logical> = (self.cursor.x + dx, self.cursor.y + dy).into();
+                // A locked pointer consumes the motion (the client reads the deltas); a
+                // confined one is kept inside the window.
+                if let Some(p) = self.apply_pointer_constraint(p, (dx, dy), t) {
+                    self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
+                    self.real_motion(t);
+                }
             }
             InputEvent::PointerMotionAbsolute { event } => {
                 let t = Event::time_msec(&event);
-                let size = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
-                self.cursor = event.position_transformed(size);
-                self.real_motion(t);
+                let (w, h) = self.global_size();
+                let p = event.position_transformed((w as i32, h as i32).into());
+                let d = (p.x - self.cursor.x, p.y - self.cursor.y);
+                if let Some(p) = self.apply_pointer_constraint(p, d, t) {
+                    self.cursor = p;
+                    self.real_motion(t);
+                }
             }
             InputEvent::PointerButton { event } => {
                 self.pointer_button(event.button_code(), event.state(), Event::time_msec(&event))
@@ -76,7 +89,7 @@ impl Uwc {
             InputEvent::PointerAxis { event } => {
                 let time = Event::time_msec(&event);
                 let mods = self.keyboard().modifier_state();
-                if self.mod_held(&mods) {
+                if !self.is_locked() && self.mod_held(&mods) {
                     let dy = event
                         .amount(Axis::Vertical)
                         .or_else(|| event.amount_v120(Axis::Vertical).map(|v| v / 120.0 * 15.0))
@@ -109,6 +122,113 @@ impl Uwc {
                 ptr.axis(self, frame);
                 ptr.frame(self);
             }
+            // Touchpad gestures. Three fingers are the compositor's: a swipe pans the view, a
+            // pinch zooms it. Anything else goes to the client under the pointer.
+            InputEvent::GestureSwipeBegin { event } => {
+                let (time, fingers) = (Event::time_msec(&event), event.fingers());
+                if fingers == 3 && !self.is_locked() {
+                    self.gesture = Some(Gesture::Swipe);
+                } else if !self.is_locked() {
+                    self.pointer().gesture_swipe_begin(
+                        self,
+                        &GestureSwipeBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
+                    );
+                }
+            }
+            InputEvent::GestureSwipeUpdate { event } => {
+                let time = Event::time_msec(&event);
+                match self.gesture {
+                    Some(Gesture::Swipe) => {
+                        self.with_viewport(|v, _| v.pan_screen(event.delta_x(), event.delta_y()));
+                        self.refresh_pointer();
+                        self.damage();
+                    }
+                    _ if !self.is_locked() => {
+                        self.pointer().gesture_swipe_update(
+                            self,
+                            &smithay::input::pointer::GestureSwipeUpdateEvent { time, delta: event.delta() },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            InputEvent::GestureSwipeEnd { event } => {
+                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
+                if self.gesture == Some(Gesture::Swipe) {
+                    self.gesture = None;
+                } else if !self.is_locked() {
+                    self.pointer().gesture_swipe_end(
+                        self,
+                        &GestureSwipeEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                    );
+                }
+            }
+            InputEvent::GesturePinchBegin { event } => {
+                let (time, fingers) = (Event::time_msec(&event), event.fingers());
+                if fingers == 3 && !self.is_locked() {
+                    self.gesture = Some(Gesture::Pinch { last: 1.0 });
+                } else if !self.is_locked() {
+                    self.pointer().gesture_pinch_begin(
+                        self,
+                        &GesturePinchBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
+                    );
+                }
+            }
+            InputEvent::GesturePinchUpdate { event } => {
+                let time = Event::time_msec(&event);
+                match self.gesture {
+                    Some(Gesture::Pinch { last }) => {
+                        // The pinch's scale is absolute since the begin; each update zooms by
+                        // what changed since the last one.
+                        let scale = event.scale();
+                        if last > 0.0 && (scale / last).is_finite() {
+                            self.zoom_by(scale / last);
+                        }
+                        self.gesture = Some(Gesture::Pinch { last: scale });
+                    }
+                    _ if !self.is_locked() => {
+                        self.pointer().gesture_pinch_update(
+                            self,
+                            &smithay::input::pointer::GesturePinchUpdateEvent {
+                                time,
+                                delta: event.delta(),
+                                scale: event.scale(),
+                                rotation: event.rotation(),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            InputEvent::GesturePinchEnd { event } => {
+                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
+                if matches!(self.gesture, Some(Gesture::Pinch { .. })) {
+                    self.gesture = None;
+                } else if !self.is_locked() {
+                    self.pointer().gesture_pinch_end(
+                        self,
+                        &GesturePinchEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                    );
+                }
+            }
+            InputEvent::GestureHoldBegin { event } => {
+                let (time, fingers) = (Event::time_msec(&event), event.fingers());
+                if !self.is_locked() {
+                    self.pointer().gesture_hold_begin(
+                        self,
+                        &GestureHoldBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
+                    );
+                }
+            }
+            InputEvent::GestureHoldEnd { event } => {
+                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
+                if !self.is_locked() {
+                    self.pointer().gesture_hold_end(
+                        self,
+                        &GestureHoldEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -126,6 +246,8 @@ impl Uwc {
     fn real_motion(&mut self, time: u32) {
         // The pointer is drawn by uwc, so moving it is a new frame.
         self.redraw = true;
+        // The monitor the pointer is on is where view actions apply.
+        self.cur = self.mon_at(self.cursor);
         self.pointer_motion_to(self.cursor, time);
         // A popup grab keeps the focus where it is while the pointer moves over others.
         if self.drag.is_none() && self.config.sloppy_focus && !self.pointer().is_grabbed() {
@@ -142,6 +264,16 @@ impl Uwc {
 
     /// Send the pointer to `pos` (screen px): moves a drag, or tells the surface under it.
     pub fn pointer_motion_to(&mut self, pos: Point<f64, Logical>, time: u32) {
+        // A session lock takes the pointer: it goes to the lock surface, nowhere else.
+        if self.is_locked() {
+            let m = self.mon_at(pos);
+            let local = pos - self.origin_of(m);
+            let focus = self.lock_surface_on(m).map(|s| (s.wl_surface().clone(), (0.0, 0.0).into()));
+            let ptr = self.pointer();
+            ptr.motion(self, focus, &MotionEvent { location: local, serial: SERIAL_COUNTER.next_serial(), time });
+            ptr.frame(self);
+            return;
+        }
         if let Some(drag) = self.drag {
             self.drag_motion(drag, pos);
             return;
@@ -149,11 +281,17 @@ impl Uwc {
         // Canvas windows live in canvas px; pinned and fullscreen windows and layer surfaces in screen
         // px. The location handed to the seat is in the space of whatever is under the pointer, so
         // surface-local coordinates come out right whatever the zoom.
+        let m = self.mon_at(pos);
+        let local = pos - self.monitors.get(m).map(|x| x.origin).unwrap_or((0.0, 0.0).into());
         let (location, focus) = match self.under(pos) {
             Some(Under::Window { surface, origin, location, .. }) => (location, Some((surface, origin))),
-            Some(Under::Layer { surface, origin, .. }) => (pos, Some((surface, origin))),
-            None => (pos, None),
+            Some(Under::Layer { surface, origin, .. }) => (local, Some((surface, origin))),
+            None => (local, None),
         };
+        // A persistent constraint re-activates when the pointer enters its surface again.
+        if let Some((surface, _)) = &focus {
+            self.pointer_constraint_entered(surface);
+        }
         let ptr = self.pointer();
         ptr.motion(self, focus, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });
         ptr.frame(self);
@@ -218,6 +356,13 @@ impl Uwc {
 
     fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
         let serial = SERIAL_COUNTER.next_serial();
+        // A session lock takes the button: it goes to the lock surface, and nothing else happens.
+        if self.is_locked() {
+            let ptr = self.pointer();
+            ptr.button(self, &ButtonEvent { button, state, serial, time });
+            ptr.frame(self);
+            return;
+        }
         // A grab (a popup menu, a drag-and-drop) takes the button: a press outside a grabbed popup
         // dismisses it, and is not also a focus change, a drag or a pan on top of that.
         if self.pointer().is_grabbed() {

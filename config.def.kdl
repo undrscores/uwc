@@ -78,6 +78,8 @@ options {
     // (by app-id and title; it goes back there when its app opens again, over rules' open { }).
     // Saved in ~/.local/state/uwc/session.json on quit and every few seconds. IPC: session save|forget.
     session-restore true
+    // Run Xwayland so X11 apps work (needs the Xwayland binary; real sessions only).
+    xwayland true
     // Pointer image: the xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
     // Programs started afterwards inherit them through XCURSOR_THEME / XCURSOR_SIZE.
     cursor-theme ""

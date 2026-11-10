@@ -88,9 +88,11 @@ pub struct Ghost {
     pub size: Size<i32, Logical>,
     pub canvas: Point<f64, Logical>,
     pub pin: Option<Point<f64, Logical>>,
+    pub pin_mon: usize,
     /// The window's own scale on the canvas.
     pub scale: f64,
     pub fullscreen: bool,
+    pub fs_mon: usize,
     /// The options with its rules applied, and whether it had focus, when it closed.
     pub deco: crate::rules::Deco,
     pub focused: bool,
@@ -103,6 +105,17 @@ pub struct Ghost {
 }
 
 impl Ghost {
+    /// Whether the ghost is drawn on monitor `m` (like `Uwc::visible_on` for the window).
+    pub fn visible_on(&self, m: usize) -> bool {
+        if self.fullscreen {
+            return m == self.fs_mon;
+        }
+        if self.pin.is_some() {
+            return m == self.pin_mon;
+        }
+        true
+    }
+
     /// Where it is drawn now, like `Uwc::place` for a window: canvas windows follow the viewport
     /// and the view's zoom; pinned and fullscreen ones are fixed to the screen. The fade shrinks
     /// it about the centre, as the open animation's grow does.
@@ -125,9 +138,17 @@ impl Ghost {
 }
 
 /// A toplevel window and where it sits on the canvas.
+/// What a client is: a Wayland xdg-shell toplevel, or an X11 window through Xwayland.
+#[derive(Clone)]
+pub enum Shell {
+    Wayland(Window),
+    /// Boxed: an X11Surface is far larger than a Wayland window handle.
+    X11(Box<smithay::xwayland::xwm::X11Surface>),
+}
+
 pub struct Client {
     pub id: u32,
-    pub window: Window,
+    pub shell: Shell,
     /// Top-left of the window geometry in canvas px (what clients are told and IPC reports).
     pub canvas: Point<f64, Logical>,
     pub tags: u32,
@@ -137,10 +158,13 @@ pub struct Client {
     pub ever_mapped: bool,
     /// Wants attention (set by xdg-activation once that exists).
     pub urgent: bool,
-    /// Pinned: the window's screen position (geometry top-left, logical px). It stays there while the
-    /// view moves, is not zoomed and is shown on every tag.
+    /// Pinned: the window's screen position (geometry top-left, logical px) on `pin_mon`. It stays
+    /// there while the view moves, is not zoomed and is shown on every tag.
     pub pin: Option<Point<f64, Logical>>,
+    pub pin_mon: usize,
     pub fullscreen: bool,
+    /// Which monitor a fullscreen window covers (its own screen).
+    pub fs_mon: usize,
     /// The size to go back to when leaving fullscreen.
     pub prev_size: Option<Size<i32, Logical>>,
     /// Minimized (the scratchpad): 0 = no, else the order it was hidden in (newest highest).
@@ -163,7 +187,18 @@ pub struct Client {
 
 impl Client {
     pub fn size(&self) -> Size<i32, Logical> {
-        self.window.geometry().size
+        match &self.shell {
+            Shell::Wayland(w) => w.geometry().size,
+            Shell::X11(s) => s.geometry().size,
+        }
+    }
+
+    /// The X11 window, when this client is one.
+    pub fn x11(&self) -> Option<&smithay::xwayland::xwm::X11Surface> {
+        match &self.shell {
+            Shell::X11(s) => Some(s),
+            Shell::Wayland(_) => None,
+        }
     }
 
     /// The window's footprint on the canvas: its size times its own scale.
@@ -172,26 +207,71 @@ impl Client {
         Rectangle::new(self.canvas, (s.w as f64 * self.scale, s.h as f64 * self.scale).into())
     }
 
-    pub fn surface(&self) -> &WlSurface {
-        self.window.toplevel().expect("wayland window").wl_surface()
+    /// The surface the client draws with. An X11 window that only renders into pixmaps (an
+    /// ancient X app) has none and is not drawn.
+    pub fn surface(&self) -> Option<WlSurface> {
+        match &self.shell {
+            Shell::Wayland(w) => Some(w.toplevel().expect("wayland window").wl_surface().clone()),
+            Shell::X11(s) => s.wl_surface(),
+        }
     }
 
     pub fn title(&self) -> String {
-        smithay::wayland::compositor::with_states(self.surface(), |s| {
-            s.data_map
-                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                .and_then(|d| d.lock().ok().and_then(|d| d.title.clone()))
-        })
-        .unwrap_or_default()
+        match &self.shell {
+            Shell::X11(s) => s.title(),
+            Shell::Wayland(w) => {
+                let surface = w.toplevel().expect("wayland window").wl_surface();
+                smithay::wayland::compositor::with_states(surface, |s| {
+                    s.data_map
+                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                        .and_then(|d| d.lock().ok().and_then(|d| d.title.clone()))
+                })
+                .unwrap_or_default()
+            }
+        }
     }
 
     pub fn app_id(&self) -> String {
-        smithay::wayland::compositor::with_states(self.surface(), |s| {
-            s.data_map
-                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                .and_then(|d| d.lock().ok().and_then(|d| d.app_id.clone()))
-        })
-        .unwrap_or_default()
+        match &self.shell {
+            Shell::X11(s) => s.class(),
+            Shell::Wayland(w) => {
+                let surface = w.toplevel().expect("wayland window").wl_surface();
+                smithay::wayland::compositor::with_states(surface, |s| {
+                    s.data_map
+                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                        .and_then(|d| d.lock().ok().and_then(|d| d.app_id.clone()))
+                })
+                .unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// A touchpad gesture the compositor takes (3 fingers): a swipe pans the view, a pinch zooms.
+/// Gestures with fewer fingers go to the client under the pointer (zwp-pointer-gestures-v1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    Swipe,
+    /// `last` is the scale the previous update reported (the pinch's is absolute).
+    Pinch {
+        last: f64,
+    },
+}
+
+/// Which side owns a selection target (clipboard, primary): a wayland client, an X11 client
+/// (via the Xwayland bridge), or nobody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOwner {
+    None,
+    Wayland,
+    X11,
+}
+
+/// Index of a selection target in `Uwc::selection_owner`.
+pub fn sel_idx(ty: smithay::wayland::selection::SelectionTarget) -> usize {
+    match ty {
+        smithay::wayland::selection::SelectionTarget::Clipboard => 0,
+        smithay::wayland::selection::SelectionTarget::Primary => 1,
     }
 }
 
@@ -235,26 +315,35 @@ pub struct WindowHit {
 
 pub struct Monitor {
     pub output: Output,
-    /// Logical size in px (the screen the viewport looks through).
+    /// Logical size in px (this monitor's screen).
     pub size: Size<i32, Logical>,
-    pub tagset: u32,
-    pub prev_tagset: u32,
+    /// Where the monitor sits in the global input space: monitors tile left to right.
+    pub origin: Point<f64, Logical>,
+    /// This monitor's view of each tag: one canvas, one camera per monitor.
     pub vp: [Viewport; TAGCOUNT],
     /// The view before the overview was opened.
     pub overview: Option<Viewport>,
     /// Saved views per tag: `bookmarks[tag][n]`.
     pub bookmarks: [[Option<Viewport>; 9]; TAGCOUNT],
-    /// An eased move in progress: the tag and the view `vp[tag]` is heading for.
+    /// An eased move in progress: the view `vp[tag]` is heading for.
+    /// The eased move in progress, and the tag it belongs to.
     pub target: Option<(usize, Viewport)>,
+    /// Sharp zoom: the zoom this monitor's windows are told, once it has settled.
+    pub settled_zoom: f64,
+    /// The output's power mode (zwlr-output-power-management): a blanked monitor draws nothing.
+    pub powered: bool,
+    /// The zoom seen last turn, and a counter so only the last zoom change of a burst settles.
+    pub seen_zoom: f64,
 }
 
 impl Monitor {
-    pub fn viewport(&self) -> Viewport {
-        self.vp[lowest_tag(self.tagset)]
+    /// The view of the tag in use; tags are shared, each monitor has its own camera.
+    pub fn viewport(&self, tagset: u32) -> Viewport {
+        self.vp[lowest_tag(tagset)]
     }
 
     /// Jump to where an eased move is heading.
-    pub fn settle(&mut self) {
+    pub fn settle(&mut self, _tagset: u32) {
         if let Some((t, v)) = self.target.take() {
             self.vp[t] = v;
         }
@@ -262,21 +351,21 @@ impl Monitor {
 
     /// For direct, instant changes: a pending eased move is finished first, so they build on the
     /// view IPC reported and nothing is left to pull it back.
-    pub fn viewport_mut(&mut self) -> &mut Viewport {
-        self.settle();
-        &mut self.vp[lowest_tag(self.tagset)]
+    pub fn viewport_mut(&mut self, tagset: u32) -> &mut Viewport {
+        self.settle(tagset);
+        &mut self.vp[lowest_tag(tagset)]
     }
 
     /// Where the view of `tag` is going: the end of an eased move, else the view itself.
-    pub fn view_of(&self, tag: usize) -> Viewport {
+    pub fn view_of(&self, tag: usize, _tagset: u32) -> Viewport {
         match self.target {
             Some((t, v)) if t == tag => v,
             _ => self.vp[tag],
         }
     }
 
-    pub fn target_viewport(&self) -> Viewport {
-        self.view_of(lowest_tag(self.tagset))
+    pub fn target_viewport(&self, tagset: u32) -> Viewport {
+        self.view_of(lowest_tag(tagset), tagset)
     }
 }
 
@@ -309,6 +398,41 @@ pub struct Uwc {
     pub activation_state: smithay::wayland::xdg_activation::XdgActivationState,
     /// ext-idle-notify-v1 (idle daemons); its timers are reset by real input.
     pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Uwc>,
+    /// ext-session-lock-v1 (lock screen clients).
+    pub session_lock: crate::sessionlock::SessionLock,
+    /// zwp-pointer-constraints-v1 (games, 3D apps); held so the global stays alive.
+    #[allow(dead_code)]
+    pub pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState,
+    /// zwp-relative-pointer-manager-v1 (the deltas a locked pointer hands over); held so the
+    /// global stays alive.
+    #[allow(dead_code)]
+    pub relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    /// xwayland-shell-v1, so X11 windows can associate a wl_surface.
+    pub xwayland_shell: smithay::wayland::xwayland_shell::XWaylandShellState,
+    /// The X11 window manager, once Xwayland is up.
+    pub xwm: Option<smithay::xwayland::X11Wm>,
+    /// Keeps the Xwayland server source in the loop (dropping it would stop the server).
+    #[allow(dead_code)]
+    pub xwayland: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// Override-redirect X11 windows (menus, tooltips): drawn on top, not managed.
+    pub or_windows: Vec<smithay::xwayland::X11Surface>,
+    /// zwp-pointer-gestures-v1 (clients that want touchpad gestures); held so the global stays
+    /// alive.
+    #[allow(dead_code)]
+    pub pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState,
+    /// zwp-text-input-v3 (clients that accept IME input); held so the global stays alive.
+    #[allow(dead_code)]
+    pub text_input: smithay::wayland::text_input::TextInputManagerState,
+    /// zwp-input-method-v2 (the IME itself); held so the global stays alive.
+    #[allow(dead_code)]
+    pub input_method: smithay::wayland::input_method::InputMethodManagerState,
+    /// The IME's popups (candidate lists), drawn on top.
+    pub ime_popups: Vec<smithay::wayland::input_method::PopupSurface>,
+    /// zwlr-output-management-v1 (kanshi, wdisplays).
+    pub output_management: crate::output_management::OutputManagement,
+    /// zwlr-output-power-management-v1 (swayidle): held so the global stays alive.
+    #[allow(dead_code)]
+    pub output_power: crate::output_power::OutputPower,
     #[allow(dead_code)] // held so the global stays alive
     pub idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
     /// Live zwp-idle-inhibitor-v1 objects; any one pauses the idle notifications.
@@ -337,14 +461,25 @@ pub struct Uwc {
     pub pending_ghosts: std::collections::HashMap<u32, Ghost>,
     pub focus: Option<u32>,
     pub next_id: u32,
-    pub mon: Option<Monitor>,
-    /// Pointer position on the screen (logical px).
+    /// The monitors, left to right in the global input space. Each is another camera onto the one
+    /// canvas, with its own view of every tag.
+    pub monitors: Vec<Monitor>,
+    /// The monitor the pointer is on: where view actions (pan, zoom, overview, bookmarks) apply.
+    pub cur: usize,
+    /// The tags in use (shared by all monitors) and the ones shown before.
+    pub tagset: u32,
+    pub prev_tagset: u32,
+    /// Pointer position in the global input space (logical px).
     pub cursor: Point<f64, Logical>,
     /// What the client under the pointer asked the pointer to look like.
     pub cursor_status: CursorImageStatus,
     /// The xcursor theme, loaded lazily per image.
     pub cursor_theme: crate::cursor::CursorTheme,
     pub drag: Option<Drag>,
+    /// The touchpad gesture in progress, when it is ours.
+    pub gesture: Option<Gesture>,
+    pub selection_owner: [SelectionOwner; 2],
+    pub primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState,
     /// Pointer position at the previous step of a pan drag.
     pub drag_last: Point<f64, Logical>,
     /// A mouse bind took the press, so the matching release is swallowed too.
@@ -353,10 +488,7 @@ pub struct Uwc {
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
     pub redraw: bool,
-    /// The zoom windows render for: follows the view's zoom once it has stayed put (`zoom-settle-ms`).
-    pub settled_zoom: f64,
-    /// The zoom seen last turn, and a counter so only the last zoom change of a burst settles.
-    pub seen_zoom: f64,
+    /// Counts zoom changes, so only the last of a burst settles.
     pub scale_gen: u64,
     #[allow(dead_code)] // held so the globals stay alive
     pub fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState,
@@ -418,6 +550,9 @@ impl Uwc {
 
         let ipc = Ipc::new(&loop_handle, &socket_name)?;
 
+        // zwlr-output-management-v1 (kanshi, wdisplays): the manager global.
+        dh.create_global::<Uwc, smithay::reexports::wayland_protocols_wlr::output_management::v1::server::zwlr_output_manager_v1::ZwlrOutputManagerV1, ()>(4, ());
+
         Ok(Uwc {
             start_time: Instant::now(),
             compositor_state: CompositorState::new_v6::<Uwc>(&dh),
@@ -426,6 +561,7 @@ impl Uwc {
             xdg_decoration_state: XdgDecorationState::new::<Uwc>(&dh),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Uwc>(&dh),
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
+            primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh),
             popups: PopupManager::default(),
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
             ipc_rules: Vec::new(),
@@ -435,6 +571,19 @@ impl Uwc {
             screencopy: crate::screencopy::Screencopy::new(&dh),
             activation_state: smithay::wayland::xdg_activation::XdgActivationState::new::<Uwc>(&dh),
             idle_notifier: smithay::wayland::idle_notify::IdleNotifierState::new(&dh, loop_handle.clone()),
+            session_lock: crate::sessionlock::SessionLock::new(&dh),
+            pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Uwc>(&dh),
+            relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Uwc>(&dh),
+            xwayland_shell: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Uwc>(&dh),
+            xwm: None,
+            xwayland: None,
+            or_windows: Vec::new(),
+            pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState::new::<Uwc>(&dh),
+            text_input: smithay::wayland::text_input::TextInputManagerState::new::<Uwc>(&dh),
+            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |_| true),
+            ime_popups: Vec::new(),
+            output_management: Default::default(),
+            output_power: crate::output_power::OutputPower::new(&dh),
             idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Uwc>(&dh),
             idle_inhibitors: 0,
             frames_drawn: 0,
@@ -460,16 +609,19 @@ impl Uwc {
             pending_ghosts: Default::default(),
             focus: None,
             next_id: 1,
-            mon: None,
+            monitors: Vec::new(),
+            cur: 0,
+            tagset: 1,
+            prev_tagset: 1,
             cursor: (0.0, 0.0).into(),
             drag: None,
+            gesture: None,
+            selection_owner: [SelectionOwner::None; 2],
             drag_last: (0.0, 0.0).into(),
             consumed_press: false,
             deco_commit: Default::default(),
             redraw: true,
             minimize_stamp: 0,
-            settled_zoom: 1.0,
-            seen_zoom: 1.0,
             scale_gen: 0,
             fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Uwc>(&dh),
             viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Uwc>(&dh),
@@ -516,68 +668,192 @@ impl Uwc {
 
     // ---- monitor / viewport -------------------------------------------------------------
 
-    /// Use `output` as the monitor. A new output after a hotplug keeps the tags and viewports.
+    /// Use `output` as a monitor. An output that replaces one with the same name (a mode change, a
+    /// hotplug of the same connector) keeps its views; a new one becomes another camera onto the
+    /// canvas, tiled to the right of the others.
     pub fn add_monitor(&mut self, output: Output, size: Size<i32, Logical>) {
-        if let Some(old) = self.mon.as_ref().map(|m| m.output.clone()) {
-            self.move_layers(&old, &output);
-        }
-        if let Some(m) = self.mon.as_mut() {
-            m.output = output;
-            m.size = size;
+        if let Some(i) = self.monitors.iter().position(|m| m.output.name() == output.name()) {
+            let old = self.monitors[i].output.clone();
+            if old != output {
+                self.move_layers(&old, &output);
+            }
+            self.monitors[i].output = output;
+            self.monitors[i].size = size;
+            self.layout();
             let (w, h) = (size.w as f64, size.h as f64);
             self.cursor = (self.cursor.x.clamp(0.0, w - 1.0), self.cursor.y.clamp(0.0, h - 1.0)).into();
             self.damage();
             return;
         }
-        self.mon = Some(Monitor {
+        self.monitors.push(Monitor {
             output,
             size,
-            tagset: 1,
-            prev_tagset: 1,
+            origin: (0.0, 0.0).into(),
             vp: [Viewport::default(); TAGCOUNT],
             overview: None,
             bookmarks: [[None; 9]; TAGCOUNT],
             target: None,
+            settled_zoom: 1.0,
+            seen_zoom: 1.0,
+            powered: true,
         });
-        self.cursor = (size.w as f64 / 2.0, size.h as f64 / 2.0).into();
+        self.layout();
+        if self.monitors.len() == 1 {
+            self.cursor = (size.w as f64 / 2.0, size.h as f64 / 2.0).into();
+        }
+        crate::output_management::refresh(self);
+    }
+
+    /// Drop the monitor named `name` (its output went away); windows pinned or fullscreen on it
+    /// fall back to the first monitor.
+    pub fn remove_monitor(&mut self, name: &str) {
+        let Some(i) = self.monitors.iter().position(|m| m.output.name() == name) else { return };
+        self.monitors.remove(i);
+        for c in &mut self.clients {
+            if c.pin_mon == i {
+                c.pin_mon = 0;
+            } else if c.pin_mon > i {
+                c.pin_mon -= 1;
+            }
+            if c.fs_mon == i {
+                c.fs_mon = 0;
+            } else if c.fs_mon > i {
+                c.fs_mon -= 1;
+            }
+        }
+        for g in &mut self.ghosts {
+            if g.pin_mon == i {
+                g.pin_mon = 0;
+            } else if g.pin_mon > i {
+                g.pin_mon -= 1;
+            }
+            if g.fs_mon == i {
+                g.fs_mon = 0;
+            } else if g.fs_mon > i {
+                g.fs_mon -= 1;
+            }
+        }
+        if self.cur >= self.monitors.len() {
+            self.cur = 0;
+        }
+        self.layout();
+        let (w, h) = self.global_size();
+        self.cursor = (self.cursor.x.clamp(0.0, w - 1.0), self.cursor.y.clamp(0.0, h - 1.0)).into();
+        crate::output_management::refresh(self);
+        self.damage();
+    }
+
+    /// Where each monitor sits: tiled left to right, making up the global input space.
+    pub fn layout(&mut self) {
+        let mut x = 0.0;
+        for m in &mut self.monitors {
+            m.origin = (x, 0.0).into();
+            x += m.size.w as f64;
+        }
+    }
+
+    /// The monitor a global point is on (the first one, for points between monitors).
+    pub fn mon_at(&self, p: Point<f64, Logical>) -> usize {
+        self.monitors
+            .iter()
+            .position(|m| p.x >= m.origin.x && p.x < m.origin.x + m.size.w as f64)
+            .unwrap_or(self.cur)
+            .min(self.monitors.len().saturating_sub(1))
+    }
+
+    /// The monitor that shows a window: the one it is pinned or fullscreened to, else the one whose
+    /// view has its centre on screen (views can overlap; a window can be on several, and follow the
+    /// view as it moves, like everything on the canvas).
+    pub fn mon_of(&self, c: &Client) -> usize {
+        if c.fullscreen {
+            return c.fs_mon;
+        }
+        if c.pin.is_some() {
+            return c.pin_mon;
+        }
+        let r = c.rect();
+        let centre = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0);
+        for (m, mon) in self.monitors.iter().enumerate() {
+            let vp = mon.viewport(self.tagset);
+            let (sx, sy) = vp.canvas_to_screen(centre);
+            if sx >= 0.0 && sy >= 0.0 && sx < mon.size.w as f64 && sy < mon.size.h as f64 {
+                return m;
+            }
+        }
+        self.cur
     }
 
     pub fn viewport(&self) -> Viewport {
-        self.mon.as_ref().map(|m| m.viewport()).unwrap_or_default()
+        self.viewport_of(self.cur)
+    }
+
+    pub fn viewport_of(&self, m: usize) -> Viewport {
+        self.monitors.get(m).map(|x| x.viewport(self.tagset)).unwrap_or_default()
     }
 
     /// The view an eased move is heading for (what IPC reports and relative moves build on).
-    pub fn target_viewport(&self) -> Viewport {
-        self.mon.as_ref().map(|m| m.target_viewport()).unwrap_or_default()
+    pub fn target_viewport_of(&self, m: usize) -> Viewport {
+        self.monitors.get(m).map(|x| x.target_viewport(self.tagset)).unwrap_or_default()
     }
 
+    /// The cursor monitor's size: the screen view actions and window placements work with.
     pub fn screen_size(&self) -> (f64, f64) {
-        self.mon.as_ref().map(|m| (m.size.w as f64, m.size.h as f64)).unwrap_or((1280.0, 720.0))
+        self.monitors.get(self.cur).map(|m| (m.size.w as f64, m.size.h as f64)).unwrap_or((1280.0, 720.0))
     }
 
+    /// Where monitor `m` sits in the global input space.
+    pub fn origin_of(&self, m: usize) -> Point<f64, Logical> {
+        self.monitors.get(m).map(|x| x.origin).unwrap_or((0.0, 0.0).into())
+    }
+
+    /// The global input space: the monitors side by side.
+    pub fn global_size(&self) -> (f64, f64) {
+        (
+            self.monitors.iter().map(|m| m.size.w as f64).sum::<f64>(),
+            self.monitors.iter().map(|m| m.size.h as f64).fold(0.0, f64::max),
+        )
+    }
+
+    /// Whether the window is drawn anywhere at all.
     pub fn visible(&self, c: &Client) -> bool {
-        c.mapped && c.minimized == 0 && (c.pin.is_some() || self.mon.as_ref().is_some_and(|m| c.tags & m.tagset != 0))
+        c.mapped && c.minimized == 0 && (c.pin.is_some() || c.tags & self.tagset != 0)
     }
 
-    /// Where a window is drawn and hit right now: its placement with the open/move/tag animation on.
+    /// Whether the window is drawn on monitor `m`.
+    pub fn visible_on(&self, m: usize, c: &Client) -> bool {
+        if !c.mapped || c.minimized != 0 {
+            return false;
+        }
+        if c.fullscreen {
+            return m == c.fs_mon;
+        }
+        if c.pin.is_some() {
+            return m == c.pin_mon;
+        }
+        c.tags & self.tagset != 0
+    }
+
+    /// Where a window is drawn and hit right now (on the cursor monitor): its placement with the
+    /// open/move/tag animation on.
     pub fn place(&self, c: &Client) -> Place {
-        self.place_with(c, &c.fx)
+        self.place_on(self.cur, c, &c.fx)
     }
 
     /// Where it rests, for maths on the window's real position (anchoring a scale, drag factors).
     pub fn place_at_rest(&self, c: &Client) -> Place {
-        self.place_with(c, &Fx::REST)
+        self.place_on(self.cur, c, &Fx::REST)
     }
 
-    fn place_with(&self, c: &Client, fx: &Fx) -> Place {
+    /// Where a window is drawn on monitor `m` (each monitor is another camera onto the canvas).
+    pub fn place_on(&self, m: usize, c: &Client, fx: &Fx) -> Place {
         if c.fullscreen {
             return Place { origin: (0.0, 0.0).into(), zoom: 1.0, on_canvas: false };
         }
         // Pinned windows ignore the view's zoom but keep their own scale.
         let (mut origin, mut zoom, on_canvas, view_zoom) = match c.pin {
-            Some(p) => (p, c.scale, false, 1.0),
-            None => {
-                let vp = self.viewport();
+            Some(p) if m == c.pin_mon => (p, c.scale, false, 1.0),
+            _ => {
+                let vp = self.viewport_of(m);
                 (vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), vp.zoom * c.scale, true, vp.zoom)
             }
         };
@@ -614,18 +890,14 @@ impl Uwc {
         let r = new / old;
         let origin: Point<f64, Logical> =
             (anchor.x - (anchor.x - pl.origin.x) * r, anchor.y - (anchor.y - pl.origin.y) * r).into();
+        let (m, pinned) = (self.mon_of(&self.clients[i]), self.clients[i].pin.is_some());
+        let canvas = self.viewport_of(m).screen_to_canvas((origin.x, origin.y));
         let c = &mut self.clients[i];
         c.scale = new;
-        if c.pin.is_some() {
+        if pinned {
             c.pin = Some(origin);
         } else {
-            c.canvas = self
-                .mon
-                .as_ref()
-                .map(|m| m.viewport())
-                .unwrap_or_default()
-                .screen_to_canvas((origin.x, origin.y))
-                .into();
+            c.canvas = canvas.into();
         }
         self.refresh_pointer();
         self.damage();
@@ -635,10 +907,16 @@ impl Uwc {
     /// it is right after the canvas moved.
     /// `f` gets the work area (the screen minus bars) for centring.
     pub fn with_viewport(&mut self, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
-        let area = self.work_area();
-        if let Some(m) = self.mon.as_mut() {
-            m.overview = None;
-            f(m.viewport_mut(), area);
+        self.with_viewport_on(self.cur, f);
+    }
+
+    /// `with_viewport`, on monitor `m`.
+    pub fn with_viewport_on(&mut self, m: usize, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        let area = self.work_area_of(m);
+        let tagset = self.tagset;
+        if let Some(mon) = self.monitors.get_mut(m) {
+            mon.overview = None;
+            f(mon.viewport_mut(tagset), area);
         }
         self.refresh_pointer();
         self.damage();
@@ -647,15 +925,21 @@ impl Uwc {
     /// Like `with_viewport`, but the view eases to the result over `view-ms` (builds on where an
     /// earlier eased move is heading, so repeated key pans add up).
     pub fn with_viewport_eased(&mut self, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        self.with_viewport_eased_on(self.cur, f);
+    }
+
+    /// `with_viewport_eased`, on monitor `m`.
+    pub fn with_viewport_eased_on(&mut self, m: usize, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
         if self.config.view_ms <= 0.0 {
-            return self.with_viewport(f);
+            return self.with_viewport_on(m, f);
         }
-        let area = self.work_area();
+        let area = self.work_area_of(m);
         let idle = !self.anim_running();
-        let Some(m) = self.mon.as_mut() else { return };
+        let tagset = self.tagset;
+        let Some(m) = self.monitors.get_mut(m) else { return };
         m.overview = None;
-        let tag = lowest_tag(m.tagset);
-        let mut v = m.target_viewport();
+        let tag = lowest_tag(tagset);
+        let mut v = m.target_viewport(tagset);
         f(&mut v, area);
         m.target = (v != m.vp[tag]).then_some((tag, v));
         if idle {
@@ -669,7 +953,15 @@ impl Uwc {
     /// does not matter and a new target mid-move just bends the path). True while still moving.
     fn step_view(&mut self, dt: f64) -> bool {
         let tau = (self.config.view_ms / 1000.0 / 4.0).max(1e-4);
-        let Some(m) = self.mon.as_mut() else { return false };
+        let mut moving_any = false;
+        for mi in 0..self.monitors.len() {
+            moving_any |= self.step_view_of(mi, dt, tau);
+        }
+        moving_any
+    }
+
+    fn step_view_of(&mut self, mi: usize, dt: f64, tau: f64) -> bool {
+        let Some(m) = self.monitors.get_mut(mi) else { return false };
         let Some((tag, goal)) = m.target else { return false };
         let cur = m.vp[tag];
         let dz = (goal.zoom / cur.zoom).ln();
@@ -684,7 +976,7 @@ impl Uwc {
             let (cc, gc) = (cur.screen_to_canvas(centre), goal.screen_to_canvas(centre));
             (gc.0 - cc.0).abs() * cur.zoom < 0.25 && (gc.1 - cc.1).abs() * cur.zoom < 0.25 && dz.abs() < 1e-3
         };
-        let moving = if tag != lowest_tag(m.tagset) || near || self.config.view_ms <= 0.0 {
+        let moving = if near || self.config.view_ms <= 0.0 {
             m.vp[tag] = goal;
             m.target = None;
             false
@@ -703,9 +995,9 @@ impl Uwc {
         moving
     }
 
-    /// Something is easing (the view, a window, or a closing window fading out).
+    /// Something is easing (a view, a window, or a closing window fading out).
     pub fn anim_running(&self) -> bool {
-        self.mon.as_ref().is_some_and(|m| m.target.is_some())
+        self.monitors.iter().any(|m| m.target.is_some())
             || self.clients.iter().any(|c| !c.fx.at_rest())
             || !self.ghosts.is_empty()
     }
@@ -810,23 +1102,52 @@ impl Uwc {
     }
 
     pub fn client_by_surface(&self, s: &WlSurface) -> Option<usize> {
-        self.clients.iter().position(|c| c.surface() == s)
+        self.clients.iter().position(|c| c.surface().as_ref() == Some(s))
     }
 
     /// Topmost visible client under a screen point and the surface within it.
     /// Topmost visible window surface under screen point `p`, among fullscreen windows or the others.
-    pub fn window_under(&self, p: Point<f64, Logical>, fullscreen: bool) -> Option<WindowHit> {
+    pub fn window_under(&self, m: usize, p: Point<f64, Logical>, fullscreen: bool) -> Option<WindowHit> {
         for (idx, c) in self.clients.iter().enumerate().rev() {
-            if !self.visible(c) || c.fullscreen != fullscreen {
+            if !self.visible_on(m, c) || c.fullscreen != fullscreen {
                 continue;
             }
-            let pl = self.place(c);
+            let pl = self.place_on(m, c, &c.fx);
             // The point relative to the window geometry, in window px.
             let local: Point<f64, Logical> = ((p.x - pl.origin.x) / pl.zoom, (p.y - pl.origin.y) / pl.zoom).into();
-            let g = c.window.geometry().loc.to_f64();
-            if let Some((surface, loc)) = c.window.surface_under(local + g, smithay::desktop::WindowSurfaceType::ALL) {
-                let space = if pl.on_canvas { c.canvas } else { pl.origin };
-                return Some(WindowHit { idx, surface, origin: space - g + loc.to_f64(), location: space + local });
+            match &c.shell {
+                Shell::Wayland(w) => {
+                    let g = w.geometry().loc.to_f64();
+                    if let Some((surface, loc)) = w.surface_under(local + g, smithay::desktop::WindowSurfaceType::ALL) {
+                        let space = if pl.on_canvas { c.canvas } else { pl.origin };
+                        return Some(WindowHit {
+                            idx,
+                            surface,
+                            origin: space - g + loc.to_f64(),
+                            location: space + local,
+                        });
+                    }
+                }
+                // An X11 window has no subsurfaces: the whole geometry is the hit rect.
+                Shell::X11(s) => {
+                    let g = s.geometry();
+                    let in_rect = local.x >= g.loc.x as f64
+                        && local.y >= g.loc.y as f64
+                        && local.x < (g.loc.x + g.size.w) as f64
+                        && local.y < (g.loc.y + g.size.h) as f64;
+                    if in_rect {
+                        if let Some(surface) = s.wl_surface() {
+                            let g = g.loc.to_f64();
+                            let space = if pl.on_canvas { c.canvas } else { pl.origin };
+                            return Some(WindowHit {
+                                idx,
+                                surface: surface.clone(),
+                                origin: space - g,
+                                location: space + local,
+                            });
+                        }
+                    }
+                }
             }
         }
         None
@@ -852,20 +1173,26 @@ impl Uwc {
             }
         }
         for c in &self.clients {
-            if let Some(t) = c.window.toplevel() {
-                t.with_pending_state(|s| {
-                    if Some(c.id) == id {
-                        s.states.set(
-                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-                        );
-                    } else {
-                        s.states.unset(
-                            smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-                        );
+            match &c.shell {
+                Shell::Wayland(w) => {
+                    let Some(t) = w.toplevel() else { continue };
+                    t.with_pending_state(|s| {
+                        if Some(c.id) == id {
+                            s.states.set(
+                                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
+                            );
+                        } else {
+                            s.states.unset(
+                                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
+                            );
+                        }
+                    });
+                    if c.mapped {
+                        t.send_pending_configure();
                     }
-                });
-                if c.mapped {
-                    t.send_pending_configure();
+                }
+                Shell::X11(s) => {
+                    let _ = s.set_activated(Some(c.id) == id);
                 }
             }
         }
@@ -878,20 +1205,21 @@ impl Uwc {
     /// Pan (not zoom) so the window is fully on screen if it is not; used by keyboard focus changes.
     pub fn reveal(&mut self, id: u32) {
         let Some(i) = self.client_index(id) else { return };
+        let m = self.mon_of(&self.clients[i]);
         // Pinned and fullscreen windows are on screen wherever the view is.
-        if !self.place(&self.clients[i]).on_canvas {
+        if !self.place_on(m, &self.clients[i], &Fx::REST).on_canvas {
             return;
         }
         let r = self.clients[i].rect();
-        let (ax, ay, aw, ah) = self.work_area();
-        let vp = self.target_viewport();
+        let (ax, ay, aw, ah) = self.work_area_of(m);
+        let vp = self.target_viewport_of(m);
         let (sx, sy) = vp.canvas_to_screen((r.loc.x, r.loc.y));
         let (ex, ey) = vp.canvas_to_screen((r.loc.x + r.size.w, r.loc.y + r.size.h));
         if sx >= ax && sy >= ay && ex <= ax + aw && ey <= ay + ah {
             return;
         }
         let c = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0);
-        self.with_viewport_eased(|v, s| v.center_on(c, s));
+        self.with_viewport_eased_on(m, |v, s| v.center_on(c, s));
     }
 
     pub fn focus_and_reveal(&mut self, id: u32) {
@@ -960,10 +1288,48 @@ impl Uwc {
             if let Some(g) = self.closing_ghost(i) {
                 self.pending_ghosts.insert(id, g);
             }
-            if let Some(t) = self.clients[i].window.toplevel() {
-                t.send_close();
+            match &self.clients[i].shell {
+                Shell::Wayland(w) => {
+                    if let Some(t) = w.toplevel() {
+                        t.send_close();
+                    }
+                }
+                Shell::X11(s) => {
+                    let _ = s.close();
+                }
             }
         }
+    }
+
+    /// Take a client out of the list: keep its last frame for the fade-out, hand focus to what
+    /// is left on top, and end a drag it was part of.
+    pub fn remove_client(&mut self, i: usize) {
+        // Keep the last frame to fade out over close-ms: the one captured when the close was
+        // asked for, else one captured now if the surface is still alive (skipped without a
+        // renderer, so closing stays instant headless).
+        let idle = !self.anim_running();
+        let g = self.pending_ghosts.remove(&self.clients[i].id).or_else(|| self.closing_ghost(i));
+        if let Some(g) = g {
+            self.ghosts.push(g);
+            if idle {
+                self.begin_anim();
+            }
+            self.damage();
+        }
+        let gone = self.clients.remove(i);
+        self.export_on_close(gone.id);
+        if self.focus == Some(gone.id) {
+            self.focus = None;
+            let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
+            self.focus_client(top);
+        }
+        if let Some(Drag::Move { id, .. } | Drag::Resize { id, .. }) = self.drag {
+            if id == gone.id {
+                self.drag = None;
+            }
+        }
+        self.refresh_pointer();
+        self.damage();
     }
 
     /// Move a window to canvas position `x`, `y`. A pinned window goes where that is on screen now.
@@ -1001,11 +1367,28 @@ impl Uwc {
 
     pub fn resize_client(&mut self, id: u32, w: i32, h: i32) {
         if let Some(i) = self.client_index(id) {
-            if let Some(t) = self.clients[i].window.toplevel() {
-                t.with_pending_state(|s| s.size = Some((w.max(50), h.max(30)).into()));
-                t.send_pending_configure();
+            match &self.clients[i].shell {
+                Shell::Wayland(win) => {
+                    if let Some(t) = win.toplevel() {
+                        t.with_pending_state(|s| s.size = Some((w.max(50), h.max(30)).into()));
+                        t.send_pending_configure();
+                    }
+                }
+                // The X11 window is told its new X geometry: its screen position and the size.
+                Shell::X11(s) => {
+                    let c = &self.clients[i];
+                    let at = self.x11_screen_pos(c);
+                    let _ = s.configure(Rectangle::new(at, Size::from((w.max(50), h.max(30)))));
+                }
             }
         }
+    }
+
+    /// An X11 window's top-left corner in the global input space (its pinned screen spot).
+    pub fn x11_screen_pos(&self, c: &Client) -> Point<i32, Logical> {
+        let p = c.pin.unwrap_or_else(|| self.monitors.first().map(|m| m.origin).unwrap_or((0.0, 0.0).into()));
+        let o = self.origin_of(c.pin_mon);
+        Point::<f64, Logical>::from((p.x + o.x, p.y + o.y)).to_i32_round()
     }
 
     /// Re-send the pointer position so focus follows what is under it after the scene moved.
@@ -1023,11 +1406,15 @@ impl Uwc {
         }
         let idle = !self.anim_running();
         let was: Vec<bool> = self.clients.iter().map(|c| self.visible(c)).collect();
-        let Some(m) = self.mon.as_mut() else { return };
-        if m.tagset != tags {
-            m.prev_tagset = m.tagset;
-            m.tagset = tags;
-            m.overview = None;
+        if self.monitors.is_empty() {
+            return;
+        }
+        if self.tagset != tags {
+            self.prev_tagset = self.tagset;
+            self.tagset = tags;
+            for m in &mut self.monitors {
+                m.overview = None;
+            }
         }
         // Windows that just came into view fade in.
         if self.config.tag_ms > 0.0 {
@@ -1055,7 +1442,7 @@ impl Uwc {
     }
 
     pub fn tagset(&self) -> u32 {
-        self.mon.as_ref().map(|m| m.tagset).unwrap_or(1)
+        self.tagset
     }
 
     pub fn send_to_tag(&mut self, tag: usize) {
@@ -1079,15 +1466,19 @@ impl Uwc {
         if self.clients[i].fullscreen || self.clients[i].pin.is_some() == on {
             return;
         }
-        let vp = self.viewport();
         let ts = self.tagset();
+        let cur = self.cur;
+        let vp = self.viewport();
+        let pin_vp = self.viewport_of(self.clients[i].pin_mon);
         let c = &mut self.clients[i];
         if on {
+            // Pinned to the monitor it is on when pinned; the spot is that monitor's screen px.
+            c.pin_mon = cur;
             c.pin = Some(vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into());
             c.tags = ALLTAGS;
         } else {
             let p = c.pin.take().unwrap();
-            c.canvas = vp.screen_to_canvas((p.x, p.y)).into();
+            c.canvas = pin_vp.screen_to_canvas((p.x, p.y)).into();
             c.tags = ts;
         }
         self.focus_client(Some(id));
@@ -1125,16 +1516,17 @@ impl Uwc {
 
     /// Remember the view of the tag in use as bookmark `n` (0-based).
     pub fn bookmark_save(&mut self, n: usize) {
-        if let Some(m) = self.mon.as_mut() {
-            let t = crate::canvas::lowest_tag(m.tagset);
-            m.bookmarks[t][n] = Some(m.target_viewport());
+        let t = crate::canvas::lowest_tag(self.tagset);
+        if let Some(m) = self.monitors.get_mut(self.cur) {
+            m.bookmarks[t][n] = Some(m.target_viewport(self.tagset));
             self.ipc.dirty = true;
         }
     }
 
     /// Jump to bookmark `n` of the tag in use; false if it was never saved.
     pub fn bookmark_goto(&mut self, n: usize) -> bool {
-        let Some(v) = self.mon.as_ref().and_then(|m| m.bookmarks[crate::canvas::lowest_tag(m.tagset)][n]) else {
+        let t = crate::canvas::lowest_tag(self.tagset);
+        let Some(v) = self.monitors.get(self.cur).and_then(|m| m.bookmarks[t][n]) else {
             return false;
         };
         self.with_viewport_eased(|vp, _| *vp = v);
@@ -1153,18 +1545,48 @@ impl Uwc {
     pub fn set_fullscreen(&mut self, id: u32, on: bool) {
         use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
         let Some(i) = self.client_index(id) else { return };
-        let screen = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
+        let fs_mon = self.mon_of(&self.clients[i]);
+        let screen = self.monitors.get(fs_mon).map(|m| m.size).unwrap_or((1280, 720).into());
+        if let Some(s) = self.clients[i].x11().cloned() {
+            let c = &mut self.clients[i];
+            if c.fullscreen != on {
+                c.fullscreen = on;
+                if on {
+                    c.fs_mon = fs_mon;
+                    // A repeated request must not overwrite the saved size with the fullscreen one.
+                    c.prev_size = Some(c.size()).filter(|s| s.w > 0 && s.h > 0);
+                }
+            }
+            let prev = c.prev_size;
+            let at = self.x11_screen_pos(&self.clients[i]);
+            // An X11 window is told its state, and its X geometry: the monitor, or its old size.
+            let _ = s.set_fullscreen(on);
+            let size = if on { screen } else { prev.unwrap_or(screen) };
+            let _ = s.configure(Rectangle::new(at, size));
+            if on {
+                self.focus_client(Some(id));
+            }
+            self.refresh_pointer();
+            self.damage();
+            return;
+        }
         let c = &mut self.clients[i];
-        let Some(t) = c.window.toplevel().cloned() else { return };
         if c.fullscreen != on {
             c.fullscreen = on;
             if on {
+                c.fs_mon = fs_mon;
                 // A repeated request must not overwrite the saved size with the fullscreen one.
                 c.prev_size = Some(c.size()).filter(|s| s.w > 0 && s.h > 0);
             }
         }
         let prev = c.prev_size;
-        let output = self.mon.as_ref().and_then(|m| {
+        let Some(t) = (match &c.shell {
+            Shell::Wayland(w) => w.toplevel().cloned(),
+            Shell::X11(_) => None,
+        }) else {
+            return;
+        };
+        let output = self.monitors.get(fs_mon).and_then(|m| {
             let client = self.display_handle.get_client(t.wl_surface().id()).ok()?;
             m.output.client_outputs(&client).next()
         });
@@ -1191,17 +1613,24 @@ impl Uwc {
     }
 
     pub fn toggle_overview(&mut self) {
-        // Only canvas windows: pinned and fullscreen ones are on screen anyway.
-        let rects: Vec<Rectangle<f64, Logical>> =
-            self.clients.iter().filter(|c| self.visible(c) && self.place(c).on_canvas).map(|c| c.rect()).collect();
+        // Only canvas windows: pinned and fullscreen ones are on screen anyway. The overview fits
+        // what this monitor's view can see of them.
+        let cur = self.cur;
+        let rects: Vec<Rectangle<f64, Logical>> = self
+            .clients
+            .iter()
+            .filter(|c| self.visible_on(cur, c) && self.place_on(cur, c, &crate::state::Fx::REST).on_canvas)
+            .map(|c| c.rect())
+            .collect();
         let screen = self.work_area();
-        let Some(m) = self.mon.as_mut() else { return };
+        let tagset = self.tagset;
+        let Some(m) = self.monitors.get_mut(cur) else { return };
         if let Some(prev) = m.overview.take() {
-            *m.viewport_mut() = prev;
+            *m.viewport_mut(tagset) = prev;
         } else if let Some(first) = rects.first() {
             let all = rects.iter().fold(*first, |a, r| a.merge(*r));
-            let before = m.viewport();
-            m.viewport_mut().fit((all.loc.x, all.loc.y, all.size.w, all.size.h), screen, 60.0);
+            let before = m.viewport(tagset);
+            m.viewport_mut(tagset).fit((all.loc.x, all.loc.y, all.size.w, all.size.h), screen, 60.0);
             m.overview = Some(before);
         }
         self.refresh_pointer();
@@ -1228,10 +1657,8 @@ impl Uwc {
             Action::SendToTag(t) => self.send_to_tag(*t),
             Action::ViewAll => self.set_tagset(ALLTAGS),
             Action::ViewPrevious => {
-                if let Some(m) = &self.mon {
-                    let p = m.prev_tagset;
-                    self.set_tagset(p);
-                }
+                let p = self.prev_tagset;
+                self.set_tagset(p);
             }
             Action::FocusNext => self.focus_visible_cycle(true),
             Action::FocusPrevious => self.focus_visible_cycle(false),
@@ -1423,8 +1850,10 @@ mod tests {
             size: (100, 50).into(),
             canvas: (0.0, 0.0).into(),
             pin: None,
+            pin_mon: 0,
             scale: 1.0,
             fullscreen: false,
+            fs_mon: 0,
             deco: Default::default(),
             focused: false,
             alpha: 1.0,
