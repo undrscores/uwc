@@ -1,0 +1,91 @@
+// uwc config. KDL syntax (KDL v1, the same as uwm: true/false are bare words).
+// This file is built in as the default and documents every option; a config file only needs the
+// parts it changes. It lives at -c FILE, else $UWC_CONFIG, else ~/.config/uwc/config.kdl.
+//
+// A config with a `binds` section replaces the whole default one, so copy this file to start from.
+// Theming: `include "colors.kdl"` splices in another file's nodes; `vars { accent "#00aaff" }` names
+// colors, used as "$accent" anywhere a color goes.
+
+options {
+    // mod-key "Super"          // what `Mod` means in binds: Super (default), Alt, Ctrl, Shift
+    sloppy-focus true           // focus follows the mouse
+    warp-cursor true            // keyboard focus changes move the pointer into the window
+    border-width 2              // px of canvas; 0 = no border
+    root-color "#222222"        // "#rrggbb" or "#rrggbbaa"
+    border-color "#444444"
+    focus-color "#005577"
+    urgent-color "#ff0000"
+    pan-step 200                // canvas px for the pan-view action
+    move-step 50                // canvas px for move-window / resize-window
+    zoom-scroll 1.1             // zoom factor per scroll notch with Mod held
+    new-window-offset 32        // each new window on a tag is offset by this much from the last
+}
+
+binds {
+    Mod+T { spawn "foot"; }
+    Mod+Return { spawn "foot"; }
+    Mod+Q { close-window; }
+    Mod+Shift+Q { quit; }
+    Ctrl+Alt+BackSpace { quit; }
+
+    Mod+H { focus-direction "left"; }
+    Mod+L { focus-direction "right"; }
+    Mod+K { focus-direction "up"; }
+    Mod+J { focus-direction "down"; }
+    Mod+Shift+H { move-window "left"; }
+    Mod+Shift+L { move-window "right"; }
+    Mod+Shift+K { move-window "up"; }
+    Mod+Shift+J { move-window "down"; }
+    Mod+Ctrl+H { resize-window "left"; }
+    Mod+Ctrl+L { resize-window "right"; }
+    Mod+Ctrl+K { resize-window "up"; }
+    Mod+Ctrl+J { resize-window "down"; }
+    Mod+N { focus-next-window; }
+    Mod+Shift+N { focus-previous-window; }
+
+    Mod+O { toggle-overview; }
+    Mod+C { center-window; }
+    Mod+M { fit-window; }
+    Mod+minus { zoom 0.8; }
+    Mod+equal { zoom 1.25; }
+    Mod+Shift+0 { zoom-reset; }
+    Mod+Alt+H { pan-view "left"; }
+    Mod+Alt+L { pan-view "right"; }
+    Mod+Alt+K { pan-view "up"; }
+    Mod+Alt+J { pan-view "down"; }
+
+    Mod+Tab { view-previous; }
+    Mod+0 { view-all; }
+    Mod+1 { view-tag 1; }
+    Mod+Ctrl+1 { toggle-view-tag 1; }
+    Mod+Shift+1 { send-to-tag 1; }
+    Mod+2 { view-tag 2; }
+    Mod+Ctrl+2 { toggle-view-tag 2; }
+    Mod+Shift+2 { send-to-tag 2; }
+    Mod+3 { view-tag 3; }
+    Mod+Ctrl+3 { toggle-view-tag 3; }
+    Mod+Shift+3 { send-to-tag 3; }
+    Mod+4 { view-tag 4; }
+    Mod+Ctrl+4 { toggle-view-tag 4; }
+    Mod+Shift+4 { send-to-tag 4; }
+    Mod+5 { view-tag 5; }
+    Mod+Ctrl+5 { toggle-view-tag 5; }
+    Mod+Shift+5 { send-to-tag 5; }
+    Mod+6 { view-tag 6; }
+    Mod+Ctrl+6 { toggle-view-tag 6; }
+    Mod+Shift+6 { send-to-tag 6; }
+    Mod+7 { view-tag 7; }
+    Mod+Ctrl+7 { toggle-view-tag 7; }
+    Mod+Shift+7 { send-to-tag 7; }
+    Mod+8 { view-tag 8; }
+    Mod+Ctrl+8 { toggle-view-tag 8; }
+    Mod+Shift+8 { send-to-tag 8; }
+    Mod+9 { view-tag 9; }
+    Mod+Ctrl+9 { toggle-view-tag 9; }
+    Mod+Shift+9 { send-to-tag 9; }
+
+    // mouse
+    Mod+MouseLeft { drag-move; }
+    Mod+MouseMiddle { drag-pan; }
+    Mod+MouseRight { drag-resize; }
+}
