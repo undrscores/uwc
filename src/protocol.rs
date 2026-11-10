@@ -240,6 +240,8 @@ pub struct Monitor {
     pub work_area: Rect,
     /// An eased view move is still under way (`viewport` already shows where it ends).
     pub view_moving: bool,
+    /// Anything is still easing: the view, or a window opening, gliding or fading in.
+    pub animating: bool,
     pub layers: Vec<Layer>,
     pub tags: Vec<Tag>,
 }

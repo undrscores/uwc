@@ -211,6 +211,13 @@ pub struct Config {
     pub pan_step: f64,
     /// How long eased view moves (pan keys, centre, fit, bookmarks, home) take; 0 = jump.
     pub view_ms: f64,
+    /// A new window fades in and grows from `open_scale` over this long (0 = appears at once).
+    pub open_ms: f64,
+    pub open_scale: f64,
+    /// Windows moved by key or IPC glide for this long (dragging is always instant); 0 = jump.
+    pub move_ms: f64,
+    /// Windows that come into view with a tag switch fade in over this long; 0 = appear at once.
+    pub tag_ms: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
     /// Zoom is told to clients only after it stayed put this long.
@@ -320,6 +327,10 @@ impl Config {
             vars: HashMap::new(),
             pan_step: 200.0,
             view_ms: 180.0,
+            open_ms: 160.0,
+            open_scale: 0.92,
+            move_ms: 140.0,
+            tag_ms: 140.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
             zoom_settle_ms: 200.0,

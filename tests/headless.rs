@@ -746,6 +746,44 @@ fn view_moves_ease_to_their_target() {
 }
 
 #[test]
+fn windows_animate_in_moves_and_tag_switches() {
+    let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
+    let mut c = uwc.connect();
+    let _w = c.window("A", 300, 200);
+    // Opening fades and grows in; the reported position is the resting one throughout.
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let id = win(&s, "A")["id"].as_u64().unwrap();
+    assert_eq!((num(&win(&s, "A")["x"]), num(&win(&s, "A")["y"])), (350.0, 200.0));
+    assert_eq!(s["monitors"][0]["animating"], true, "{s:#}");
+    let s = uwc.wait("the open to finish", |s| s["monitors"][0]["animating"] == false);
+    assert_eq!(num(&win(&s, "A")["x"]), 350.0);
+    // A move by IPC reports its target at once and glides there.
+    uwc.ok(&format!("move {id} 600 400"));
+    let s = uwc.state();
+    assert_eq!((num(&win(&s, "A")["x"]), num(&win(&s, "A")["y"])), (600.0, 400.0));
+    assert_eq!(s["monitors"][0]["animating"], true);
+    let s = uwc.wait("the glide to finish", |s| s["monitors"][0]["animating"] == false);
+    assert_eq!(num(&win(&s, "A")["x"]), 600.0);
+    // A window that comes into view with a tag switch fades in; going away is instant.
+    uwc.ok("view 2");
+    assert_eq!(uwc.state()["monitors"][0]["animating"], false);
+    uwc.ok("view 1");
+    assert_eq!(uwc.state()["monitors"][0]["animating"], true);
+    uwc.wait("the fade to finish", |s| s["monitors"][0]["animating"] == false);
+    // The options turn each off.
+    uwc.ok("set move-ms 0");
+    uwc.ok("set tag-ms 0");
+    uwc.ok(&format!("move {id} 100 100"));
+    uwc.ok("view 2");
+    uwc.ok("view 1");
+    assert_eq!(uwc.state()["monitors"][0]["animating"], false);
+    uwc.ok("set open-ms 0");
+    let _b = c.window("B", 200, 100);
+    let s = uwc.wait("B", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(s["monitors"][0]["animating"], false);
+}
+
+#[test]
 fn move_resize_focus_close() {
     let mut uwc = Uwc::start("wm", None);
     let mut c = uwc.connect();

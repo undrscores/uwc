@@ -180,6 +180,7 @@ impl Uwc {
                 scale: m.output.current_scale().fractional_scale(),
                 viewport: view(&m.target_viewport()),
                 view_moving: m.target.is_some(),
+                animating: self.anim_running(),
                 work_area: P::Rect { x: wa.0 as i64, y: wa.1 as i64, width: wa.2 as i64, height: wa.3 as i64 },
                 layers: self.layer_info(),
                 tags: (0..TAGCOUNT)
@@ -363,7 +364,7 @@ impl Uwc {
             }
             R::Move(w, x, y) => {
                 window(self, w)?;
-                self.move_client(w, x, y);
+                self.move_client_eased(w, x, y);
             }
             R::Resize(w, cw, ch) => {
                 window(self, w)?;
