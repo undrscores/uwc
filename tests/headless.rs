@@ -905,7 +905,7 @@ impl Dispatch<tl_handle::ZwlrForeignToplevelHandleV1, ()> for App {
             tl_handle::Event::Title { title } => i.title = title,
             tl_handle::Event::AppId { app_id } => i.app_id = app_id,
             tl_handle::Event::State { state } => {
-                i.states = state.chunks_exact(4).map(|c| u32::from_ne_bytes(c.try_into().unwrap())).collect()
+                i.states = state.as_chunks::<4>().0.iter().map(|c| u32::from_ne_bytes(*c)).collect()
             }
             tl_handle::Event::OutputEnter { .. } => i.outputs += 1,
             tl_handle::Event::Done => i.done += 1,
