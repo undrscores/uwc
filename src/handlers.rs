@@ -185,10 +185,31 @@ impl Uwc {
             let (ax, ay, aw, ah) = self.work_area();
             let off = (n % 8) * self.config.new_window_offset;
             let (mx, my) = vp.screen_to_canvas((ax + aw / 2.0, ay + ah / 2.0));
-            let centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
+            let mut centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
+            // A dialog (xdg parent, X11 transient-for) opens over its parent, on its tags, pinned
+            // if it is: on an infinite canvas "somewhere in the middle" is nowhere near the window
+            // it belongs to.
+            let parent = self.parent_of(i).map(|p| {
+                let p = &self.clients[p];
+                (p.rect(), p.tags, p.pin, p.pin_mon, p.scale)
+            });
+            let mut open = open;
             let c = &mut self.clients[i];
             c.scale = open.scale.unwrap_or(1.0);
             c.tags = open.tags.unwrap_or(self.tagset);
+            if let Some((pr, ptags, ppin, pmon, pscale)) = parent {
+                c.scale = open.scale.unwrap_or(pscale);
+                let (w, h) = (size.w as f64 * c.scale, size.h as f64 * c.scale);
+                centred = (pr.loc.x + (pr.size.w - w) / 2.0, pr.loc.y + (pr.size.h - h) / 2.0);
+                c.tags = open.tags.unwrap_or(ptags);
+                if let Some(pp) = ppin {
+                    open.pinned = true;
+                    open.pin_mon = pmon;
+                    if open.position.is_none() {
+                        open.position = Some((pp.x + (pr.size.w - w) / 2.0, pp.y + (pr.size.h - h) / 2.0));
+                    }
+                }
+            }
             if open.pinned && !c.fullscreen {
                 // A pinned window's position is a screen position, on the monitor it opens on.
                 let at = open.position.unwrap_or(vp.canvas_to_screen(centred));
@@ -230,6 +251,18 @@ impl Uwc {
         }
         self.refresh_pointer();
         self.damage();
+    }
+
+    /// The window `i` is a dialog of, if any.
+    fn parent_of(&self, i: usize) -> Option<usize> {
+        let parent = match &self.clients[i].shell {
+            Shell::Wayland(w) => w.toplevel()?.parent().and_then(|s| self.client_by_surface(&s)),
+            Shell::X11(s) => {
+                let id = s.is_transient_for()?;
+                self.clients.iter().position(|c| c.x11().is_some_and(|x| x.window_id() == id))
+            }
+        };
+        parent.filter(|&p| p != i && self.clients[p].mapped)
     }
 
     /// The client took its buffer back (a NULL attach): hide it until it maps again.

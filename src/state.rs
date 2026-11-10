@@ -258,6 +258,15 @@ pub enum Gesture {
     },
 }
 
+/// A touchpad or touch pan that was let go while moving: the view keeps gliding, slowing down
+/// (`pan-momentum-ms`). Screen px per second, on monitor `mon`.
+#[derive(Debug, Clone, Copy)]
+pub struct Fling {
+    pub mon: usize,
+    pub vx: f64,
+    pub vy: f64,
+}
+
 /// Which side owns a selection target (clipboard, primary): a wayland client, an X11 client
 /// (via the Xwayland bridge), or nobody.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +380,8 @@ impl Monitor {
 
 pub struct Uwc {
     pub start_time: Instant,
+    pub extras: crate::extras::Extras,
+    pub ext_capture: crate::ext_capture::ExtCapture,
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Uwc>,
     pub loop_signal: LoopSignal,
@@ -478,6 +489,13 @@ pub struct Uwc {
     pub drag: Option<Drag>,
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
+    pub fling: Option<Fling>,
+    /// `drag_motion` is running (see `pointer_motion_to`).
+    pub in_drag_motion: bool,
+    /// The recent speed of a pan gesture (screen px/s) and when it was last sampled.
+    pub pan_vel: (f64, f64),
+    pub pan_sampled: Instant,
+    pub touch: crate::touch::TouchState,
     pub selection_owner: [SelectionOwner; 2],
     pub primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState,
     /// Pointer position at the previous step of a pan drag.
@@ -529,6 +547,7 @@ impl Uwc {
         let mut seat = seat_state.new_wl_seat(&dh, "seat0");
         seat.add_keyboard(Default::default(), 200, 25)?;
         seat.add_pointer();
+        seat.add_touch();
 
         let socket_name = Self::init_socket(&loop_handle)?;
 
@@ -549,19 +568,24 @@ impl Uwc {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let ipc = Ipc::new(&loop_handle, &socket_name)?;
+        crate::virtual_pointer::create_global(&dh);
+        let primary_selection = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh);
+        let extras = crate::extras::Extras::new(&dh, &primary_selection);
 
         // zwlr-output-management-v1 (kanshi, wdisplays): the manager global.
         dh.create_global::<Uwc, smithay::reexports::wayland_protocols_wlr::output_management::v1::server::zwlr_output_manager_v1::ZwlrOutputManagerV1, ()>(4, ());
 
         Ok(Uwc {
             start_time: Instant::now(),
+            extras,
+            ext_capture: crate::ext_capture::ExtCapture::new(&dh),
             compositor_state: CompositorState::new_v6::<Uwc>(&dh),
             xdg_shell_state: XdgShellState::new::<Uwc>(&dh),
             shm_state: ShmState::new::<Uwc>(&dh, vec![]),
             xdg_decoration_state: XdgDecorationState::new::<Uwc>(&dh),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Uwc>(&dh),
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
-            primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh),
+            primary_selection,
             popups: PopupManager::default(),
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
             ipc_rules: Vec::new(),
@@ -616,6 +640,11 @@ impl Uwc {
             cursor: (0.0, 0.0).into(),
             drag: None,
             gesture: None,
+            fling: None,
+            in_drag_motion: false,
+            pan_vel: (0.0, 0.0),
+            pan_sampled: Instant::now(),
+            touch: Default::default(),
             selection_owner: [SelectionOwner::None; 2],
             drag_last: (0.0, 0.0).into(),
             consumed_press: false,
@@ -912,6 +941,7 @@ impl Uwc {
 
     /// `with_viewport`, on monitor `m`.
     pub fn with_viewport_on(&mut self, m: usize, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        self.fling = None;
         let area = self.work_area_of(m);
         let tagset = self.tagset;
         if let Some(mon) = self.monitors.get_mut(m) {
@@ -930,6 +960,7 @@ impl Uwc {
 
     /// `with_viewport_eased`, on monitor `m`.
     pub fn with_viewport_eased_on(&mut self, m: usize, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        self.fling = None;
         if self.config.view_ms <= 0.0 {
             return self.with_viewport_on(m, f);
         }
@@ -997,7 +1028,9 @@ impl Uwc {
 
     /// Something is easing (a view, a window, or a closing window fading out).
     pub fn anim_running(&self) -> bool {
-        self.monitors.iter().any(|m| m.target.is_some())
+        self.fling.is_some()
+            || self.edge_pan_velocity().is_some()
+            || self.monitors.iter().any(|m| m.target.is_some())
             || self.clients.iter().any(|c| !c.fx.at_rest())
             || !self.ghosts.is_empty()
     }
@@ -1013,10 +1046,84 @@ impl Uwc {
         let now = Instant::now();
         let dt = now.duration_since(self.anim_stepped).as_secs_f64().min(0.05);
         self.anim_stepped = now;
-        let view = self.step_view(dt);
+        let view = self.step_view(dt) | self.step_fling(dt) | self.step_edge_pan(dt);
         let fx = self.step_fx(dt);
         let ghosts = self.step_ghosts(dt);
         view || fx || ghosts
+    }
+
+    /// While a canvas window is dragged with the pointer against a screen edge: the view's velocity.
+    fn edge_pan_velocity(&self) -> Option<(f64, f64)> {
+        let Some(Drag::Move { id, .. }) = self.drag else { return None };
+        let i = self.client_index(id)?;
+        if self.clients[i].pin.is_some() || self.clients[i].fullscreen {
+            return None;
+        }
+        let v = crate::canvas::edge_pan_velocity(
+            (self.cursor.x, self.cursor.y),
+            self.global_size(),
+            self.config.edge_pan_size,
+            self.config.edge_pan_speed,
+        );
+        (v != (0.0, 0.0)).then_some(v)
+    }
+
+    /// Dragging a window against a screen edge carries the view along: the view pans towards the
+    /// edge and the window stays under the pointer.
+    fn step_edge_pan(&mut self, dt: f64) -> bool {
+        let Some((vx, vy)) = self.edge_pan_velocity() else { return false };
+        let z = self.viewport().zoom;
+        let (dx, dy) = (vx * dt / z, vy * dt / z);
+        self.with_viewport(|v, _| v.pan_canvas(dx, dy));
+        if let Some(Drag::Move { orig, .. }) = &mut self.drag {
+            orig.x += dx;
+            orig.y += dy;
+        }
+        // Re-apply the drag at the unchanged pointer position: the window follows the view.
+        self.pointer_motion_to(self.cursor, 0);
+        true
+    }
+
+    /// A pan gesture moved the view by `(dx, dy)` screen px: remember how fast.
+    pub fn pan_sample(&mut self, dx: f64, dy: f64) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.pan_sampled).as_secs_f64().clamp(0.001, 0.1);
+        self.pan_sampled = now;
+        let (ix, iy) = (dx / dt, dy / dt);
+        self.pan_vel = (self.pan_vel.0 * 0.6 + ix * 0.4, self.pan_vel.1 * 0.6 + iy * 0.4);
+    }
+
+    /// A pan gesture ended: if the fingers were still moving, the view carries on.
+    pub fn pan_release(&mut self) {
+        let (vx, vy) = std::mem::take(&mut self.pan_vel);
+        let fresh = self.pan_sampled.elapsed().as_secs_f64() < 0.08;
+        if self.config.pan_momentum_ms > 0.0 && fresh && vx.hypot(vy) > 150.0 {
+            if !self.anim_running() {
+                self.begin_anim();
+            }
+            self.fling = Some(Fling { mon: self.cur, vx, vy });
+            self.damage();
+        }
+    }
+
+    /// The view glides on after a fling, losing speed by the same fraction per time.
+    fn step_fling(&mut self, dt: f64) -> bool {
+        let Some(mut f) = self.fling else { return false };
+        let tau = (self.config.pan_momentum_ms / 1000.0 / 4.0).max(1e-3);
+        let k = (-dt / tau).exp();
+        f.vx *= k;
+        f.vy *= k;
+        if f.vx.hypot(f.vy) < 8.0 || f.mon >= self.monitors.len() {
+            self.fling = None;
+            return false;
+        }
+        let tagset = self.tagset;
+        self.monitors[f.mon].overview = None;
+        self.monitors[f.mon].viewport_mut(tagset).pan_screen(f.vx * dt, f.vy * dt);
+        self.fling = Some(f);
+        self.refresh_pointer();
+        self.damage();
+        true
     }
 
     /// Windows' open, move and tag fades close in on rest, each by the same fraction per time.
@@ -1091,8 +1198,9 @@ impl Uwc {
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
-        let c = (self.cursor.x, self.cursor.y);
-        self.with_viewport_eased(|v, _| v.zoom_at(factor, c));
+        // The viewport's screen space is the monitor's own.
+        let p = self.cursor - self.origin_of(self.cur);
+        self.with_viewport_eased(|v, _| v.zoom_at(factor, (p.x, p.y)));
     }
 
     // ---- windows ------------------------------------------------------------------------
@@ -1705,6 +1813,7 @@ impl Uwc {
                 }
             }
             Action::ToggleOverview => self.toggle_overview(),
+            Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::ToggleFullscreen => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
                     let (id, on) = (self.clients[i].id, !self.clients[i].fullscreen);

@@ -82,6 +82,26 @@ pub fn lowest_tag(tagset: u32) -> usize {
     (tagset & ALLTAGS).trailing_zeros().min(TAGCOUNT as u32 - 1) as usize
 }
 
+/// How fast the view should move (screen px/s, the direction the view goes) while a window is
+/// dragged with the pointer at `p` in a screen of `bounds` (w, h): zero until the pointer is within
+/// `size` px of an edge, then up to `speed` at the edge itself.
+pub fn edge_pan_velocity(p: (f64, f64), bounds: (f64, f64), size: f64, speed: f64) -> (f64, f64) {
+    if size <= 0.0 || speed <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let axis = |v: f64, len: f64| {
+        let (near, far) = (v, len - 1.0 - v);
+        if near < size {
+            -speed * ((size - near.max(0.0)) / size).min(1.0)
+        } else if far < size {
+            speed * ((size - far.max(0.0)) / size).min(1.0)
+        } else {
+            0.0
+        }
+    };
+    (axis(p.0, bounds.0), axis(p.1, bounds.1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +169,16 @@ mod tests {
         assert_eq!(lowest_tag(0b100), 2);
         assert_eq!(lowest_tag(0b110), 1);
         assert_eq!(lowest_tag(0), TAGCOUNT - 1);
+    }
+
+    #[test]
+    fn edge_pan_speeds_up_towards_the_edge() {
+        let b = (1000.0, 600.0);
+        assert_eq!(edge_pan_velocity((500.0, 300.0), b, 20.0, 800.0), (0.0, 0.0));
+        assert_eq!(edge_pan_velocity((0.0, 300.0), b, 20.0, 800.0), (-800.0, 0.0));
+        assert_eq!(edge_pan_velocity((999.0, 599.0), b, 20.0, 800.0), (800.0, 800.0));
+        // Halfway into the zone: half speed.
+        assert_eq!(edge_pan_velocity((10.0, 300.0), b, 20.0, 800.0), (-400.0, 0.0));
+        assert_eq!(edge_pan_velocity((0.0, 0.0), b, 0.0, 800.0), (0.0, 0.0), "size 0 turns it off");
     }
 }

@@ -21,9 +21,13 @@ import atexit
 atexit.register(lambda: [p.kill() for p in reversed(pids)])  # also when a check crashes
 def spawn(args, **kw):
     p=subprocess.Popen(args, env=kw.get("env",env), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); pids.append(p); return p
-open(SP+"/scen.kdl","w").write('options { border-width 0\n corner-radius 0\n shadow-size 0\n warp-cursor false\n root-color "#202020" }\n')
+open(SP+"/scen.kdl","w").write('options { mod-key "Alt"\n border-width 0\n corner-radius 0\n shadow-size 0\n warp-cursor false\n root-color "#202020" }\n')
 spawn(["Xvfb",DISPLAY,"-screen","0","1280x720x24"]); time.sleep(1.5)
-spawn(["./target/debug/uwc","-c",SP+"/scen.kdl"]); time.sleep(3)
+uwc_log=open(SP+"/uwc.log","w")
+uwc_proc=subprocess.Popen(["./target/debug/uwc","-c",SP+"/scen.kdl"], env=env, stdout=uwc_log, stderr=uwc_log); pids.append(uwc_proc); time.sleep(3)
+def _show_log():
+    if uwc_proc.poll() is not None: print("uwc exited with", uwc_proc.returncode); print(open(SP+"/uwc.log").read()[-1500:])
+atexit.register(_show_log)
 wenv=dict(env, WAYLAND_DISPLAY="wayland-1")
 s=socket.socket(socket.AF_UNIX); s.connect(glob.glob(RD+"/uwc-*.sock")[0]); f=s.makefile()
 def cmd(c): s.sendall(c.encode()+b"\n"); return json.loads(f.readline())
@@ -147,6 +151,18 @@ check("screencopy of the whole output", (rc, size), (0, f'{st["width"]}x{st["hei
 im = Image.open(SP+"/cap.ppm").convert("RGB")
 check("the bar where it is on screen", im.getpixel((600,10)), (0x24,0x28,0x3b))
 r,g,b = im.getpixel((850,200)); check("pinned B where it is on screen", (r,g,b), (0x30,0x50,0xd0))
+# The same through ext-image-copy-capture (what xdg-desktop-portal screen sharing uses): a window
+# through the toplevel list, and the whole output.
+rc, size = capture(["--ext-title", "B"])
+check("ext capture of a window by toplevel handle", (rc, size), (0, "300x200"))
+im = Image.open(SP+"/cap.ppm").convert("RGB")
+check("ext window pixels", im.getpixel((150,100)), (0x30,0x50,0xd0))
+check("ext window the right way up", im.getpixel((150,20)), (0xee,0xee,0xee))
+rc, size = capture(["--ext-output"])
+check("ext capture of the whole output", (rc, size), (0, f'{st["width"]}x{st["height"]}'))
+im = Image.open(SP+"/cap.ppm").convert("RGB")
+check("ext output: the bar where it is on screen", im.getpixel((600,10)), (0x24,0x28,0x3b))
+check("ext output: pinned B where it is on screen", im.getpixel((850,200)), (0x30,0x50,0xd0))
 # A region exactly over B (pinned at 700,100, 300x200): B's own picture, top-left included, so the
 # region is taken from the right place (not mirrored vertically).
 rc, size = capture(["--region", "700", "100", "300", "200"])
@@ -164,7 +180,7 @@ check("a region off the output fails", rc, 2)
 # screenshot can catch it), and ends up exactly its own colour; its reported position never moves.
 cmd("set open-ms 3000"); cmd("set background-shader \"\"")
 spawn(["./target/debug/examples/paint","F","300","200","d0d030"], env=wenv); time.sleep(0.7)
-st=cmd("state"); fw=win("F"); vp=st["monitors"][0]["viewport"]
+st=cmd("state"); fw=win("F"); F=fw["id"]; vp=st["monitors"][0]["viewport"]
 fx_, fy_ = int((fw["x"]-vp["x"])*vp["zoom"]+fw["width"]*vp["zoom"]/2), int((fw["y"]-vp["y"])*vp["zoom"]+fw["height"]*vp["zoom"]/2)
 mid = px(fx_, fy_)
 check("a new window is still fading in", (st["monitors"][0]["animating"], mid != (0xd0,0xd0,0x30)), (True, True))
@@ -182,6 +198,24 @@ check("but its last frame is still fading", (st["monitors"][0]["animating"], px(
 time.sleep(6)
 check("close fade finished: animating off", cmd("state")["monitors"][0]["animating"], False)
 check("and the canvas is empty where it was", px(fx_, fy_), (32,32,32))
+# Edge pan: Mod+dragging a window against the screen's edge carries the view along and the window
+# stays under the pointer (so it can be taken further than one screen away).
+cmd("set close-ms 0"); cmd("set open-ms 0"); cmd("set move-ms 0"); cmd("set view-ms 0"); cmd("zoom 1 0 0")
+cmd(f"unfullscreen {A}")
+spawn(["./target/debug/examples/paint","E","300","200","30d0d0"], env=wenv); time.sleep(0.8)
+cmd(f"move {win('E')['id']} 100 150"); time.sleep(0.3)
+# winit's X window gets the keyboard focus (there is no window manager to give it).
+xwin = subprocess.run(["xdotool","search","--onlyvisible","--name",""], env=env, capture_output=True, text=True).stdout.split()[-1]
+subprocess.run(["xdotool","windowfocus",xwin], env=env)
+st=cmd("state"); vp0=st["monitors"][0]["viewport"]; a0=win("E")
+ax, ay = int((a0["x"]-vp0["x"])*vp0["zoom"]+40), int((a0["y"]-vp0["y"])*vp0["zoom"]+40)
+subprocess.run(["xdotool","keydown","Alt_L","mousemove",str(ax),str(ay),"mousedown","1","mousemove","900",str(ay),"mousemove","1279",str(ay)], env=env)
+time.sleep(1.0)
+subprocess.run(["xdotool","mouseup","1","keyup","Alt_L"], env=env); time.sleep(0.3)
+st=cmd("state"); vp1=st["monitors"][0]["viewport"]; a1=win("E")
+check("dragging a window to the edge pans the view", vp1["x"] > vp0["x"] + 200, True)
+check("and the window went with it", a1["x"] - a0["x"] > 200 + (1279 - ax) - 60, True)
+cmd("zoom 1 0 0")
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,

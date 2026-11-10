@@ -46,7 +46,12 @@ impl Uwc {
                     |state, modifiers, handle| {
                         if pressed && !state.is_locked() {
                             let m = mods_of(modifiers);
+                            // A client holding the shortcuts (a VM) gets every key but the way out.
+                            let inhibited = state.shortcuts_inhibited();
                             for bind in &state.config.keys {
+                                if inhibited && !matches!(bind.action, Action::ToggleShortcutsInhibit) {
+                                    continue;
+                                }
                                 if bind.mods == m
                                     && handle.raw_syms().iter().any(|&s| crate::config::lower(s) == bind.sym)
                                 {
@@ -62,26 +67,12 @@ impl Uwc {
                 }
             }
             InputEvent::PointerMotion { event } => {
-                let t = Event::time_msec(&event);
-                let (dx, dy) = (event.delta_x(), event.delta_y());
-                let (sw, sh) = self.global_size();
-                let p: Point<f64, Logical> = (self.cursor.x + dx, self.cursor.y + dy).into();
-                // A locked pointer consumes the motion (the client reads the deltas); a
-                // confined one is kept inside the window.
-                if let Some(p) = self.apply_pointer_constraint(p, (dx, dy), t) {
-                    self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
-                    self.real_motion(t);
-                }
+                self.pointer_moved_by(event.delta_x(), event.delta_y(), Event::time_msec(&event));
             }
             InputEvent::PointerMotionAbsolute { event } => {
-                let t = Event::time_msec(&event);
                 let (w, h) = self.global_size();
                 let p = event.position_transformed((w as i32, h as i32).into());
-                let d = (p.x - self.cursor.x, p.y - self.cursor.y);
-                if let Some(p) = self.apply_pointer_constraint(p, d, t) {
-                    self.cursor = p;
-                    self.real_motion(t);
-                }
+                self.pointer_moved_to(p, Event::time_msec(&event));
             }
             InputEvent::PointerButton { event } => {
                 self.pointer_button(event.button_code(), event.state(), Event::time_msec(&event))
@@ -122,12 +113,43 @@ impl Uwc {
                 ptr.axis(self, frame);
                 ptr.frame(self);
             }
+            // Graphics tablets act as an absolute mouse: the pen moves the pointer, touching down
+            // is the left button, the pen's buttons are the buttons they report. (Pressure and
+            // tilt are not forwarded: there is no tablet protocol yet.)
+            InputEvent::TabletToolAxis { event } => {
+                let (w, h) = self.global_size();
+                let p = event.position_transformed((w as i32, h as i32).into());
+                self.pointer_moved_to(p, Event::time_msec(&event));
+            }
+            InputEvent::TabletToolTip { event } => {
+                use smithay::backend::input::{TabletToolTipEvent, TabletToolTipState};
+                let state = match event.tip_state() {
+                    TabletToolTipState::Down => ButtonState::Pressed,
+                    TabletToolTipState::Up => ButtonState::Released,
+                };
+                self.idle_notifier.notify_activity(&self.seat);
+                let (w, h) = self.global_size();
+                let p: Point<f64, Logical> = (event.x_transformed(w as i32), event.y_transformed(h as i32)).into();
+                self.pointer_moved_to(p, Event::time_msec(&event));
+                self.pointer_button(BTN_LEFT, state, Event::time_msec(&event));
+            }
+            InputEvent::TabletToolButton { event } => {
+                use smithay::backend::input::TabletToolButtonEvent;
+                self.pointer_button(event.button(), event.button_state(), Event::time_msec(&event));
+            }
+            InputEvent::TouchDown { event } => self.touch_input_down::<B>(event),
+            InputEvent::TouchMotion { event } => self.touch_input_motion::<B>(event),
+            InputEvent::TouchUp { event } => self.touch_input_up::<B>(event),
+            InputEvent::TouchCancel { .. } => self.touch_cancel(),
             // Touchpad gestures. Three fingers are the compositor's: a swipe pans the view, a
             // pinch zooms it. Anything else goes to the client under the pointer.
             InputEvent::GestureSwipeBegin { event } => {
                 let (time, fingers) = (Event::time_msec(&event), event.fingers());
                 if fingers == 3 && !self.is_locked() {
                     self.gesture = Some(Gesture::Swipe);
+                    self.fling = None;
+                    self.pan_vel = (0.0, 0.0);
+                    self.pan_sampled = std::time::Instant::now();
                 } else if !self.is_locked() {
                     self.pointer().gesture_swipe_begin(
                         self,
@@ -140,6 +162,7 @@ impl Uwc {
                 match self.gesture {
                     Some(Gesture::Swipe) => {
                         self.with_viewport(|v, _| v.pan_screen(event.delta_x(), event.delta_y()));
+                        self.pan_sample(event.delta_x(), event.delta_y());
                         self.refresh_pointer();
                         self.damage();
                     }
@@ -156,6 +179,9 @@ impl Uwc {
                 let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
                 if self.gesture == Some(Gesture::Swipe) {
                     self.gesture = None;
+                    if !cancelled {
+                        self.pan_release();
+                    }
                 } else if !self.is_locked() {
                     self.pointer().gesture_swipe_end(
                         self,
@@ -233,6 +259,27 @@ impl Uwc {
         }
     }
 
+    /// The pointer moved by `(dx, dy)` (a mouse, or a virtual pointer).
+    pub fn pointer_moved_by(&mut self, dx: f64, dy: f64, t: u32) {
+        let (sw, sh) = self.global_size();
+        let p: Point<f64, Logical> = (self.cursor.x + dx, self.cursor.y + dy).into();
+        // A locked pointer consumes the motion (the client reads the deltas); a
+        // confined one is kept inside the window.
+        if let Some(p) = self.apply_pointer_constraint(p, (dx, dy), t) {
+            self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
+            self.real_motion(t);
+        }
+    }
+
+    /// The pointer was put at `p` (a tablet or other absolute device, or a virtual pointer).
+    pub fn pointer_moved_to(&mut self, p: Point<f64, Logical>, t: u32) {
+        let d = (p.x - self.cursor.x, p.y - self.cursor.y);
+        if let Some(p) = self.apply_pointer_constraint(p, d, t) {
+            self.cursor = p;
+            self.real_motion(t);
+        }
+    }
+
     fn mod_held(&self, m: &ModifiersState) -> bool {
         match self.config.mod_key {
             ModKey::Super => m.logo,
@@ -275,7 +322,12 @@ impl Uwc {
             return;
         }
         if let Some(drag) = self.drag {
-            self.drag_motion(drag, pos);
+            // Moving a window refreshes the pointer, which lands here again: only the outermost
+            // call applies the drag (without this, any drag-move overflowed the stack).
+            if !std::mem::replace(&mut self.in_drag_motion, true) {
+                self.drag_motion(drag, pos);
+                self.in_drag_motion = false;
+            }
             return;
         }
         // Canvas windows live in canvas px; pinned and fullscreen windows and layer surfaces in screen
@@ -354,7 +406,7 @@ impl Uwc {
         self.drag_last = self.cursor;
     }
 
-    fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
+    pub fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
         let serial = SERIAL_COUNTER.next_serial();
         // A session lock takes the button: it goes to the lock surface, and nothing else happens.
         if self.is_locked() {
