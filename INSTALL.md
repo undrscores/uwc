@@ -52,8 +52,8 @@ nix develop github:undrscores/uwc    # a shell with the Rust toolchain, the libr
 
 An overlay is available too: `nixpkgs.overlays = [ uwc.overlays.default ];` gives you `pkgs.uwc`.
 
-NVIDIA on NixOS needs `hardware.nvidia.modesetting.enable = true;` (it sets `nvidia_drm.modeset=1`); the README's
-NVIDIA section has the rest.
+NVIDIA on NixOS needs `hardware.nvidia.modesetting.enable = true;` (it sets `nvidia_drm.modeset=1`); docs/NVIDIA.md has
+the rest.
 
 **What was tested:** the package builds from `packaging/nix/package.nix` against current nixpkgs and starts headless;
 the NixOS module evaluates inside a full system configuration and produces the session, the graphics setting and the
@@ -197,6 +197,6 @@ heavier at high resolutions.
 - **Cannot open a session or seat:** you are not on a logind or seatd session. Log in on a real TTY (not over ssh) and,
   with seatd, join its group.
 - **NVIDIA:** the driver needs `nvidia_drm.modeset=1`; uwc refuses to start without it and says how to fix it. Driver 560
-  or newer for explicit sync. The README's NVIDIA section has the details.
+  or newer for explicit sync. docs/NVIDIA.md has the details.
 - **Reporting a failure:** attach `~/.local/state/uwc.log` and `uwc.log.old`, your GPU and driver, and whether it was
   started from a TTY or a display manager.

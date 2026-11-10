@@ -1,206 +1,108 @@
 # uwc
 
-A Wayland compositor with an infinite 2D canvas and real workspaces, in Rust on [smithay](https://github.com/Smithay/smithay).
-The rewrite of [uwm](https://github.com/undrscores/uwm) (C, wlroots + scenefx): the same ideas, the same config
-syntax and the same IPC.
+**uwc** is a Wayland compositor with an infinite 2D canvas, written in Rust on [smithay](https://github.com/Smithay/smithay).
+Windows float at any position on an unbounded canvas, the screen is a camera you pan and zoom, and dwm-style tags give
+each of nine workspaces its own canvas and view. It is built to be configured: looks and behaviour live in a KDL
+config file, not in code.
 
-- Windows have positions on an unbounded canvas; the screen is a camera (viewport) with zoom.
-- dwm-style tags (9), each with its own canvas, viewport and zoom.
-- Everything floats. No tiling, no client-side decoration, no built-in bar.
-- Looks and behaviour are configuration (`config.def.kdl`), not code.
+It is the Rust rewrite of [uwm](https://github.com/undrscores/uwm) (C, wlroots), with the same ideas, config syntax and
+IPC, improved where uwm was awkward.
 
-## Status
+> **Early software.** Everything is tested against headless and nested runs, but the real-hardware backend (DRM/KMS,
+> libinput, VT switching) **has not been run on a GPU yet**, and neither has NVIDIA. Keep another way to log in.
+> See [docs/STATUS.md](docs/STATUS.md).
 
-What works (covered by `cargo test`; rendering also checked by eye nested under Xvfb):
+## Features
 
-| Area | State |
-|---|---|
-| Canvas, viewport, zoom (about the pointer), pan, overview, fit/center | done |
-| Per-window scale: a window can be smaller or larger on the canvas than its size (a sticky note), still usable and sharp; `scale-window F` / `scale-window-reset` (Mod+Ctrl+minus/equal/0), Mod+Ctrl+scroll on a window, IPC `window-scale ID S`, rule `open { scale }`; pinned windows keep theirs | done |
-| Your own shaders: `border-shader` (per window through rules) and `background-shader` GLSL files, a small documented contract (`border(p, size, time, color, focused)`, `background(p, size, time, view, zoom)`); reloaded on save, redrawn every frame only if they use time, built-in fallback with the GLSL compiler's own message (line numbers into your file) in the log and the IPC state (`shader_errors`); examples in `shaders/` (neon border, canvas dot grid, aurora) | done |
-| Session restore: views, bookmarks and every window's layout (position or pinned spot, size, tags, scale, minimized, fullscreen) saved to `~/.local/state/uwc/session.json` on quit and every few seconds; windows go back when their apps open again (app-id + title, else app-id); `session-restore`, IPC `session save\|forget` | done |
-| Sharp zoom: windows are asked (fractional-scale-v1, viewporter, wl_surface v6 preferred buffer scale) to render at output scale x zoom once the zoom settles, so zooming in shows real detail; bounded by `zoom-render-scale-min`/`-max` | done |
-| Eased view moves: pan keys, zoom (scroll, keys, reset, IPC `zoom`; about the pointer or the given point), center/fit, reveal, bookmarks, `home` and IPC `pan`/`panto` glide to their target over `view-ms` (0 = jump), built on frame callbacks with exponential smoothing so a new target mid-move just bends the path; dragging stays instant; IPC reports the target and `view_moving` | done |
-| Window animations: a new window fades and grows in (`open-ms`, `open-scale`), moves by key or IPC glide (`move-ms`; dragging stays instant), windows that come into view with a tag switch fade in (`tag-ms`), and a closing window's last frame — captured when the close is asked for, before the client destroys its surface — fades out and shrinks (`close-ms`), border, shadow and dim fading with it; visual only (`Client.fx`, applied in `place`; ghosts are never hit-tested, focused, saved or reported), so IPC positions are the resting ones and `animating` says when everything has settled; `0` turns each off | done |
-| Tags: view / toggle / send-to, per-tag viewport, previous | done |
-| xdg-shell toplevels and popups (with grabs: a click outside a menu closes it, and is not also a focus change or a drag), xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
-| xdg-activation (apps ask for focus: a fresh token focuses the window and reveals it, an unseen one goes `urgent`, answered by focusing), ext-idle-notify + zwp-idle-inhibit (idle daemons; video players keep the screen on; real input resets the timers) | done |
-| ext-session-lock-v1 (swaylock, waylock, Quickshell's lock screen): the lock surface covers every output and takes all input; nothing else is drawn, key bindings do not run, screencopy and window previews fail while locked; a lock client that dies without unlocking leaves the screen blank (locked) | done |
-| zwp-pointer-constraints-v1 + zwp-relative-pointer-manager-v1 (games, 3D apps): a confined pointer is kept inside the window (or the region it names), a locked one holds the cursor still (uwc's cursor is not drawn) and hands the motion to the client as relative deltas; constraints activate when the pointer is on the surface and deactivate when it leaves | done |
-| Xwayland (`xwayland true`, needs the Xwayland binary; real sessions only): X11 windows become clients like any other -- pinned to the monitor they asked for, with uwc's decoration, focus, move / resize / fullscreen and the IPC; override-redirect windows (X menus, tooltips) are drawn on top and take the pointer by their own geometry; the clipboard and primary selection are bridged both ways (an X selection is re-published to wayland clients, a wayland one is offered to X clients) | done |
-| IME: zwp-text-input-v3 (clients) + zwp-input-method-v2 (fcitx5 and friends): text input enters and leaves with the keyboard focus; while an input method holds the keyboard grab every key goes to it first and it answers through text input (uwc's own key bindings do not fire then); its popups (candidate lists) are drawn on top, under the focused window's corner, and take the pointer | done |
-| Gestures: a three-finger touchpad swipe pans the view and a three-finger pinch zooms it; gestures with fewer fingers (a browser's two-finger pinch) are forwarded to the client under the pointer (zwp-pointer-gestures-v1) | done |
-| Multiple monitors: all outputs tiled left to right, one shared canvas and tagset, a viewport and bookmarks per monitor per tag; the pointer's monitor is where view actions, new windows and pins land; a window is drawn on every monitor whose view shows it, fullscreen covers the monitor it is on | done |
-| zwlr-output-management-v1 (wdisplays, wlr-randr, Quickshell's OutputManager): heads with modes, enabled, transform, scale; an apply reconfigures the outputs (positions are accepted but ignored -- uwc tiles) and rescans the connectors; a headless or winit session can only change scale and transform | done |
-| zwlr-output-power-management-v1 (swayidle's DPMS): `on`/`off` per output; an output that is off draws nothing (blank), so idle blanking costs no redraws | done |
-| Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
-| Mouse: Mod+drag move / resize / pan, empty-canvas drag pans, Mod+scroll zooms | done |
-| Pointer drawn by uwc: xcursor theme (`cursor-theme`, `cursor-size`), client cursor surfaces, built-in fallback arrow; animated cursors cycle their frames (redraws keep coming while one is shown) | done |
-| Config: KDL (uwm's parser, ported), `include`, `vars`, validation as a whole, live reload | done |
-| `input { keyboard / touchpad / mouse }` (XKB layout, repeat, libinput settings), `monitor "NAME" { mode scale transform off }` | done |
-| IPC: `state` (also `work_area`, `layers`, `keyboard_focus`, `backend`), `subscribe`, `get`, `set` (any option but `mod-key`, live until the next reload), `pan`, `panto`, `zoom`, `view`, `toggleview`, `focus`, `close`, `move`, `resize`, `overview`, `home`, `reload`, `quit` | done |
-| Backends: `udev` (real session), `winit` (nested), `headless` (tests) | done, see below |
-| Buffer sync: explicit sync (`linux-drm-syncobj-v1`) on udev; commits wait for a dmabuf's acquire point or implicit fences (all backends) | done |
-| NVIDIA: modesetting check with the fix in the error, `hardware-cursor` / `direct-scanout` / `explicit-sync` switches | done |
-| Decoration (uwm's options and names): `corner-radius`, gradient borders (`border-` / `focus-gradient`, `border-spin-ms`), shadows and the focus glow (`shadow-*`, `focus-shadow-*`), `backdrop-color`, `opacity` / `inactive-opacity`, `inactive-dim`; all scale with zoom; GLES shaders, square solid borders if they fail to compile | done |
-| ext-workspace-v1: the tags as workspaces "1".."9" (ids `uwc-tag-N`, 1-D coordinates, active/urgent) for bars that speak it; activate/deactivate applied per commit (only activations = view those tags, with a deactivation = toggle) | done |
-| Pinned windows (screen-fixed, unzoomed, on every tag), minimize/restore (the scratchpad, newest first, comes back on your tag), fullscreen (unscaled, undecorated, over bars and `fullscreen-bg`, size restored after; client requests too); actions `toggle-pin`, `minimize-window`, `restore-window`, `toggle-fullscreen`; IPC `pin`/`unpin`, `minimize`/`restore`, `fullscreen`/`unfullscreen` ID | done |
-| Window rules (uwc's own design, not uwm's): `rule { match ...; exclude ...; open { ... }; <decoration> }`; exact or glob app-id/title, state matchers (`focused`, `tag`, `pinned`, `fullscreen`, `urgent`) that decoration follows live; `open { tag size position pinned fullscreen minimized focus }` applied once (size and fullscreen in the first configure); IPC `rule { ... }` / `rule clear` / `rules`, `get-window ID` (a window's resolved decoration) | done |
-| Viewport bookmarks: 9 per tag, `bookmark-save` / `bookmark-goto` (Mod+Alt+[Shift+]1..9), IPC `bookmark save\|goto N`, listed per tag in the snapshot | done |
-| Window previews: hyprland-toplevel-export-v1 (what Quickshell's `ScreencopyView` uses for a `ToplevelManager` toplevel; also by uwc window id): the window alone at the output scale, no decoration or zoom, into an shm buffer; damage-waiting copies are answered on the window's next commit, so live previews follow the app's frame rate | done |
-| Output capture: wlr-screencopy (grim, screen recorders, Quickshell's monitor `ScreencopyView`): the whole output or a region, pointer optional, `copy_with_damage` answered on the next drawn frame | done |
-| wlr-foreign-toplevel-management: the window list for taskbars and shells (Quickshell's ToplevelManager, Waybar): title, app-id, output, activated/minimized/fullscreen; activate (restores and reveals), close, minimize, fullscreen | done |
-| wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
-| Everyday protocols: cursor-shape-v1 (GTK/Qt cursors), data-control (wlr and ext: wl-clipboard, clipboard managers), virtual-keyboard-v1 (wtype, on-screen keyboards), wlr-virtual-pointer (wayvnc, wlrctl, input sharing), single-pixel-buffer, xdg-foreign, xdg-dialog, content-type, xdg-system-bell | done |
-| keyboard-shortcuts-inhibit (VMs, remote desktop): an inhibitor on the focused surface takes every key; `Mod+Shift+Escape` (`toggle-shortcuts-inhibit`) takes them back and is the one bind that still runs | done |
-| Dialogs: a toplevel with an xdg parent (or X11 transient-for) opens centred over its parent, on its tags and scale, pinned where the parent is pinned, instead of somewhere in the middle of the view | done |
-| Touchscreens: a touch on a window or layer surface goes to its client (and focuses it like a click); on empty canvas one finger drags the view, two pan and pinch-zoom it. Graphics tablets act as an absolute mouse (pen = pointer, tip = left button; no pressure or tilt yet) | done, untested on hardware |
-| Edge pan: dragging a window against a screen edge pans the view that way with the window under the pointer (`edge-pan-size`, `edge-pan-speed`) | done |
-| Momentum: let go of a three-finger swipe or a touch drag while moving and the view glides on (`pan-momentum-ms`, IPC `fling VX VY`) | done |
-| Screen capture for portals: ext-foreign-toplevel-list, ext-image-capture-source, ext-image-copy-capture (outputs and windows, shm, `paint_cursors`); with wlr-screencopy this is what xdg-desktop-portal-wlr, OBS and browsers' screen sharing use. `uwc-portals.conf` (installed by `make install`) picks the wlr portal for ScreenCast and Screenshot | done, no dmabuf yet |
+- **Infinite canvas.** Pan, zoom about the pointer, overview, fit/center, viewport bookmarks. Zoom is sharp: clients
+  re-render at the zoomed size instead of being stretched. Panning never resizes or refocuses a window.
+- **Tags, not just workspaces.** Nine tags, each with its own canvas, viewport and zoom; view, toggle and send windows
+  to any combination.
+- **Everything floats.** Windows can also have their own scale on the canvas, be pinned to the screen, minimized to a
+  scratchpad, or go fullscreen.
+- **Rice it.** Rounded corners, gradient borders, shadows, focus glow, opacity and dimming, animations (open, close,
+  move, tag switch, eased pan and zoom, touchpad momentum), and your own GLSL for borders and the background.
+  Window rules, `include`, `vars` and live reload. No client-side decorations and no built-in bar: bring your own.
+- **Input.** Keyboard, mouse (Mod+drag move, resize and pan), touchpad gestures, touchscreens, tablets, XKB layouts and
+  libinput settings; pointer constraints for games; input methods (fcitx5 and friends).
+- **Multiple monitors** on one shared canvas, with a view per monitor and output management (wdisplays, kanshi).
+- **Plays well with the rest of the desktop.** layer-shell bars and launchers, foreign-toplevel and ext-workspace for
+  taskbars, Quickshell window previews, screen capture and portal screen sharing, session lock, idle notify and
+  inhibit, clipboard managers, virtual keyboard and pointer, Xwayland.
+- **Scriptable.** A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
+  move and focus windows, pan and zoom.
+- **Session restore.** Window positions, sizes, tags and views come back when the apps do.
 
-**The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
-types and was reviewed against smithay's source, but the machine it was written on has no GPU or seat. Expect the first
-run on a real TTY to turn up something. What it does: libseat session (VT switching with Ctrl+Alt+F1..F12, pause and
-resume), the primary GPU via udev, KMS through smithay's `DrmOutputManager` (hardware cursor plane when available),
-connector hotplug, libinput with the config's touchpad/mouse settings, linux-dmabuf with feedback for GL clients.
-Limits: one GPU. Multiple outputs are scanned out per connector (each gets its own view of the shared
-canvas), but the machine this was written on has no GPU or seat, so the udev path is untested on hardware.
+## Installation
 
-Not yet (roughly in the order to do them):
-
-0. **Run it on real hardware** (the udev backend, NVIDIA, a portal for screen sharing, touch and tablet devices): the
-   protocols above are tested against headless and nested runs only.
-1. The rest of the animations (open, move, tag fade, the close fade, eased pan and zoom and momentum are done), driven
-   from the frame callback, never timers.
-2. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
-   rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
-   themes (which set `grid`) are rejected as a whole.
-3. Protocols still missing: tablet-v2 (pressure, tilt), presentation-time, security-context (Flatpak), alpha-modifier,
-   fifo/commit-timing, a dmabuf path for capture, xdg-toplevel-icon.
-4. Multi-GPU (output-management, clipboard bridging for Xwayland, animated cursors, DPMS/output
-   power, popup grabs, xdg-activation, idle-inhibit/idle-notify, session-lock, pointer constraints,
-   Xwayland and IME are done).
-
-## Build and run
-
-Needs a Rust toolchain (edition 2021) and the system libraries smithay links: `libwayland`, `libxkbcommon`,
-`libinput`, `libudev`, `libgbm`, `libseat`, `libegl`/`libgles`, `libdrm`. On Debian/Ubuntu:
-`apt install libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libinput-dev libudev-dev libgbm-dev libseat-dev libegl-dev libgles-dev libdrm-dev`.
+**[INSTALL.md](INSTALL.md)** has instructions for NixOS (flake and module), Gentoo (ebuild), and building from source on
+any other distro. In short, from a checkout:
 
 ```sh
-cargo build
-cargo run -- -s foot                 # nested (winit) when WAYLAND_DISPLAY/DISPLAY is set; -s runs a command once up
-cargo run -- --headless 1280x720     # no display, for tests
-cargo run -- -t                      # validate the config and exit
-cargo test                           # unit tests + end-to-end tests against a headless uwc
-python3 tests/nested.py              # drawing and real pointer input, nested in Xvfb (needs Xvfb, xdotool, ImageMagick, PIL)
-cargo run --example paint -- "red" 400 300 d03030    # a test client that draws a solid window
-cargo run --example paint -- --bar 32 30a0d0         # ... or a layer-shell bar
+make && sudo make install PREFIX=/usr
 ```
 
-### As a session
+Then pick "uwc" in your display manager, or run `uwc-session` on a TTY. uwc needs seat access (logind, or seatd with
+your user in its group). To try it without logging out, run `cargo run -- -s foot` inside an existing Wayland or X11
+session: uwc opens as a window.
 
-**[INSTALL.md](INSTALL.md)** has install instructions for NixOS (flake and module), Gentoo (ebuild) and building from
-source on any other distro, plus first start, config, startup script and screen sharing. In short, from a checkout:
-`make && sudo make install PREFIX=/usr`, then pick "uwc" in your display manager or run `uwc-session` on a TTY (it needs
-seat access: logind, or seatd with your user in its group). `uwc-session` logs to `~/.local/state/uwc.log`, exports the
-session variables to D-Bus/systemd for portals, and runs `~/.config/uwc/startup` if it is executable (start your bar,
-notification daemon, etc. there). Ctrl+Alt+Backspace quits; Ctrl+Alt+F1..F12 switch VTs.
+## Quick start
 
-### NVIDIA
+`Mod` is the Super key. `uwc` ships a default config and a terminal is the first thing you want:
 
-The proprietary driver works through the same GBM/KMS path as Mesa drivers, with these conditions:
+| Keys | Action |
+|---|---|
+| `Mod+Return`, `Mod+T` | open `foot` |
+| `Mod+Q` | close window |
+| `Mod+H/J/K/L` | focus left/down/up/right |
+| `Mod+Shift+H/J/K/L` | move the window; `Mod+Ctrl+H/J/K/L` resize it |
+| `Mod+Alt+H/J/K/L` | pan the view |
+| `Mod+O` | overview: fit every window on the screen |
+| `Mod+minus`, `Mod+equal`, `Mod+Shift+0` | zoom out, zoom in, reset zoom |
+| `Mod+1..9` | view tag; `Mod+Shift+1..9` send the window to a tag; `Mod+Ctrl+1..9` toggle a tag |
+| `Mod+E`, `Mod+Shift+Space` | fullscreen, pin to the screen |
+| `Mod+drag` | move (left button), pan (middle), resize (right); drag empty canvas to pan |
+| `Mod+scroll` | zoom |
+| `Ctrl+Alt+Backspace` | quit |
 
-- **Kernel modesetting must be on**: `nvidia_drm.modeset=1` (and `nvidia_drm.fbdev=1`) on the kernel command line,
-  or `options nvidia_drm modeset=1 fbdev=1` in `/etc/modprobe.d/` plus an initramfs rebuild. uwc checks
-  `/sys/module/nvidia_drm/parameters/modeset` and refuses to start with that instruction if it is off.
-- **Driver 560 or newer** for explicit sync (`linux-drm-syncobj-v1`). NVIDIA has no implicit sync, so without it
-  GL/Vulkan clients (browsers, games, Electron apps) can flicker or show old frames. uwc offers the protocol whenever the
-  kernel driver supports syncobj eventfds and logs whether it did.
-- If the pointer or fullscreen apps misbehave, try `hardware-cursor false` or `direct-scanout false` in `options`.
-- Shaders (for the decoration work) are written for NVIDIA's stricter GLSL compiler: no implicit int/float conversion,
-  no redefined builtins (uwm hit this with scenefx's `clamp`).
+Every bind is in [`config.def.kdl`](config.def.kdl), which is also the documentation of every option.
 
-None of this has run on NVIDIA hardware yet.
+## Configuration
 
-Config: `-c FILE`, else `$UWC_CONFIG`, else `~/.config/uwc/config.kdl`. `config.def.kdl` is the built-in default and the
-documentation; a file only needs what it changes, and it is reloaded when saved. Control socket: `$UWC_SOCKET`
-(`$XDG_RUNTIME_DIR/uwc-<wayland display>.sock`). `uwc msg state`, `uwc msg -p get`, `uwc msg subscribe`,
-`uwc msg set focus-color "#ff8800"`; `uwc msg --help` lists every command. The protocol is text lines in, one JSON
-object per line out (`src/protocol.rs`), so `socat - UNIX-CONNECT:$UWC_SOCKET` works too.
+uwc reads `~/.config/uwc/config.kdl` (or `-c FILE`, or `$UWC_CONFIG`) and reloads it when you save. The file only
+needs what you change:
 
-## Layout
+```kdl
+options {
+    corner-radius 10
+    focus-gradient "#7aa2f7" "#bb9af7"
+    shadow-size 24
+}
 
-```
-src/main.rs        CLI, event loop, signals, config watching
-src/canvas.rs      Viewport maths (pure, unit-tested), tag constants
-src/config.rs      config model, includes/vars, binds, validation
-src/options.rs     every option once: name, field, range -> parsing, set, get
-src/kdl.rs         the KDL subset parser (a port of uwm's kdl.h)
-src/state.rs       Uwc state: windows, tags, viewport, focus, actions
-src/handlers.rs    wayland protocol handlers
-src/input.rs       keyboard/pointer/drag handling, backend-independent
-src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
-src/protocol.rs    the IPC protocol, typed: Request (parsed from a line), the snapshot and events (serde)
-src/ipc.rs         control socket: connections, subscriptions, running requests
-src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
-src/rules.rs       window rules and the per-window decoration settings (`Deco`)
-shaders/           example user shaders (border, background)
-src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
-src/toplevels.rs   wlr-foreign-toplevel-management (the window list for taskbars and shells)
-src/capture.rs     drawing into a client's buffer (offscreen render, read back into shm)
-src/export.rs      hyprland-toplevel-export-v1: window previews
-src/protocols.rs   protocols no crate has, generated from protocols/*.xml
-src/screencopy.rs  wlr-screencopy: output captures
-src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
-src/scale.rs       sharp zoom: preferred render scale per window (fractional scale)
-src/session.rs     session restore (serde, JSON in XDG_STATE_HOME)
-src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
-src/cursor.rs      the pointer image (xcursor theme, animated cursors, client surfaces, fallback arrow)
-src/output_management.rs  zwlr-output-management-v1: heads and apply
-src/output_power.rs       zwlr-output-power-management-v1: DPMS blanking
-packaging/        nix (package, NixOS module) and gentoo (live ebuild); flake.nix at the root
-src/extras.rs      small protocols: cursor-shape, data-control, virtual keyboard, shortcuts inhibit, xdg-foreign, ...
-src/touch.rs       touchscreen input and its pan/pinch gesture maths
-src/virtual_pointer.rs  wlr-virtual-pointer
-src/ext_capture.rs ext-foreign-toplevel-list and ext-image-copy-capture (portal screen sharing)
-src/xwayland.rs    Xwayland: X11 windows as clients, clipboard/primary bridging
-src/backend/       udev (real session), winit (nested), headless (tests)
-tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland clients, drive over IPC
-```
-
-### Window previews in a shell
-
-uwc speaks the protocols Quickshell uses for live window thumbnails, so an overview, minimap or alt-tab
-switcher can show real window contents (the canvas data itself is in `uwc msg state`):
-
-```qml
-import Quickshell.Wayland
-Repeater {
-    model: ToplevelManager.toplevels
-    ScreencopyView { required property var modelData; captureSource: modelData; live: true; width: 240; height: 150 }
+rule {
+    match app-id="mpv"
+    open { fullscreen }
 }
 ```
 
-`cargo run --example capture -- --title TITLE out.ppm` grabs one window from the command line,
-`--output out.ppm` or `--region X Y W H out.ppm` the screen (so does `grim`).
+Start your bar, notification daemon and wallpaper from an executable `~/.config/uwc/startup`. Check a config with
+`uwc -t`. Use `uwc msg --help` for the control socket, for example `uwc msg state`, `uwc msg set focus-color "#ff8800"`
+or `uwc msg subscribe`. Your own shaders are documented in `config.def.kdl`, with examples in [`shaders/`](shaders).
 
-## Differences from uwm worth knowing
+## Documentation
 
-- Ricing goes past fixed effects: borders and the background can be your own GLSL.
-- Windows can have their own scale on the canvas, on top of the view's zoom (no other compositor does this).
-- Zoom is sharp: clients re-render at output scale x zoom with fractional scale (uwm stretches, or asks for an
-  integer scale), and the renderer draws the bigger buffer at its logical size.
+- [INSTALL.md](INSTALL.md): installing, first start, startup script, screen sharing, troubleshooting
+- [docs/STATUS.md](docs/STATUS.md): what works, what is untested, the roadmap
+- [docs/NVIDIA.md](docs/NVIDIA.md): kernel and driver requirements
+- [docs/HACKING.md](docs/HACKING.md): building and testing, source layout, coming from uwm
+- [config.def.kdl](config.def.kdl): the default config and every option
 
-- Zoom is free: smithay draws a list of elements, so a window is a `RescaleRenderElement` around its surface tree.
-  uwm needs `zoomtree()` to rewrite every scene node every frame.
-- The pointer is kept in canvas coordinates as far as clients are concerned (the seat's location is canvas px, the
-  focus origin is the surface's canvas position), so zoom needs no special casing in surface hit-testing.
-- The `kdl` crate was tried and dropped: it rejects `vars { accent "#fff" }` (no `;` before the brace), which uwm
-  configs use. `src/kdl.rs` accepts exactly what uwm's parser does.
-- The environment variable names are `UWC_CONFIG` / `UWC_SOCKET`.
+## Contributing
+
+`cargo build` and `cargo clippy --all-targets` stay warning-free, `cargo fmt` is run, and `cargo test` passes (it starts
+a headless uwc and real Wayland clients). Read [docs/HACKING.md](docs/HACKING.md) and [CLAUDE.md](CLAUDE.md) first.
+Bug reports: include `~/.local/state/uwc.log`, your GPU and driver.
 
 ## License
 
-MIT, see `LICENSE` once added (uwm's is the model).
+MIT.
