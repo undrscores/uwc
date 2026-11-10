@@ -169,6 +169,12 @@ options {
 //     inactive-opacity 0.85
 // }
 
+// A tag's own look: the colour behind the canvas and the background shader, over the options above.
+// tag 2 {
+//     root-color "#1a1b26"
+//     background-shader "~/.config/uwc/shaders/aurora.glsl"
+// }
+
 // Hooks: a command (through sh -c) for an event, to script a desktop without a listener process. The
 // environment has UWC_EVENT and, for window events, UWC_WINDOW_ID, UWC_APP_ID, UWC_TITLE and UWC_TAGS
 // (a bit mask, tag 1 = 1); UWC_TAGSET is the tags in view. Events: window-open, window-close, focus,

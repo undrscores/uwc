@@ -1547,6 +1547,15 @@ impl Uwc {
         self.damage();
     }
 
+    /// The look of the tag in view (its own, over the global options).
+    pub fn tag_look(&self) -> (crate::config::Color, String) {
+        let l = &self.config.tag_looks[lowest_tag(self.tagset)];
+        (
+            l.root_color.unwrap_or(self.config.root_color),
+            l.background_shader.clone().unwrap_or_else(|| self.config.background_shader.clone()),
+        )
+    }
+
     pub fn set_tagset(&mut self, tags: u32) {
         self.hints_cancel();
         let tags = tags & ALLTAGS;

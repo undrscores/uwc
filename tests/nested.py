@@ -21,7 +21,7 @@ import atexit
 atexit.register(lambda: [p.kill() for p in reversed(pids)])  # also when a check crashes
 def spawn(args, **kw):
     p=subprocess.Popen(args, env=kw.get("env",env), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); pids.append(p); return p
-open(SP+"/scen.kdl","w").write('options { mod-key "Alt"\n border-width 0\n corner-radius 0\n shadow-size 0\n warp-cursor false\n root-color "#202020" }\n')
+open(SP+"/scen.kdl","w").write('tag 2 { root-color "#003366" }\noptions { mod-key "Alt"\n border-width 0\n corner-radius 0\n shadow-size 0\n warp-cursor false\n root-color "#202020" }\n')
 spawn(["Xvfb",DISPLAY,"-screen","0","1280x720x24"]); time.sleep(1.5)
 uwc_log=open(SP+"/uwc.log","w")
 uwc_proc=subprocess.Popen(["./target/debug/uwc","-c",SP+"/scen.kdl"], env=env, stdout=uwc_log, stderr=uwc_log); pids.append(uwc_proc); time.sleep(3)
@@ -280,6 +280,11 @@ check("a guide line is drawn while snapped", snapped > 100, True)
 check("the window snapped flush with the frame's left edge", win("E")["x"], e["x"]+400)
 check("the guide goes when the drag ends", count_color((255,106,193)), 0)
 cmd(f"frame remove {cmd('state')['frames'][0]['id']}")
+# Per-tag looks: tag 2 has its own colour behind the canvas.
+cmd("view 2"); time.sleep(0.5)
+check("tag 2 has its own root colour", px(640, 400), (0,0x33,0x66))
+cmd("view 1"); time.sleep(0.5)
+check("and tag 1 has the global one again", px(1270, 700), (32,32,32))
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,

@@ -142,7 +142,7 @@ impl Uwc {
                 user.insert(path, p);
             }
         }
-        let background = self.config.background_shader.clone();
+        let background = self.tag_look().1;
         let background = self.user_shader(renderer, UserShader::Background, &background);
         animated |= background.as_ref().is_some_and(|b| b.1);
         if animated {

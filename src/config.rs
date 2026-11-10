@@ -111,6 +111,31 @@ pub enum Action {
     SwitchVt(i32),
 }
 
+/// A tag's own look: the colour behind the canvas and a background shader. None = the global option.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TagLook {
+    pub root_color: Option<Color>,
+    pub background_shader: Option<String>,
+}
+
+fn parse_tag_look(n: &Node, vars: &HashMap<String, String>) -> Result<(usize, TagLook)> {
+    let t =
+        n.args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("`tag` needs a number, e.g. tag 2 {{ ... }}"))?;
+    if t.fract() != 0.0 || t < 1.0 || t > crate::canvas::TAGCOUNT as f64 {
+        bail!("tag must be 1 to {}", crate::canvas::TAGCOUNT);
+    }
+    let mut look = TagLook::default();
+    for k in &n.kids {
+        let arg = k.arg_str(0).ok_or_else(|| anyhow!("`{}` needs a value in quotes (line {})", k.name, k.line))?;
+        match k.name.as_str() {
+            "root-color" => look.root_color = Some(parse_color(arg, vars)?),
+            "background-shader" => look.background_shader = Some(arg.to_string()),
+            other => bail!("unknown tag option `{other}` (line {}); known: root-color, background-shader", k.line),
+        }
+    }
+    Ok((t as usize - 1, look))
+}
+
 #[derive(Debug, Clone)]
 pub struct KeyBind {
     pub mods: Mods,
@@ -273,6 +298,8 @@ pub struct Config {
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
     pub hooks: crate::hooks::Hooks,
+    /// `tag N { ... }`: what a tag looks like, over the global options (index = tag - 1).
+    pub tag_looks: Vec<TagLook>,
     pub keyboard: Keyboard,
     pub touchpad: Pointer,
     pub mouse_input: Pointer,
@@ -392,6 +419,7 @@ impl Config {
             keys: Vec::new(),
             mouse: Vec::new(),
             hooks: Default::default(),
+            tag_looks: vec![TagLook::default(); crate::canvas::TAGCOUNT],
             keyboard: Keyboard::default(),
             touchpad: Pointer::default(),
             mouse_input: Pointer::default(),
@@ -403,6 +431,10 @@ impl Config {
         for n in &nodes {
             match n.name.as_str() {
                 "vars" | "include" | "binds" => {}
+                "tag" => {
+                    let (i, look) = parse_tag_look(n, &vars).with_context(|| format!("tag (line {})", n.line))?;
+                    cfg.tag_looks[i] = look;
+                }
                 "hooks" => {
                     cfg.hooks = crate::hooks::Hooks::parse(n).with_context(|| format!("hooks (line {})", n.line))?
                 }
@@ -437,6 +469,7 @@ impl Config {
         }
         // Shader files are watched like includes: saving one reloads the config, which recompiles it.
         let mut shaders: Vec<String> = vec![cfg.background_shader.clone(), cfg.deco.border_shader.clone()];
+        shaders.extend(cfg.tag_looks.iter().filter_map(|l| l.background_shader.clone()));
         for n in nodes.iter().filter(|n| n.name == "rule") {
             shaders.extend(
                 n.kids.iter().filter(|k| k.name == "border-shader").filter_map(|k| k.arg_str(0).map(str::to_string)),
@@ -850,6 +883,23 @@ mod tests {
         assert_eq!(c.deco.border_width, 3);
         assert!(!c.sloppy_focus);
         assert!((c.deco.focus_color[0] - 1.0).abs() < 1e-6 && (c.deco.focus_color[1] - 0.533).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tags_can_have_their_own_look() {
+        let p = Some(Path::new("/x/c.kdl"));
+        let c = Config::parse(
+            "options { root-color \"#112233\" }\ntag 2 { root-color \"#445566\"\n background-shader \"w.glsl\" }",
+            p,
+        )
+        .unwrap();
+        assert_eq!(c.tag_looks[1].background_shader.as_deref(), Some("w.glsl"));
+        assert!((c.tag_looks[1].root_color.unwrap()[0] - 0x44 as f32 / 255.0).abs() < 1e-3);
+        assert_eq!(c.tag_looks[0], TagLook::default(), "other tags use the global options");
+        assert!(c.files.iter().any(|f| f.ends_with("w.glsl")), "its shader is watched for changes");
+        for bad in ["tag 0 { }", "tag 10 { }", "tag { }", "tag 1 { sparkle \"x\" }", "tag 1 { root-color \"red\" }"] {
+            assert!(Config::parse(bad, p).is_err(), "{bad}");
+        }
     }
 
     #[test]

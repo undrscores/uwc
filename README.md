@@ -25,7 +25,7 @@ IPC, improved where uwm was awkward.
   app-id and title on any tag, and `examples/uwc-jump` does it from a launcher.
 - **Everything floats.** Windows can also have their own scale on the canvas, be pinned to the screen, minimized to a
   scratchpad, or go fullscreen.
-- **Rice it.** Rounded corners, gradient borders, shadows, focus glow, opacity and dimming, animations (open, close,
+- **Rice it.** (A tag can have its own wallpaper shader and colour.) Rounded corners, gradient borders, shadows, focus glow, opacity and dimming, animations (open, close,
   move, tag switch, eased pan and zoom, touchpad momentum), and your own GLSL for borders and the background.
   Window rules, `include`, `vars` and live reload. No client-side decorations and no built-in bar: bring your own.
 - **Input.** Keyboard, mouse (Mod+drag move, resize and pan), touchpad gestures, touchscreens, tablets, XKB layouts and
