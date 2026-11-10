@@ -558,11 +558,19 @@ impl Uwc {
         self.view_stepped = now;
         let Some(m) = self.mon.as_mut() else { return false };
         let Some((tag, goal)) = m.target else { return false };
-        let (w, h) = (m.size.w as f64 / 2.0, m.size.h as f64 / 2.0);
         let cur = m.vp[tag];
-        let (c, g) = (cur.screen_to_canvas((w, h)), goal.screen_to_canvas((w, h)));
         let dz = (goal.zoom / cur.zoom).ln();
-        let near = (g.0 - c.0).abs() * cur.zoom < 0.25 && (g.1 - c.1).abs() * cur.zoom < 0.25 && dz.abs() < 1e-3;
+        // The pivot: the screen point both views show the same canvas point at (a scroll zoom's
+        // pointer), found per axis from p/z0 + x0 = p/z1 + x1. Scaling about it reaches the goal
+        // exactly and keeps that point still. Without a zoom change the screen centre will do.
+        let centre = (m.size.w as f64 / 2.0, m.size.h as f64 / 2.0);
+        let d = 1.0 / cur.zoom - 1.0 / goal.zoom;
+        let (w, h) = if dz.abs() > 1e-3 { ((goal.x - cur.x) / d, (goal.y - cur.y) / d) } else { centre };
+        let (c, g) = (cur.screen_to_canvas((w, h)), goal.screen_to_canvas((w, h)));
+        let near = {
+            let (cc, gc) = (cur.screen_to_canvas(centre), goal.screen_to_canvas(centre));
+            (gc.0 - cc.0).abs() * cur.zoom < 0.25 && (gc.1 - cc.1).abs() * cur.zoom < 0.25 && dz.abs() < 1e-3
+        };
         let moving = if tag != lowest_tag(m.tagset) || near || self.config.view_ms <= 0.0 {
             m.vp[tag] = goal;
             m.target = None;
@@ -588,7 +596,7 @@ impl Uwc {
 
     pub fn zoom_by(&mut self, factor: f64) {
         let c = (self.cursor.x, self.cursor.y);
-        self.with_viewport(|v, _| v.zoom_at(factor, c));
+        self.with_viewport_eased(|v, _| v.zoom_at(factor, c));
     }
 
     // ---- windows ------------------------------------------------------------------------
@@ -1001,7 +1009,7 @@ impl Uwc {
             Action::Zoom(f) => self.zoom_by(*f),
             Action::ZoomReset => {
                 let c = (self.cursor.x, self.cursor.y);
-                self.with_viewport(|v, _| v.set_zoom_at(1.0, c));
+                self.with_viewport_eased(|v, _| v.set_zoom_at(1.0, c));
             }
             Action::CenterWindow => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {

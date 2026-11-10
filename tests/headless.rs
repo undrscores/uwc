@@ -723,13 +723,22 @@ fn view_moves_ease_to_their_target() {
     assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 500.0);
     uwc.wait("the view to settle", |s| s["monitors"][0]["view_moving"] == false);
     assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 500.0);
-    // An instant change (zoom) mid-move finishes the move first instead of dropping it.
+    // Zoom eases too, about its anchor, and builds on the target like pans do.
     uwc.ok("panto 0 0");
-    uwc.ok("zoom 2");
+    uwc.ok("zoom 2 100 100");
+    uwc.ok("zoom 4 100 100");
     let s = uwc.state();
-    // Settled at x=0, then zoomed about the middle of the 1000 px screen: x = 500 - 500/2.
-    assert_eq!(s["monitors"][0]["viewport"]["x"], 250.0, "{s:#}");
-    assert_eq!(s["monitors"][0]["view_moving"], false);
+    let v = &s["monitors"][0]["viewport"];
+    let f = |k: &str| v[k].as_f64().unwrap();
+    assert_eq!((f("x"), f("y"), f("zoom")), (75.0, 75.0, 4.0), "{s:#}");
+    assert_eq!(s["monitors"][0]["view_moving"], true);
+    let s = uwc.wait("the zoom to settle", |s| s["monitors"][0]["view_moving"] == false);
+    assert_eq!(s["monitors"][0]["viewport"]["zoom"], 4.0);
+    // An instant change (the overview) in the middle of a move finishes it first.
+    uwc.ok("panto 300 0");
+    uwc.ok("overview");
+    uwc.ok("overview");
+    assert_eq!(uwc.state()["monitors"][0]["viewport"]["x"], 300.0);
     // view-ms 0 jumps.
     uwc.ok("set view-ms 0");
     uwc.ok("pan 40 0");
@@ -1303,6 +1312,7 @@ fn zoomed_windows_are_asked_to_render_sharper() {
         std::thread::sleep(Duration::from_millis(150));
         c.sync();
     };
+    uwc.ok("set view-ms 0"); // these are about render scale, not easing
     uwc.ok("zoom 2");
     c.sync();
     assert_eq!(c.app.frac, Some(120), "not while the zoom may still be moving");
@@ -1350,6 +1360,7 @@ fn windows_have_their_own_scale_on_the_canvas() {
     let qh = c.queue.handle();
     let mgr: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
     let _fs = mgr.get_fractional_scale(&w.surface, &qh, ());
+    uwc.ok("set view-ms 0"); // these are about render scale, not easing
     uwc.ok("zoom 4");
     std::thread::sleep(Duration::from_millis(120));
     c.sync();

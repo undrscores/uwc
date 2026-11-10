@@ -346,7 +346,7 @@ impl Uwc {
             R::Zoom(z, at) => {
                 let (sw, sh) = self.screen_size();
                 let at = at.unwrap_or((sw / 2.0, sh / 2.0));
-                self.with_viewport(|v, _| v.set_zoom_at(z, at));
+                self.with_viewport_eased(|v, _| v.set_zoom_at(z, at));
             }
             R::View(t) => self.set_tagset(1 << t),
             R::ToggleView(t) => {
