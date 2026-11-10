@@ -108,7 +108,8 @@ impl Uwc {
         let mut windows: Vec<SavedWindow> = self
             .clients
             .iter()
-            .filter(|c| c.mapped && !c.app_id().is_empty())
+            // A window that hid itself (unmapped but it was here) keeps its place in the session.
+            .filter(|c| (c.mapped || c.ever_mapped) && !c.app_id().is_empty())
             .map(|c| {
                 let (x, y) = match c.pin {
                     Some(p) => (p.x, p.y),

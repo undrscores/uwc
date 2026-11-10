@@ -86,6 +86,8 @@ pub struct Client {
     pub tags: u32,
     /// False until the client has committed a first buffer.
     pub mapped: bool,
+    /// True once it has mapped (a window that hides itself maps again where it was).
+    pub ever_mapped: bool,
     /// Wants attention (set by xdg-activation once that exists).
     pub urgent: bool,
     /// Pinned: the window's screen position (geometry top-left, logical px). It stays there while the
@@ -285,6 +287,8 @@ pub struct Uwc {
     pub drag: Option<Drag>,
     /// Pointer position at the previous step of a pan drag.
     pub drag_last: Point<f64, Logical>,
+    /// A mouse bind took the press, so the matching release is swallowed too.
+    pub consumed_press: bool,
     /// Bumped on anything that changes how decorations look, so the damage tracker redraws them.
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
@@ -394,6 +398,7 @@ impl Uwc {
             cursor: (0.0, 0.0).into(),
             drag: None,
             drag_last: (0.0, 0.0).into(),
+            consumed_press: false,
             deco_commit: Default::default(),
             redraw: true,
             minimize_stamp: 0,
