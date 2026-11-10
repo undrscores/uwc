@@ -1756,6 +1756,49 @@ fn dragging_a_window_under_another_moves_that_window() {
 }
 
 #[test]
+fn hooks_run_commands_with_the_event_in_their_environment() {
+    let log = std::env::temp_dir().join(format!("uwc-test-{}-hooks.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let l = log.display();
+    let line =
+        r#"printf '%s|%s|%s|%s\n' $UWC_EVENT $UWC_APP_ID $UWC_TITLE $UWC_TAGSET >> LOG"#.replace("LOG", &l.to_string());
+    let cfg = format!(
+        "hooks {{\n window-open \"{line}\"\n window-close \"{line}\"\n focus \"{line}\"\n tag-change \"{line}\"\n}}\n"
+    );
+    let mut uwc = Uwc::start("hooks", Some(&cfg));
+    assert!(uwc.state()["config_error"].is_null(), "{}", uwc.state()["config_error"]);
+    let mut c = uwc.connect();
+    let w = c.window("Hooked", 200, 150);
+    let read = || std::fs::read_to_string(&log).unwrap_or_default();
+    let wait_for = |want: &str| {
+        let start = Instant::now();
+        while !read().lines().any(|l| l == want) {
+            assert!(start.elapsed() < Duration::from_secs(5), "waiting for {want:?}, have:\n{}", read());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for("window-open|uwc.test|Hooked|1");
+    wait_for("focus|uwc.test|Hooked|1");
+    uwc.ok("view 2");
+    wait_for("tag-change|2||");
+    uwc.ok("view 1");
+    wait_for("tag-change|1||");
+    w.toplevel.destroy();
+    w.xdg.destroy();
+    w.surface.destroy();
+    c.sync();
+    wait_for("window-close|uwc.test|Hooked|1");
+    // A bad hook name is a config error, not silence.
+    let bad_cfg = std::env::temp_dir().join(format!("uwc-test-{}-hooks-bad.kdl", std::process::id()));
+    std::fs::write(&bad_cfg, "hooks { sunrise \"x\" }").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_uwc")).args(["-t", "-c", bad_cfg.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown hook `sunrise`"), "{:?}", out);
+    let _ = std::fs::remove_file(&bad_cfg);
+    let _ = std::fs::remove_file(&log);
+}
+
+#[test]
 fn windows_animate_in_moves_and_tag_switches() {
     let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
     let mut c = uwc.connect();

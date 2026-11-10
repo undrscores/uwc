@@ -272,6 +272,7 @@ pub struct Config {
     pub dir: PathBuf,
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
+    pub hooks: crate::hooks::Hooks,
     pub keyboard: Keyboard,
     pub touchpad: Pointer,
     pub mouse_input: Pointer,
@@ -390,6 +391,7 @@ impl Config {
             dir: path.and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
             keys: Vec::new(),
             mouse: Vec::new(),
+            hooks: Default::default(),
             keyboard: Keyboard::default(),
             touchpad: Pointer::default(),
             mouse_input: Pointer::default(),
@@ -401,6 +403,9 @@ impl Config {
         for n in &nodes {
             match n.name.as_str() {
                 "vars" | "include" | "binds" => {}
+                "hooks" => {
+                    cfg.hooks = crate::hooks::Hooks::parse(n).with_context(|| format!("hooks (line {})", n.line))?
+                }
                 "rule" => {
                     let r = crate::rules::Rule::parse(n, &vars).with_context(|| format!("rule (line {})", n.line))?;
                     cfg.rules.push(r);

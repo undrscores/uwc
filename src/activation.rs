@@ -30,6 +30,7 @@ impl XdgActivationHandler for Uwc {
             self.focus_and_reveal(id);
         } else {
             self.clients[i].urgent = true;
+            self.run_hook(crate::hooks::Hook::Urgent, Some(i));
             self.deco_commit.increment();
             self.ipc.dirty = true;
             self.damage();

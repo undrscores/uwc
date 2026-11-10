@@ -169,6 +169,15 @@ options {
 //     inactive-opacity 0.85
 // }
 
+// Hooks: a command (through sh -c) for an event, to script a desktop without a listener process. The
+// environment has UWC_EVENT and, for window events, UWC_WINDOW_ID, UWC_APP_ID, UWC_TITLE and UWC_TAGS
+// (a bit mask, tag 1 = 1); UWC_TAGSET is the tags in view. Events: window-open, window-close, focus,
+// tag-change, urgent. Commands run in the background.
+// hooks {
+//     window-open "notify-send opened \"$UWC_TITLE\""
+//     tag-change  "pkill -RTMIN+8 waybar"
+// }
+
 binds {
     Mod+T { spawn "foot"; }
     Mod+Return { spawn "foot"; }

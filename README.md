@@ -34,7 +34,7 @@ IPC, improved where uwm was awkward.
 - **Plays well with the rest of the desktop.** layer-shell bars and launchers, foreign-toplevel and ext-workspace for
   taskbars, Quickshell window previews, screen capture and portal screen sharing, session lock, idle notify and
   inhibit, clipboard managers, virtual keyboard and pointer, Xwayland.
-- **Scriptable.** A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
+- **Scriptable.** `hooks { }` runs a command on window open, close, focus, tag change or urgency. A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
   move and focus windows, pan and zoom.
 - **Doesn't fall over.** `uwc doctor` checks your seat, GPU and libraries before the first run; a bug in a handler is
   logged and survived instead of taking every window down.

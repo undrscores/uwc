@@ -1288,10 +1288,14 @@ impl Uwc {
 
     /// Give a client keyboard focus, optionally raising it (sloppy focus does not).
     pub fn set_focus(&mut self, id: Option<u32>, raise: bool) {
+        let changed = self.focus != id;
         self.focus = id;
         if let Some(i) = id.and_then(|id| self.client_index(id)).filter(|_| raise) {
             let c = self.clients.remove(i);
             self.clients.push(c);
+        }
+        if changed && id.is_some() {
+            self.run_hook(crate::hooks::Hook::Focus, id.and_then(|id| self.client_index(id)));
         }
         // Being focused answers the attention request (xdg-activation) that flagged it.
         if let Some(i) = id.and_then(|id| self.client_index(id)) {
@@ -1432,6 +1436,9 @@ impl Uwc {
     /// Take a client out of the list: keep its last frame for the fade-out, hand focus to what
     /// is left on top, and end a drag it was part of.
     pub fn remove_client(&mut self, i: usize) {
+        if self.clients[i].ever_mapped {
+            self.run_hook(crate::hooks::Hook::WindowClose, Some(i));
+        }
         // Keep the last frame to fade out over close-ms: the one captured when the close was
         // asked for, else one captured now if the surface is still alive (skipped without a
         // renderer, so closing stays instant headless).
@@ -1557,6 +1564,7 @@ impl Uwc {
             for m in &mut self.monitors {
                 m.overview = None;
             }
+            self.run_hook(crate::hooks::Hook::TagChange, None);
         }
         // Windows that just came into view fade in.
         if self.config.tag_ms > 0.0 {

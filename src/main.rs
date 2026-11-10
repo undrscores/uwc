@@ -16,6 +16,7 @@ mod extras;
 mod frames;
 mod handlers;
 mod hints;
+mod hooks;
 mod idle;
 mod ime;
 mod input;

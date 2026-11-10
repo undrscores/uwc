@@ -177,6 +177,7 @@ impl Uwc {
     fn map_client(&mut self, i: usize) {
         let n = self.clients.iter().filter(|c| c.mapped).count() as i32;
         self.clients[i].mapped = true;
+        let first_map = !self.clients[i].ever_mapped;
         if !self.clients[i].ever_mapped {
             self.clients[i].ever_mapped = true;
             let open = self.clients[i].open.clone();
@@ -248,6 +249,9 @@ impl Uwc {
         // It takes the keyboard unless a rule says not to, or it opened out of sight.
         if self.clients[i].open.focus != Some(false) && self.visible(&self.clients[i]) {
             self.focus_client(Some(id));
+        }
+        if first_map {
+            self.run_hook(crate::hooks::Hook::WindowOpen, self.client_index(id));
         }
         self.refresh_pointer();
         self.damage();
