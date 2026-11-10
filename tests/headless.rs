@@ -799,6 +799,10 @@ impl Dispatch<xdg_popup::XdgPopup, ()> for App {
     }
 }
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
+noop!(
+    wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
+    wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1
+);
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
 noop!(wayland_client::protocol::wl_pointer::WlPointer);
@@ -1229,6 +1233,55 @@ fn windows_and_outputs_can_be_captured_through_the_ext_protocols() {
     c.sync();
     assert_eq!(c.app.cap_events, ["failed", "stopped"]);
     let _ = (list, osession);
+}
+
+#[test]
+fn a_virtual_pointer_moves_the_cursor_and_clicks() {
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("vptr", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _a = c.window("A", 200, 150);
+    let _b = c.window("B", 200, 150);
+    let (a, b) = (win(&uwc.state(), "A")["id"].as_u64().unwrap(), win(&uwc.state(), "B")["id"].as_u64().unwrap());
+    uwc.cmd(&format!("move {a} 100 100"));
+    uwc.cmd(&format!("move {b} 600 300"));
+    // Let the open and move animations settle: hit-testing follows what is drawn.
+    for _ in 0..100 {
+        if uwc.state()["monitors"][0]["animating"] == false {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    // Absolute motion maps onto the 1000x600 output: put the cursor over A's centre. B has the
+    // focus (it opened last); a click through the virtual pointer focuses A.
+    let st = uwc.state();
+    assert_eq!(st["keyboard_focus"]["window"], b);
+    let (vp, wa) = (&st["monitors"][0]["viewport"], win(&st, "A"));
+    let (px, py) = (
+        (num(&wa["x"]) - num(&vp["x"]) + num(&wa["width"]) / 2.0) as u32,
+        (num(&wa["y"]) - num(&vp["y"]) + num(&wa["height"]) / 2.0) as u32,
+    );
+    p.motion_absolute(0, px, py, 1000, 600);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!((num(&s["cursor"]["x"]), num(&s["cursor"]["y"])), (px as f64, py as f64));
+    p.button(1, 0x110, wayland_client::protocol::wl_pointer::ButtonState::Pressed);
+    p.button(2, 0x110, wayland_client::protocol::wl_pointer::ButtonState::Released);
+    p.frame();
+    c.sync();
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], a, "the click focused A");
+    // Relative motion moves from there.
+    p.motion(3, 10.0, -20.0);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!((num(&s["cursor"]["x"]), num(&s["cursor"]["y"])), (px as f64 + 10.0, py as f64 - 20.0));
 }
 
 #[test]

@@ -34,6 +34,7 @@ mod state;
 mod sync;
 mod toplevels;
 mod touch;
+mod virtual_pointer;
 mod workspace;
 mod xwayland;
 

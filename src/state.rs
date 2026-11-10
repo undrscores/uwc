@@ -553,6 +553,7 @@ impl Uwc {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let ipc = Ipc::new(&loop_handle, &socket_name)?;
+        crate::virtual_pointer::create_global(&dh);
         let primary_selection = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh);
         let extras = crate::extras::Extras::new(&dh, &primary_selection);
 

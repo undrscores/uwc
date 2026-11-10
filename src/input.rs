@@ -67,26 +67,12 @@ impl Uwc {
                 }
             }
             InputEvent::PointerMotion { event } => {
-                let t = Event::time_msec(&event);
-                let (dx, dy) = (event.delta_x(), event.delta_y());
-                let (sw, sh) = self.global_size();
-                let p: Point<f64, Logical> = (self.cursor.x + dx, self.cursor.y + dy).into();
-                // A locked pointer consumes the motion (the client reads the deltas); a
-                // confined one is kept inside the window.
-                if let Some(p) = self.apply_pointer_constraint(p, (dx, dy), t) {
-                    self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
-                    self.real_motion(t);
-                }
+                self.pointer_moved_by(event.delta_x(), event.delta_y(), Event::time_msec(&event));
             }
             InputEvent::PointerMotionAbsolute { event } => {
-                let t = Event::time_msec(&event);
                 let (w, h) = self.global_size();
                 let p = event.position_transformed((w as i32, h as i32).into());
-                let d = (p.x - self.cursor.x, p.y - self.cursor.y);
-                if let Some(p) = self.apply_pointer_constraint(p, d, t) {
-                    self.cursor = p;
-                    self.real_motion(t);
-                }
+                self.pointer_moved_to(p, Event::time_msec(&event));
             }
             InputEvent::PointerButton { event } => {
                 self.pointer_button(event.button_code(), event.state(), Event::time_msec(&event))
@@ -242,6 +228,27 @@ impl Uwc {
         }
     }
 
+    /// The pointer moved by `(dx, dy)` (a mouse, or a virtual pointer).
+    pub fn pointer_moved_by(&mut self, dx: f64, dy: f64, t: u32) {
+        let (sw, sh) = self.global_size();
+        let p: Point<f64, Logical> = (self.cursor.x + dx, self.cursor.y + dy).into();
+        // A locked pointer consumes the motion (the client reads the deltas); a
+        // confined one is kept inside the window.
+        if let Some(p) = self.apply_pointer_constraint(p, (dx, dy), t) {
+            self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
+            self.real_motion(t);
+        }
+    }
+
+    /// The pointer was put at `p` (a tablet or other absolute device, or a virtual pointer).
+    pub fn pointer_moved_to(&mut self, p: Point<f64, Logical>, t: u32) {
+        let d = (p.x - self.cursor.x, p.y - self.cursor.y);
+        if let Some(p) = self.apply_pointer_constraint(p, d, t) {
+            self.cursor = p;
+            self.real_motion(t);
+        }
+    }
+
     fn mod_held(&self, m: &ModifiersState) -> bool {
         match self.config.mod_key {
             ModKey::Super => m.logo,
@@ -363,7 +370,7 @@ impl Uwc {
         self.drag_last = self.cursor;
     }
 
-    fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
+    pub fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
         let serial = SERIAL_COUNTER.next_serial();
         // A session lock takes the button: it goes to the lock surface, and nothing else happens.
         if self.is_locked() {
