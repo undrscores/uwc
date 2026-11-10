@@ -127,6 +127,10 @@ impl Uwc {
                 ptr.axis(self, frame);
                 ptr.frame(self);
             }
+            InputEvent::TouchDown { event } => self.touch_input_down::<B>(event),
+            InputEvent::TouchMotion { event } => self.touch_input_motion::<B>(event),
+            InputEvent::TouchUp { event } => self.touch_input_up::<B>(event),
+            InputEvent::TouchCancel { .. } => self.touch_cancel(),
             // Touchpad gestures. Three fingers are the compositor's: a swipe pans the view, a
             // pinch zooms it. Anything else goes to the client under the pointer.
             InputEvent::GestureSwipeBegin { event } => {

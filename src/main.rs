@@ -32,6 +32,7 @@ mod sessionlock;
 mod state;
 mod sync;
 mod toplevels;
+mod touch;
 mod workspace;
 mod xwayland;
 

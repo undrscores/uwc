@@ -479,6 +479,7 @@ pub struct Uwc {
     pub drag: Option<Drag>,
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
+    pub touch: crate::touch::TouchState,
     pub selection_owner: [SelectionOwner; 2],
     pub primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState,
     /// Pointer position at the previous step of a pan drag.
@@ -530,6 +531,7 @@ impl Uwc {
         let mut seat = seat_state.new_wl_seat(&dh, "seat0");
         seat.add_keyboard(Default::default(), 200, 25)?;
         seat.add_pointer();
+        seat.add_touch();
 
         let socket_name = Self::init_socket(&loop_handle)?;
 
@@ -620,6 +622,7 @@ impl Uwc {
             cursor: (0.0, 0.0).into(),
             drag: None,
             gesture: None,
+            touch: Default::default(),
             selection_owner: [SelectionOwner::None; 2],
             drag_last: (0.0, 0.0).into(),
             consumed_press: false,
@@ -1095,8 +1098,9 @@ impl Uwc {
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
-        let c = (self.cursor.x, self.cursor.y);
-        self.with_viewport_eased(|v, _| v.zoom_at(factor, c));
+        // The viewport's screen space is the monitor's own.
+        let p = self.cursor - self.origin_of(self.cur);
+        self.with_viewport_eased(|v, _| v.zoom_at(factor, (p.x, p.y)));
     }
 
     // ---- windows ------------------------------------------------------------------------
