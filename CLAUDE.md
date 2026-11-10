@@ -41,7 +41,10 @@ uwm is awkward (the user said it need not be 1:1); `README.md` has the status ta
   per event-loop turn (`ipc_flush`).
 - Adding an option: a field (in `rules::Deco` if it is about how a window looks, else `Config`) and one line in a
   table in `options.rs` (name, field, range); that gives parsing, range checks, `set` and `get`. Then document it in
-  `config.def.kdl` (a test fails until you do). A new value type implements `OptValue`. Adding an action: `Action`,
+  `config.def.kdl` (a test fails until you do). A new value type implements `OptValue`.
+- Adding an IPC command: a `Request` variant, its parsing in `Request::parse`, a line in `COMMANDS` (a test checks),
+  and its arm in `Uwc::ipc_exec`. Replies are `protocol` types, never hand-built JSON.
+- Adding an action: `Action`,
   `parse_action`, `run_action`, a default bind if sensible.
 - Animations are stepped from the frame handler, never timers: set `animating` while drawing a frame that needs a
   next one (the border spin does), and the backend asks for it.
