@@ -43,8 +43,7 @@ impl Pinch {
         self.fingers.iter().any(|f| f.0 == slot)
     }
 
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.fingers.is_empty()
     }
 
@@ -151,6 +150,11 @@ impl Uwc {
                 self.touch.forwarded.insert(slot);
             }
         } else {
+            if self.touch.pinch.is_empty() {
+                self.fling = None;
+                self.pan_vel = (0.0, 0.0);
+                self.pan_sampled = std::time::Instant::now();
+            }
             self.touch.pinch.down(slot, (local.x, local.y));
         }
     }
@@ -160,6 +164,7 @@ impl Uwc {
         let local = pos - self.origin_of(self.cur);
         if self.touch.pinch.owns(slot) {
             if let Some(s) = self.touch.pinch.motion(slot, (local.x, local.y)) {
+                self.pan_sample(s.dx, s.dy);
                 self.with_viewport(|v, _| {
                     v.pan_screen(s.dx, s.dy);
                     if s.zoom != 1.0 {
@@ -188,6 +193,10 @@ impl Uwc {
     pub fn touch_up(&mut self, slot: i32, time: u32) {
         if self.touch.pinch.owns(slot) {
             self.touch.pinch.up(slot);
+            // The last finger of a drag lifting while it moves is a fling.
+            if self.touch.pinch.is_empty() {
+                self.pan_release();
+            }
             return;
         }
         if self.touch.forwarded.remove(&slot) {

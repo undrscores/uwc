@@ -62,6 +62,7 @@ options {
     move-ms 140                 // windows moved by key or IPC glide for about this long; 0 = jump. Dragging is always instant
     tag-ms 140                  // windows that come into view with a tag switch fade in over this long; 0 = at once
     close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
+    pan-momentum-ms 600         // let go of a touchpad swipe or a touch drag while moving and the view glides on, losing most of its speed in about this long; 0 = stops dead. Not uwm's option
     view-ms 180                 // eased view moves (pan and zoom keys, scroll zoom, center/fit, reveal, bookmarks, home) take about this long; 0 = jump. Dragging is always instant
     move-step 50                // canvas px for move-window / resize-window
     zoom-scroll 1.1             // zoom factor per scroll notch with Mod held

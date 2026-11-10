@@ -113,6 +113,30 @@ impl Uwc {
                 ptr.axis(self, frame);
                 ptr.frame(self);
             }
+            // Graphics tablets act as an absolute mouse: the pen moves the pointer, touching down
+            // is the left button, the pen's buttons are the buttons they report. (Pressure and
+            // tilt are not forwarded: there is no tablet protocol yet.)
+            InputEvent::TabletToolAxis { event } => {
+                let (w, h) = self.global_size();
+                let p = event.position_transformed((w as i32, h as i32).into());
+                self.pointer_moved_to(p, Event::time_msec(&event));
+            }
+            InputEvent::TabletToolTip { event } => {
+                use smithay::backend::input::{TabletToolTipEvent, TabletToolTipState};
+                let state = match event.tip_state() {
+                    TabletToolTipState::Down => ButtonState::Pressed,
+                    TabletToolTipState::Up => ButtonState::Released,
+                };
+                self.idle_notifier.notify_activity(&self.seat);
+                let (w, h) = self.global_size();
+                let p: Point<f64, Logical> = (event.x_transformed(w as i32), event.y_transformed(h as i32)).into();
+                self.pointer_moved_to(p, Event::time_msec(&event));
+                self.pointer_button(BTN_LEFT, state, Event::time_msec(&event));
+            }
+            InputEvent::TabletToolButton { event } => {
+                use smithay::backend::input::TabletToolButtonEvent;
+                self.pointer_button(event.button(), event.button_state(), Event::time_msec(&event));
+            }
             InputEvent::TouchDown { event } => self.touch_input_down::<B>(event),
             InputEvent::TouchMotion { event } => self.touch_input_motion::<B>(event),
             InputEvent::TouchUp { event } => self.touch_input_up::<B>(event),
@@ -123,6 +147,9 @@ impl Uwc {
                 let (time, fingers) = (Event::time_msec(&event), event.fingers());
                 if fingers == 3 && !self.is_locked() {
                     self.gesture = Some(Gesture::Swipe);
+                    self.fling = None;
+                    self.pan_vel = (0.0, 0.0);
+                    self.pan_sampled = std::time::Instant::now();
                 } else if !self.is_locked() {
                     self.pointer().gesture_swipe_begin(
                         self,
@@ -135,6 +162,7 @@ impl Uwc {
                 match self.gesture {
                     Some(Gesture::Swipe) => {
                         self.with_viewport(|v, _| v.pan_screen(event.delta_x(), event.delta_y()));
+                        self.pan_sample(event.delta_x(), event.delta_y());
                         self.refresh_pointer();
                         self.damage();
                     }
@@ -151,6 +179,9 @@ impl Uwc {
                 let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
                 if self.gesture == Some(Gesture::Swipe) {
                     self.gesture = None;
+                    if !cancelled {
+                        self.pan_release();
+                    }
                 } else if !self.is_locked() {
                     self.pointer().gesture_swipe_end(
                         self,

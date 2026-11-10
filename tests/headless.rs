@@ -1364,6 +1364,31 @@ fn view_moves_ease_to_their_target() {
 }
 
 #[test]
+fn a_released_swipe_glides_on_and_slows_down() {
+    let mut uwc = Uwc::start("fling", None);
+    let x0 = uwc.state()["monitors"][0]["viewport"]["x"].as_f64().unwrap();
+    // Content moving left at 2000 px/s (the view goes right), losing speed with a 600 ms constant:
+    // it travels about v * (600 / 4000) = 300 px.
+    uwc.ok("fling -2000 0");
+    assert_eq!(uwc.state()["monitors"][0]["view_moving"], true);
+    let s = uwc.wait("the glide to end", |s| s["monitors"][0]["view_moving"] == false);
+    let dx = s["monitors"][0]["viewport"]["x"].as_f64().unwrap() - x0;
+    assert!((200.0..400.0).contains(&dx), "glided {dx} px");
+    assert_eq!(s["monitors"][0]["animating"], false);
+    // Doing anything else with the view stops a glide at once.
+    uwc.ok("fling 2000 0");
+    uwc.ok("pan 0 10");
+    assert_eq!(uwc.state()["monitors"][0]["view_moving"], true, "the pan itself eases");
+    let s = uwc.wait("the pan to end", |s| s["monitors"][0]["view_moving"] == false);
+    let x1 = s["monitors"][0]["viewport"]["x"].as_f64().unwrap();
+    assert!(x1 > x0 + 100.0, "the second fling was cancelled before it travelled far: {x1} vs {x0}");
+    // 0 turns momentum off: letting go stops dead.
+    uwc.ok("set pan-momentum-ms 0");
+    uwc.ok("fling -2000 0");
+    assert_eq!(uwc.state()["monitors"][0]["view_moving"], false);
+}
+
+#[test]
 fn windows_animate_in_moves_and_tag_switches() {
     let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
     let mut c = uwc.connect();

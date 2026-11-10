@@ -185,7 +185,7 @@ impl Uwc {
                     },
                     scale: m.output.current_scale().fractional_scale(),
                     viewport: view(&m.target_viewport(ts)),
-                    view_moving: m.target.is_some(),
+                    view_moving: m.target.is_some() || self.fling.is_some_and(|f| f.mon == mi),
                     animating: self.anim_running(),
                     work_area: P::Rect { x: wa.0 as i64, y: wa.1 as i64, width: wa.2 as i64, height: wa.3 as i64 },
                     layers: self.layer_info(),
@@ -349,6 +349,11 @@ impl Uwc {
                 }
             }
             R::Pan(dx, dy) => self.pan_canvas(dx, dy),
+            R::Fling(vx, vy) => {
+                self.pan_vel = (vx, vy);
+                self.pan_sampled = std::time::Instant::now();
+                self.pan_release();
+            }
             R::PanTo(x, y) => self.with_viewport_eased(|v, _| {
                 v.x = x;
                 v.y = y;

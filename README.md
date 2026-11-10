@@ -51,6 +51,12 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Output capture: wlr-screencopy (grim, screen recorders, Quickshell's monitor `ScreencopyView`): the whole output or a region, pointer optional, `copy_with_damage` answered on the next drawn frame | done |
 | wlr-foreign-toplevel-management: the window list for taskbars and shells (Quickshell's ToplevelManager, Waybar): title, app-id, output, activated/minimized/fullscreen; activate (restores and reveals), close, minimize, fullscreen | done |
 | wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
+| Everyday protocols: cursor-shape-v1 (GTK/Qt cursors), data-control (wlr and ext: wl-clipboard, clipboard managers), virtual-keyboard-v1 (wtype, on-screen keyboards), wlr-virtual-pointer (wayvnc, wlrctl, input sharing), single-pixel-buffer, xdg-foreign, xdg-dialog, content-type, xdg-system-bell | done |
+| keyboard-shortcuts-inhibit (VMs, remote desktop): an inhibitor on the focused surface takes every key; `Mod+Shift+Escape` (`toggle-shortcuts-inhibit`) takes them back and is the one bind that still runs | done |
+| Dialogs: a toplevel with an xdg parent (or X11 transient-for) opens centred over its parent, on its tags and scale, pinned where the parent is pinned, instead of somewhere in the middle of the view | done |
+| Touchscreens: a touch on a window or layer surface goes to its client (and focuses it like a click); on empty canvas one finger drags the view, two pan and pinch-zoom it. Graphics tablets act as an absolute mouse (pen = pointer, tip = left button; no pressure or tilt yet) | done, untested on hardware |
+| Momentum: let go of a three-finger swipe or a touch drag while moving and the view glides on (`pan-momentum-ms`, IPC `fling VX VY`) | done |
+| Screen capture for portals: ext-foreign-toplevel-list, ext-image-capture-source, ext-image-copy-capture (outputs and windows, shm, `paint_cursors`); with wlr-screencopy this is what xdg-desktop-portal-wlr, OBS and browsers' screen sharing use. `uwc-portals.conf` (installed by `make install`) picks the wlr portal for ScreenCast and Screenshot | done, no dmabuf yet |
 
 **The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
 types and was reviewed against smithay's source, but the machine it was written on has no GPU or seat. Expect the first
@@ -62,12 +68,16 @@ canvas), but the machine this was written on has no GPU or seat, so the udev pat
 
 Not yet (roughly in the order to do them):
 
-1. The rest of the animations (momentum; open, move, tag fade, the close fade and eased pan and zoom are done), driven
+0. **Run it on real hardware** (the udev backend, NVIDIA, a portal for screen sharing, touch and tablet devices): the
+   protocols above are tested against headless and nested runs only.
+1. The rest of the animations (open, move, tag fade, the close fade, eased pan and zoom and momentum are done), driven
    from the frame callback, never timers.
 2. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.
-3. Multi-GPU (output-management, clipboard bridging for Xwayland, animated cursors, DPMS/output
+3. Protocols still missing: tablet-v2 (pressure, tilt), presentation-time, security-context (Flatpak), alpha-modifier,
+   fifo/commit-timing, a dmabuf path for capture, xdg-toplevel-icon.
+4. Multi-GPU (output-management, clipboard bridging for Xwayland, animated cursors, DPMS/output
    power, popup grabs, xdg-activation, idle-inhibit/idle-notify, session-lock, pointer constraints,
    Xwayland and IME are done).
 
@@ -153,6 +163,10 @@ src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
 src/cursor.rs      the pointer image (xcursor theme, animated cursors, client surfaces, fallback arrow)
 src/output_management.rs  zwlr-output-management-v1: heads and apply
 src/output_power.rs       zwlr-output-power-management-v1: DPMS blanking
+src/extras.rs      small protocols: cursor-shape, data-control, virtual keyboard, shortcuts inhibit, xdg-foreign, ...
+src/touch.rs       touchscreen input and its pan/pinch gesture maths
+src/virtual_pointer.rs  wlr-virtual-pointer
+src/ext_capture.rs ext-foreign-toplevel-list and ext-image-copy-capture (portal screen sharing)
 src/xwayland.rs    Xwayland: X11 windows as clients, clipboard/primary bridging
 src/backend/       udev (real session), winit (nested), headless (tests)
 tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland clients, drive over IPC

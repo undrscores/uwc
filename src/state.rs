@@ -258,6 +258,15 @@ pub enum Gesture {
     },
 }
 
+/// A touchpad or touch pan that was let go while moving: the view keeps gliding, slowing down
+/// (`pan-momentum-ms`). Screen px per second, on monitor `mon`.
+#[derive(Debug, Clone, Copy)]
+pub struct Fling {
+    pub mon: usize,
+    pub vx: f64,
+    pub vy: f64,
+}
+
 /// Which side owns a selection target (clipboard, primary): a wayland client, an X11 client
 /// (via the Xwayland bridge), or nobody.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -480,6 +489,10 @@ pub struct Uwc {
     pub drag: Option<Drag>,
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
+    pub fling: Option<Fling>,
+    /// The recent speed of a pan gesture (screen px/s) and when it was last sampled.
+    pub pan_vel: (f64, f64),
+    pub pan_sampled: Instant,
     pub touch: crate::touch::TouchState,
     pub selection_owner: [SelectionOwner; 2],
     pub primary_selection: smithay::wayland::selection::primary_selection::PrimarySelectionState,
@@ -625,6 +638,9 @@ impl Uwc {
             cursor: (0.0, 0.0).into(),
             drag: None,
             gesture: None,
+            fling: None,
+            pan_vel: (0.0, 0.0),
+            pan_sampled: Instant::now(),
             touch: Default::default(),
             selection_owner: [SelectionOwner::None; 2],
             drag_last: (0.0, 0.0).into(),
@@ -922,6 +938,7 @@ impl Uwc {
 
     /// `with_viewport`, on monitor `m`.
     pub fn with_viewport_on(&mut self, m: usize, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        self.fling = None;
         let area = self.work_area_of(m);
         let tagset = self.tagset;
         if let Some(mon) = self.monitors.get_mut(m) {
@@ -940,6 +957,7 @@ impl Uwc {
 
     /// `with_viewport_eased`, on monitor `m`.
     pub fn with_viewport_eased_on(&mut self, m: usize, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        self.fling = None;
         if self.config.view_ms <= 0.0 {
             return self.with_viewport_on(m, f);
         }
@@ -1007,7 +1025,8 @@ impl Uwc {
 
     /// Something is easing (a view, a window, or a closing window fading out).
     pub fn anim_running(&self) -> bool {
-        self.monitors.iter().any(|m| m.target.is_some())
+        self.fling.is_some()
+            || self.monitors.iter().any(|m| m.target.is_some())
             || self.clients.iter().any(|c| !c.fx.at_rest())
             || !self.ghosts.is_empty()
     }
@@ -1023,10 +1042,52 @@ impl Uwc {
         let now = Instant::now();
         let dt = now.duration_since(self.anim_stepped).as_secs_f64().min(0.05);
         self.anim_stepped = now;
-        let view = self.step_view(dt);
+        let view = self.step_view(dt) | self.step_fling(dt);
         let fx = self.step_fx(dt);
         let ghosts = self.step_ghosts(dt);
         view || fx || ghosts
+    }
+
+    /// A pan gesture moved the view by `(dx, dy)` screen px: remember how fast.
+    pub fn pan_sample(&mut self, dx: f64, dy: f64) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.pan_sampled).as_secs_f64().clamp(0.001, 0.1);
+        self.pan_sampled = now;
+        let (ix, iy) = (dx / dt, dy / dt);
+        self.pan_vel = (self.pan_vel.0 * 0.6 + ix * 0.4, self.pan_vel.1 * 0.6 + iy * 0.4);
+    }
+
+    /// A pan gesture ended: if the fingers were still moving, the view carries on.
+    pub fn pan_release(&mut self) {
+        let (vx, vy) = std::mem::take(&mut self.pan_vel);
+        let fresh = self.pan_sampled.elapsed().as_secs_f64() < 0.08;
+        if self.config.pan_momentum_ms > 0.0 && fresh && vx.hypot(vy) > 150.0 {
+            if !self.anim_running() {
+                self.begin_anim();
+            }
+            self.fling = Some(Fling { mon: self.cur, vx, vy });
+            self.damage();
+        }
+    }
+
+    /// The view glides on after a fling, losing speed by the same fraction per time.
+    fn step_fling(&mut self, dt: f64) -> bool {
+        let Some(mut f) = self.fling else { return false };
+        let tau = (self.config.pan_momentum_ms / 1000.0 / 4.0).max(1e-3);
+        let k = (-dt / tau).exp();
+        f.vx *= k;
+        f.vy *= k;
+        if f.vx.hypot(f.vy) < 8.0 || f.mon >= self.monitors.len() {
+            self.fling = None;
+            return false;
+        }
+        let tagset = self.tagset;
+        self.monitors[f.mon].overview = None;
+        self.monitors[f.mon].viewport_mut(tagset).pan_screen(f.vx * dt, f.vy * dt);
+        self.fling = Some(f);
+        self.refresh_pointer();
+        self.damage();
+        true
     }
 
     /// Windows' open, move and tag fades close in on rest, each by the same fraction per time.
