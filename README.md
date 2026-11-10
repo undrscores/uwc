@@ -33,6 +33,8 @@ IPC, improved where uwm was awkward.
   inhibit, clipboard managers, virtual keyboard and pointer, Xwayland.
 - **Scriptable.** A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
   move and focus windows, pan and zoom.
+- **Doesn't fall over.** `uwc doctor` checks your seat, GPU and libraries before the first run; a bug in a handler is
+  logged and survived instead of taking every window down.
 - **Session restore.** Window positions, sizes, tags and views come back when the apps do.
 
 ## Installation

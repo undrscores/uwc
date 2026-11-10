@@ -87,6 +87,7 @@ impl Uwc {
             .arg(screens)
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
+            .env("UWC_DEBUG_PANIC", "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Some(c) = config {
@@ -1482,6 +1483,74 @@ fn jump_finds_a_window_on_any_tag_and_brings_it_into_view() {
     let s = uwc.state();
     assert_eq!(s["keyboard_focus"]["window"], b);
     assert_eq!(win(&s, "Beta build log")["minimized"], false);
+}
+
+#[test]
+fn a_panic_in_a_handler_does_not_take_the_session_down() {
+    let mut uwc = Uwc::start("panic", None);
+    let mut c = uwc.connect();
+    let _w = c.window("Survivor", 200, 150);
+    let id = win(&uwc.state(), "Survivor")["id"].as_u64().unwrap();
+    let before = uwc.state()["windows"].as_array().unwrap().len();
+    let sock = |u: &Uwc| {
+        std::fs::read_dir(&u.dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().ends_with(".sock"))
+            .map(|e| e.path())
+    };
+    // The panic happens while this very request is handled, so the reply never comes.
+    writeln!(uwc.ipc, "crash").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc is still running");
+    // A fresh connection works, the window is still there and the wayland client is still connected.
+    let s = UnixStream::connect(sock(&uwc).unwrap()).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    uwc.reader = BufReader::new(s.try_clone().unwrap());
+    uwc.ipc = s;
+    assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), before);
+    uwc.ok(&format!("focus {id}"));
+    c.sync();
+    // Three in a row mean something is badly wrong: the session is saved and uwc exits non-zero.
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        if let Some(Ok(mut s)) = sock(&uwc).map(UnixStream::connect) {
+            let _ = writeln!(s, "crash");
+            held.push(s);
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let start = Instant::now();
+    let status = loop {
+        if let Some(st) = uwc.child.try_wait().unwrap() {
+            break st;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "uwc should have given up");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success());
+}
+
+#[test]
+fn doctor_reports_problems_and_exits_nonzero() {
+    let dir = std::env::temp_dir().join(format!("uwc-test-{}-doctor", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad = dir.join("bad.kdl");
+    std::fs::write(&bad, "options { corner-radius \"wide\" }").unwrap();
+    // No runtime dir and a config that does not parse: both are failures with a way out.
+    let out = Command::new(env!("CARGO_BIN_EXE_uwc"))
+        .args(["doctor", "-c", bad.to_str().unwrap()])
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("FAIL  XDG_RUNTIME_DIR is not set"), "{text}");
+    assert!(text.contains("FAIL  config:"), "{text}");
+    assert!(text.contains("-> "), "every problem says what to do: {text}");
+    assert!(text.trim_end().ends_with("warnings") || text.contains(" failed, "), "{text}");
+    // It changes nothing and does not need a compositor.
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

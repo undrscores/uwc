@@ -21,6 +21,8 @@ pub enum Request {
     GetWindow(u32),
     Pan(f64, f64),
     PanTo(f64, f64),
+    /// Panic inside the compositor, to test that it survives (only with UWC_DEBUG_PANIC=1).
+    Crash,
     /// The window whose app-id and title best match this text (`#12` = window 12), brought into view.
     Jump(String),
     /// Start a glide at this velocity in screen px/s (what letting go of a touchpad swipe does).
@@ -60,6 +62,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("rules", "how many rules are in effect"),
     ("get-window ID", "a window's decoration with its rules applied"),
     ("pan DX DY", "move the view by canvas px"),
+    ("crash", "panic on purpose to test recovery (only when UWC_DEBUG_PANIC=1 is set in uwc's environment)"),
     (
         "jump QUERY",
         "focus and reveal the window whose app-id and title best match (fuzzy), on any tag; #ID for a window id",
@@ -129,6 +132,7 @@ impl Request {
             "pan" => Request::Pan(num(0)?, num(1)?),
             "panto" => Request::PanTo(num(0)?, num(1)?),
             "fling" => Request::Fling(num(0)?, num(1)?),
+            "crash" => none(Request::Crash)?,
             "jump" => {
                 if args.is_empty() {
                     return Err("jump needs some text to match, e.g. jump firefox (or #12 for a window id)".into());
@@ -388,6 +392,7 @@ mod tests {
             "panto",
             "fling",
             "jump",
+            "crash",
             "zoom",
             "view",
             "toggleview",

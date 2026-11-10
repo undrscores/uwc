@@ -350,6 +350,12 @@ impl Uwc {
                 }
             }
             R::Pan(dx, dy) => self.pan_canvas(dx, dy),
+            R::Crash => {
+                if std::env::var_os("UWC_DEBUG_PANIC").is_none() {
+                    return Err("crash is only available with UWC_DEBUG_PANIC=1 in uwc's environment".into());
+                }
+                panic!("uwc msg crash");
+            }
             R::Jump(q) => {
                 self.jump_to(&q)?;
             }

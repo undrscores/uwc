@@ -1510,6 +1510,19 @@ impl Uwc {
 
     // ---- tags ---------------------------------------------------------------------------
 
+    /// After a panic in a handler: drop what was half done (drags, gestures, hint mode, held
+    /// touches) so the next event starts clean, and redraw.
+    pub fn recover_after_panic(&mut self) {
+        self.drag = None;
+        self.gesture = None;
+        self.fling = None;
+        self.in_drag_motion = false;
+        self.consumed_press = false;
+        self.hints_cancel();
+        self.touch_cancel();
+        self.damage();
+    }
+
     pub fn set_tagset(&mut self, tags: u32) {
         self.hints_cancel();
         let tags = tags & ALLTAGS;

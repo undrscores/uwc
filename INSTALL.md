@@ -158,6 +158,10 @@ run `seatd` and be in its group (`seat` or `_seatd`, depending on the distro).
 
 ## First start
 
+Before the first real session, run `uwc doctor`. It checks the seat, the GPU and driver (including the NVIDIA
+settings), input devices, the libraries uwc opens, Xwayland and the portals, and says what to do about each problem;
+it exits non-zero if something would stop a session from starting.
+
 1. Switch to a free TTY (Ctrl+Alt+F3), log in and run `uwc-session`, or choose "uwc" in your display manager.
 2. You get an empty canvas with no bar. Mod is the Super key; Mod+Return (or Mod+T) opens `foot`, so have a terminal
    installed or change the bind. The other default binds are listed in `config.def.kdl`
@@ -193,6 +197,7 @@ heavier at high resolutions.
 
 ## Troubleshooting
 
+- **Anything else:** run `uwc doctor` first and include its output in a bug report.
 - **Black screen or exits at once:** read `~/.local/state/uwc.log`; `RUST_LOG=debug uwc-session` logs more.
 - **Cannot open a session or seat:** you are not on a logind or seatd session. Log in on a real TTY (not over ssh) and,
   with seatd, join its group.
