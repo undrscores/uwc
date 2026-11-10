@@ -105,7 +105,13 @@ impl Uwc {
         let (app_id, title) = (c.app_id(), c.title());
         let f = self.facts(c, &app_id, &title);
         let rules: Vec<&crate::rules::Rule> = self.config.rules.iter().chain(&self.ipc_rules).collect();
-        let open = crate::rules::resolve_open(&rules, &f);
+        let mut open = crate::rules::resolve_open(&rules, &f);
+        // Where it was last time wins over the rules (session restore).
+        if self.config.session_restore {
+            if let Some(saved) = crate::session::take(&mut self.session_pool, &app_id, &title) {
+                saved.apply(&mut open);
+            }
+        }
         let screen = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
         let c = &mut self.clients[i];
         if let Some(t) = c.window.toplevel() {

@@ -37,9 +37,20 @@ struct Uwc {
 impl Uwc {
     fn start(name: &str, config: Option<&str>) -> Uwc {
         let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
+        Uwc::start_with_state(name, config, &dir.join("state"))
+    }
+
+    /// With the session file under `state` (it outlives this compositor).
+    fn start_with_state(name: &str, config: Option<&str>, state: &std::path::Path) -> Uwc {
+        let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uwc"));
-        cmd.arg("--headless").arg("1000x600").env("XDG_RUNTIME_DIR", &dir).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.arg("--headless")
+            .arg("1000x600")
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("XDG_STATE_HOME", state)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         if let Some(c) = config {
             let f = dir.join("config.kdl");
             std::fs::write(&f, c).unwrap();
@@ -1204,4 +1215,67 @@ fn saving_a_shader_file_reloads_it() {
     .unwrap();
     uwc.wait("reload after the shader changed", |s| num(&s["config_rev"]) > rev);
     assert_eq!(uwc.cmd("get background-shader")["value"], "bg.glsl");
+}
+
+#[test]
+fn the_canvas_comes_back_after_a_restart() {
+    let state = std::env::temp_dir().join(format!("uwc-test-{}-session-state", std::process::id()));
+    let file = state.join("uwc/session.json");
+    let where_a;
+    {
+        let mut uwc = Uwc::start_with_state("session1", None, &state);
+        let mut c = uwc.connect();
+        let _a = c.window("A", 300, 200);
+        let _b = c.window("B", 200, 100);
+        let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+        let (a, b) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "B")["id"].as_u64().unwrap());
+        uwc.ok(&format!("move {a} 1234 567"));
+        uwc.ok(&format!("window-scale {a} 0.75"));
+        // Scaling keeps the centre, so the corner moved: remember where it is now.
+        let s = uwc.state();
+        where_a = (num(&win(&s, "A")["x"]), num(&win(&s, "A")["y"]));
+        uwc.ok(&format!("pin {b}"));
+        uwc.ok("panto 40 50");
+        uwc.ok("bookmark save 2");
+        uwc.ok("view 3");
+        uwc.ok("panto 500 -200");
+        uwc.ok("session save");
+        assert!(file.exists());
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved["windows"].as_array().unwrap().len(), 2);
+        uwc.ok("quit");
+        let start = Instant::now();
+        while uwc.child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let mut uwc = Uwc::start_with_state("session2", None, &state);
+    let s = uwc.state();
+    let m = &s["monitors"][0];
+    assert_eq!(m["tags"][2]["active"], true, "the tags in view come back");
+    assert_eq!((num(&m["viewport"]["x"]), num(&m["viewport"]["y"])), (500.0, -200.0), "and their views");
+    assert_eq!(m["tags"][0]["bookmarks"][0]["n"], 2, "and the bookmarks");
+
+    let mut c = uwc.connect();
+    let _a = c.window("A", 640, 480);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A");
+    assert_eq!((num(&a["x"]), num(&a["y"]), num(&a["scale"])), (where_a.0, where_a.1, 0.75), "where it was, its scale");
+    assert_eq!((num(&a["width"]), num(&a["height"])), (300.0, 200.0), "its size, in the first configure");
+    assert_eq!(a["tags"], 1);
+    let _b = c.window("B", 200, 100);
+    let s = uwc.wait("B", |s| s["windows"].as_array().unwrap().len() == 2);
+    assert_eq!(win(&s, "B")["pinned"], true);
+    // Nothing remembered for this one: it opens as usual.
+    let _c2 = c.window("C", 100, 100);
+    let s = uwc.wait("C", |s| s["windows"].as_array().unwrap().len() == 3);
+    assert_eq!(win(&s, "C")["tags"], 4, "on the tag in view");
+
+    uwc.ok("session forget");
+    assert!(!file.exists());
+    assert!(uwc.cmd("session").get("error").is_some());
+    drop(uwc);
+    let _ = std::fs::remove_dir_all(&state);
 }

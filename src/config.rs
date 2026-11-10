@@ -228,6 +228,8 @@ pub struct Config {
     pub explicit_sync: bool,
     /// A GLSL file drawing the background behind everything ("" = root-color).
     pub background_shader: String,
+    /// Remember the canvas (views, window layouts) across restarts.
+    pub session_restore: bool,
     /// Where relative paths in the config (shaders) are resolved from.
     pub dir: PathBuf,
     pub keys: Vec<KeyBind>,
@@ -327,6 +329,7 @@ impl Config {
             direct_scanout: true,
             explicit_sync: true,
             background_shader: String::new(),
+            session_restore: true,
             dir: path.and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
             keys: Vec::new(),
             mouse: Vec::new(),

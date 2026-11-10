@@ -254,6 +254,9 @@ pub struct Uwc {
     >,
     pub shader_errors: std::collections::BTreeMap<String, String>,
     pub background_id: Id,
+    /// Remembered windows no window has claimed yet (session restore), and the last text written.
+    pub session_pool: Vec<crate::session::SavedWindow>,
+    pub session_written: Option<String>,
     /// The rect behind a fullscreen window (`fullscreen-bg`).
     pub fullscreen_bg_id: Id,
     /// Set while drawing a frame that is part of an animation: the backend asks for the next one.
@@ -343,6 +346,8 @@ impl Uwc {
             user_shaders: Default::default(),
             shader_errors: Default::default(),
             background_id: Id::new(),
+            session_pool: Vec::new(),
+            session_written: None,
             animating: false,
             ipc,
         })

@@ -16,6 +16,7 @@ mod protocol;
 mod render;
 mod rules;
 mod scale;
+mod session;
 mod state;
 mod sync;
 mod workspace;
@@ -156,6 +157,7 @@ fn run() -> Result<()> {
         BackendKind::Udev => backend::udev::init(&mut state, &handle)?,
     }
     tracing::info!("backend: {}", state.backend.name());
+    state.session_load();
 
     // SIGINT/SIGTERM end the session cleanly (the socket file is removed on drop).
     let signal = event_loop.get_signal();
@@ -197,6 +199,16 @@ fn run() -> Result<()> {
         state.spawn("sh", &["-c".to_string(), cmd.clone()]);
     }
 
+    // The session is written every few seconds when it changed, so a crash loses little.
+    handle
+        .insert_source(Timer::from_duration(Duration::from_secs(5)), |_, _, state| {
+            if let Err(e) = state.session_save(false) {
+                tracing::warn!("saving the session: {e:#}");
+            }
+            TimeoutAction::ToDuration(Duration::from_secs(5))
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     event_loop.run(None, &mut state, |state| {
         state.udev_render();
         state.sync_scales();
@@ -204,6 +216,9 @@ fn run() -> Result<()> {
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();
     })?;
+    if let Err(e) = state.session_save(true) {
+        tracing::warn!("saving the session: {e:#}");
+    }
     Ok(())
 }
 

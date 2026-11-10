@@ -18,6 +18,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Canvas, viewport, zoom (about the pointer), pan, overview, fit/center | done |
 | Per-window scale: a window can be smaller or larger on the canvas than its size (a sticky note), still usable and sharp; `scale-window F` / `scale-window-reset` (Mod+Ctrl+minus/equal/0), Mod+Ctrl+scroll on a window, IPC `window-scale ID S`, rule `open { scale }`; pinned windows keep theirs | done |
 | Your own shaders: `border-shader` (per window through rules) and `background-shader` GLSL files, a small documented contract (`border(p, size, time, color, focused)`, `background(p, size, time, view, zoom)`); reloaded on save, redrawn every frame only if they use time, built-in fallback with the GLSL compiler's own message (line numbers into your file) in the log and the IPC state (`shader_errors`); examples in `shaders/` (neon border, canvas dot grid, aurora) | done |
+| Session restore: views, bookmarks and every window's layout (position or pinned spot, size, tags, scale, minimized, fullscreen) saved to `~/.local/state/uwc/session.json` on quit and every few seconds; windows go back when their apps open again (app-id + title, else app-id); `session-restore`, IPC `session save\|forget` | done |
 | Sharp zoom: windows are asked (fractional-scale-v1, viewporter, wl_surface v6 preferred buffer scale) to render at output scale x zoom once the zoom settles, so zooming in shows real detail; bounded by `zoom-render-scale-min`/`-max` | done |
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
 | xdg-shell toplevels and popups, xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
@@ -128,6 +129,7 @@ shaders/           example user shaders (border, background)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
 src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
 src/scale.rs       sharp zoom: preferred render scale per window (fractional scale)
+src/session.rs     session restore (serde, JSON in XDG_STATE_HOME)
 src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
 src/cursor.rs      the pointer image (xcursor theme, client surfaces, fallback arrow)
 src/backend/       udev (real session), winit (nested), headless (tests)

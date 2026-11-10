@@ -13,7 +13,8 @@ import socket, json, subprocess, time, os, glob, sys, tempfile
 from PIL import Image
 SP=tempfile.mkdtemp(prefix="uwc-nested-"); RD=SP+"/run"; os.makedirs(RD); os.chmod(RD,0o700)
 DISPLAY=next(f":{n}" for n in range(90, 200) if not os.path.exists(f"/tmp/.X11-unix/X{n}"))
-env=dict(os.environ, DISPLAY=DISPLAY, XDG_RUNTIME_DIR=RD, LIBGL_ALWAYS_SOFTWARE="1", RUST_LOG="error")
+# XDG_STATE_HOME: the session file must not touch the real one.
+env=dict(os.environ, DISPLAY=DISPLAY, XDG_RUNTIME_DIR=RD, XDG_STATE_HOME=SP+"/state", LIBGL_ALWAYS_SOFTWARE="1", RUST_LOG="error")
 env.pop("WAYLAND_DISPLAY", None)
 pids=[]
 import atexit

@@ -68,6 +68,10 @@ options {
     zoom-render-scale-min 1
     zoom-render-scale-max 3
     new-window-offset 32        // each new window on a tag is offset by this much from the last
+    // Remember the canvas across restarts: each tag's view and bookmarks, and where every window was
+    // (by app-id and title; it goes back there when its app opens again, over rules' open { }).
+    // Saved in ~/.local/state/uwc/session.json on quit and every few seconds. IPC: session save|forget.
+    session-restore true
     // Pointer image: the xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
     // Programs started afterwards inherit them through XCURSOR_THEME / XCURSOR_SIZE.
     cursor-theme ""

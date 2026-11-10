@@ -205,6 +205,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "direct-scanout" => direct_scanout,
     "explicit-sync" => explicit_sync,
     "background-shader" => background_shader,
+    "session-restore" => session_restore,
 );
 
 /// Set option `n` from `table` on `t`. `Ok(false)`: the table has no such option.

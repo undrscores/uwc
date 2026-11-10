@@ -36,6 +36,10 @@ pub enum Request {
         save: bool,
         n: usize,
     },
+    /// `session save` (write it now) / `session forget` (drop what is remembered).
+    Session {
+        save: bool,
+    },
     Overview,
     Home,
     Reload,
@@ -62,6 +66,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("fullscreen ID | unfullscreen ID", ""),
     ("window-scale ID S", "a window's own scale on the canvas (0.1-4), around its centre"),
     ("bookmark save N | bookmark goto N", "remember / return to a view of the tag in use (1-9)"),
+    ("session save | session forget", "write the remembered canvas now / forget it"),
     ("overview | home", "fit all windows / back to the origin at zoom 1"),
     ("reload | quit", ""),
 ];
@@ -156,6 +161,11 @@ impl Request {
                 }
                 Request::Bookmark { save, n: n as usize - 1 }
             }
+            "session" => match (args.first().copied(), args.len()) {
+                (Some("save"), 1) => Request::Session { save: true },
+                (Some("forget"), 1) => Request::Session { save: false },
+                _ => return Err("session save|forget".into()),
+            },
             "overview" => none(Request::Overview)?,
             "home" => none(Request::Home)?,
             "reload" => none(Request::Reload)?,
@@ -369,6 +379,7 @@ mod tests {
             "unfullscreen",
             "window-scale",
             "bookmark",
+            "session",
             "overview",
             "home",
             "reload",

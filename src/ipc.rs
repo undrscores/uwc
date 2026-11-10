@@ -390,6 +390,8 @@ impl Uwc {
                 }
                 self.set_window_scale(w, s, None);
             }
+            R::Session { save: true } => self.session_save(true).map_err(|e| format!("{e:#}"))?,
+            R::Session { save: false } => self.session_forget(),
             R::Overview => self.toggle_overview(),
             R::Home => self.with_viewport(|v, _| *v = Default::default()),
             R::Reload => self.reload_config()?,

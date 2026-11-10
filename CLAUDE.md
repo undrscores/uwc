@@ -13,6 +13,8 @@ uwm is awkward (the user said it need not be 1:1); `README.md` has the status ta
 - `cargo test` runs the unit tests (canvas maths, KDL parser, config) and `tests/headless.rs`: each test spawns
   `uwc --headless` in its own `XDG_RUNTIME_DIR`, connects real Wayland clients (wayland-client) and reads state
   through the IPC socket. Add a check when fixing a bug. Never `pkill` by name; kill test processes by PID.
+- Tests must not touch the user's files: headless tests and `tests/nested.py` point `XDG_RUNTIME_DIR` and
+  `XDG_STATE_HOME` (the session file) at temp dirs; keep it that way for anything new that writes state.
 - `tests/nested.py` checks drawing and real pointer input: uwc nested in Xvfb with software GL, `examples/paint`
   clients, `xdotool` moving the X pointer, pixels read from `import -window root` screenshots, focus read over IPC
   (needs Xvfb, xdotool, ImageMagick, python3-pil). Run it after touching rendering, stacking or hit-testing, and
