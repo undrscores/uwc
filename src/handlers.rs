@@ -38,7 +38,10 @@ use smithay::{
     },
 };
 
-use crate::state::{Client as UClient, ClientState, Uwc};
+use crate::{
+    canvas::ALLTAGS,
+    state::{Client as UClient, ClientState, Uwc},
+};
 
 impl CompositorHandler for Uwc {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -70,6 +73,7 @@ impl CompositorHandler for Uwc {
                 s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap().initial_configure_sent
             });
             if !sent {
+                self.open_rules(i);
                 toplevel.send_configure();
             }
             if !self.clients[i].mapped && self.clients[i].window.geometry().size.w > 0 {
@@ -92,26 +96,75 @@ impl CompositorHandler for Uwc {
 
 impl Uwc {
     /// The first buffer arrived: place the window and focus it.
+    /// Before the first configure: decide what the rules' `open { }` blocks say (app-id and title are
+    /// set by then), and put the size and fullscreen state into that configure so the window never
+    /// shows at the wrong size.
+    fn open_rules(&mut self, i: usize) {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+        let c = &self.clients[i];
+        let (app_id, title) = (c.app_id(), c.title());
+        let f = self.facts(c, &app_id, &title);
+        let rules: Vec<&crate::rules::Rule> = self.config.rules.iter().chain(&self.ipc_rules).collect();
+        let open = crate::rules::resolve_open(&rules, &f);
+        let screen = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
+        let c = &mut self.clients[i];
+        if let Some(t) = c.window.toplevel() {
+            t.with_pending_state(|s| {
+                if let Some((w, h)) = open.size {
+                    s.size = Some((w, h).into());
+                }
+                if open.fullscreen {
+                    s.states.set(State::Fullscreen);
+                    s.size = Some(screen);
+                }
+            });
+        }
+        if open.fullscreen {
+            c.fullscreen = true;
+            c.prev_size = open.size.map(Into::into);
+        }
+        c.open = open;
+    }
+
+    /// The first buffer arrived: place the window as its rules say (else centred in the work area,
+    /// cascading), and focus it.
     fn map_client(&mut self, i: usize) {
+        let open = self.clients[i].open.clone();
         let size = self.clients[i].size();
         let vp = self.viewport();
         let (ax, ay, aw, ah) = self.work_area();
         let n = self.clients.iter().filter(|c| c.mapped).count() as i32;
         let off = (n % 8) * self.config.new_window_offset;
-        // Centre in the work area (the screen minus bars), cascading so windows don't hide each other exactly.
         let (mx, my) = vp.screen_to_canvas((ax + aw / 2.0, ay + ah / 2.0));
-        let cx = mx - size.w as f64 / 2.0 + off as f64;
-        let cy = my - size.h as f64 / 2.0 + off as f64;
-        self.clients[i].canvas = (cx.round(), cy.round()).into();
-        self.clients[i].mapped = true;
-        self.clients[i].tags = self.tagset();
+        let centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
+        let c = &mut self.clients[i];
+        c.mapped = true;
+        c.tags = open.tags.unwrap_or(self.mon.as_ref().map(|m| m.tagset).unwrap_or(1));
+        if open.pinned && !c.fullscreen {
+            // A pinned window's position is a screen position.
+            let at = open.position.unwrap_or(vp.canvas_to_screen(centred));
+            c.pin = Some(at.into());
+            c.canvas = vp.screen_to_canvas(at).into();
+            c.tags = ALLTAGS;
+        } else {
+            let (x, y) = open.position.unwrap_or(centred);
+            c.canvas = (x.round(), y.round()).into();
+        }
+        if open.minimized {
+            self.minimize_stamp += 1;
+            self.clients[i].minimized = self.minimize_stamp;
+        }
         if let Some(m) = &self.mon {
             let rect = Rectangle::from_size(m.size);
             output_update(&m.output, Some(rect), self.clients[i].surface());
         }
         let id = self.clients[i].id;
-        self.focus_client(Some(id));
+        // It takes the keyboard unless a rule says not to, or it opened out of sight.
+        if open.focus != Some(false) && self.visible(&self.clients[i]) {
+            self.focus_client(Some(id));
+        }
         self.refresh_pointer();
+        self.damage();
     }
 }
 
@@ -144,6 +197,7 @@ impl XdgShellHandler for Uwc {
             fullscreen: false,
             prev_size: None,
             minimized: 0,
+            open: Default::default(),
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         });

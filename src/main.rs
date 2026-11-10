@@ -12,6 +12,7 @@ mod ipc;
 mod kdl;
 mod layer;
 mod render;
+mod rules;
 mod state;
 mod sync;
 mod workspace;

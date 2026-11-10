@@ -21,6 +21,7 @@ use smithay::{
 
 use crate::{
     deco::{spin_degrees, Paint, RoundedElement, ShaderElement, Shaders},
+    rules::Deco,
     state::{Client, Uwc},
 };
 
@@ -50,7 +51,7 @@ impl Uwc {
     pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
         use smithay::wayland::shell::wlr_layer::Layer;
         // A spinning gradient border changes every frame: new content, and another frame after this one.
-        if self.config.border_spin_ms != 0.0 && self.gradient_border_visible() {
+        if self.spinning_border_visible() {
             self.deco_commit.increment();
             self.animating = true;
         }
@@ -77,15 +78,16 @@ impl Uwc {
         out
     }
 
-    fn gradient_border_visible(&self) -> bool {
-        let c = &self.config;
-        c.border_width > 0
-            && (c.border_gradient.is_some() || (c.focus_gradient.is_some() && self.focus.is_some()))
-            && self.clients.iter().any(|w| self.visible(w))
+    /// Some visible window shows a gradient border that turns (rules can turn it on per window).
+    fn spinning_border_visible(&self) -> bool {
+        self.clients.iter().filter(|w| self.visible(w) && !w.fullscreen).any(|w| {
+            let d = self.deco_for(w);
+            let gradient = d.border_gradient.is_some() || (d.focus_gradient.is_some() && self.focus == Some(w.id));
+            d.border_spin_ms != 0.0 && d.border_width > 0 && gradient
+        })
     }
 
-    fn look(&self, c: &Client) -> Look {
-        let o = &self.config;
+    fn look(&self, c: &Client, o: &Deco) -> Look {
         let focused = self.focus == Some(c.id);
         let spin = spin_degrees(o.border_spin_ms, self.start_time.elapsed().as_secs_f64() * 1000.0);
         let border = match (focused, &o.focus_gradient, &o.border_gradient) {
@@ -111,8 +113,8 @@ impl Uwc {
         }
     }
 
-    /// Every visible window (and its popups and decoration) as elements, topmost first.
-    /// The visible windows that are fullscreen (or the ones that are not), topmost first.
+    /// The visible windows that are fullscreen (or the ones that are not), with their popups and
+    /// decoration, topmost first.
     pub fn render_elements(
         &self,
         renderer: &mut GlesRenderer,
@@ -121,11 +123,13 @@ impl Uwc {
         fullscreen: bool,
     ) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
-        let o = &self.config;
         let commit = self.deco_commit;
 
         for c in self.clients.iter().rev().filter(|c| self.visible(c) && c.fullscreen == fullscreen) {
-            let look = self.look(c);
+            // The options with this window's rules applied.
+            let deco = self.deco_for(c);
+            let o = &deco;
+            let look = self.look(c, o);
             let pl = self.place(c);
             // Window px to physical output px.
             let z = pl.zoom;
@@ -142,13 +146,13 @@ impl Uwc {
                 Point::<f64, Physical>::from((content.loc.x - g.x as f64 * k, content.loc.y - g.y as f64 * k))
                     .to_i32_round();
             // Fullscreen windows get no decoration.
-            let deco = !c.fullscreen;
-            let bw = if deco { o.border_width as f64 * k } else { 0.0 };
+            let decorated = !c.fullscreen;
+            let bw = if decorated { o.border_width as f64 * k } else { 0.0 };
             let outer = Rectangle::new(
                 (content.loc.x - bw, content.loc.y - bw).into(),
                 Size::from((content.size.w + 2.0 * bw, content.size.h + 2.0 * bw)),
             );
-            let radius = if deco { o.corner_radius * k } else { 0.0 };
+            let radius = if decorated { o.corner_radius * k } else { 0.0 };
             // Content corners follow the border's inner edge.
             let inner_radius = (radius - bw).max(0.0);
             let [dim_id, backdrop_id, border_id, shadow_id] = &c.deco_ids;
@@ -169,7 +173,7 @@ impl Uwc {
                 out.extend(els.into_iter().map(|e| UwcElement::from(RescaleRenderElement::from_element(e, origin, z))));
             }
 
-            if let (Some(s), true) = (shaders, deco && look.dim > 0.0) {
+            if let (Some(s), true) = (shaders, decorated && look.dim > 0.0) {
                 out.push(UwcElement::from(ShaderElement::rounded_box(
                     s,
                     dim_id,
@@ -193,11 +197,11 @@ impl Uwc {
                 out.push(RoundedElement::wrap(e, shaders, content, inner_radius, Scale::from(scale)));
             }
 
-            if !deco {
+            if !decorated {
                 continue;
             }
             let Some(s) = shaders else {
-                out.extend(self.solid_border(c, &look, scale));
+                out.extend(self.solid_border(c, o, &look, scale));
                 continue;
             };
             if o.backdrop_color[3] > 0.0 {
@@ -247,8 +251,8 @@ impl Uwc {
     }
 
     /// Square solid borders, for when the shaders are not available.
-    fn solid_border(&self, c: &Client, look: &Look, scale: f64) -> Vec<UwcElement> {
-        let bw = self.config.border_width;
+    fn solid_border(&self, c: &Client, o: &Deco, look: &Look, scale: f64) -> Vec<UwcElement> {
+        let bw = o.border_width;
         if bw <= 0 {
             return vec![];
         }

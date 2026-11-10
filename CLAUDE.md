@@ -4,8 +4,8 @@
 
 uwc: the Rust/smithay rewrite of uwm (`undrscores/uwm`, C and wlroots). An infinite 2D canvas with dwm-style tags, each
 with its own canvas, viewport and zoom; everything floats; meant to be ricked out through
-configuration. Keep the **config syntax, action names and IPC schema compatible with uwm** unless there is a
-reason not to; `README.md` has the status table and the roadmap. Not goals: client-side decorations, a built-in bar.
+configuration. Start from uwm's config syntax, action names and IPC schema, but improve on them where
+uwm is awkward (the user said it need not be 1:1); `README.md` has the status table and the roadmap. Not goals: client-side decorations, a built-in bar.
 
 ## Build and test
 
@@ -45,8 +45,10 @@ reason not to; `README.md` has the status table and the roadmap. Not goals: clie
 - Animations are stepped from the frame handler, never timers: set `animating` while drawing a frame that needs a
   next one (the border spin does), and the backend asks for it.
 - Riceable is a goal: new visual features are an option in `config.def.kdl` (documented there, uwm's name if uwm has
-  it), settable with IPC `set`, reported by `get`, and tested. Decoration reads `Uwc.config` when drawing, so `set`
-  needs nothing else. Shader elements (`deco.rs`) keep a stable `Id` per window and role and take `deco_commit`;
+  it), settable with IPC `set`, reported by `get`, and tested. A per-window look goes in `rules::Deco` (then rules can
+  set it too, and `get-window` reports it); draw from `Uwc::deco_for(client)`, never from the global options.
+- uwm compatibility is a starting point, not a rule: where uwm's design is awkward, do better and say so in the docs
+  (window rules are the first example: globs, explicit `open { }`, live state matchers). Shader elements (`deco.rs`) keep a stable `Id` per window and role and take `deco_commit`;
   bump it when their look changes without their geometry changing.
 - GLSL must compile on NVIDIA too: GLSL ES 1.00, float literals (`1.0`, not `1`), no implicit int/float mixing, no
   names that shadow builtins, constant loop bounds, `highp` only under `GL_FRAGMENT_PRECISION_HIGH`.

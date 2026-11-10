@@ -91,6 +91,34 @@ options {
 //     mouse { accel-profile "flat" }
 // }
 
+// Window rules. Every rule whose `match` fits a window applies, later rules over earlier ones.
+// - `match`: app-id / title are exact strings, or globs with * and ? ("org.gnome.*", "*YouTube*");
+//   tag=N, focused, pinned, fullscreen, urgent (true/false) look at the window as it is now. The
+//   properties of one match must all hold; several match lines are alternatives; no match = every window.
+// - `exclude`: same syntax; a window it fits is left out.
+// - `open { }`: what happens once, when the window appears:
+//       tag 3 5            the tags it opens on (default: the ones in view)
+//       size 900 600       canvas px
+//       position 3000 0    canvas px of its top-left corner (screen px when it also opens pinned)
+//       pinned / fullscreen / minimized    (minimized: it starts hidden, a scratchpad)
+//       focus false        it does not take the keyboard
+// - any decoration option (border-width, border-color, focus-color, focus-gradient, corner-radius,
+//   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, border-spin-ms,
+//   urgent-*): it applies to these windows live, and follows their state (e.g. match focused=false).
+// IPC: `rule { ... }` adds one until the next reload, `rule clear` removes those.
+//
+// rule {
+//     match app-id="mpv"
+//     open { pinned; size 640 360; position 20 20; focus false }
+//     corner-radius 0
+//     shadow-size 0
+// }
+// rule {
+//     match focused=false
+//     exclude app-id="mpv"
+//     inactive-opacity 0.85
+// }
+
 binds {
     Mod+T { spawn "foot"; }
     Mod+Return { spawn "foot"; }
@@ -127,6 +155,25 @@ binds {
     Mod+Alt+L { pan-view "right"; }
     Mod+Alt+K { pan-view "up"; }
     Mod+Alt+J { pan-view "down"; }
+    // viewport bookmarks: save the view (position and zoom) of the tag in use, jump back to it
+    Mod+Alt+1 { bookmark-goto 1; }
+    Mod+Alt+Shift+1 { bookmark-save 1; }
+    Mod+Alt+2 { bookmark-goto 2; }
+    Mod+Alt+Shift+2 { bookmark-save 2; }
+    Mod+Alt+3 { bookmark-goto 3; }
+    Mod+Alt+Shift+3 { bookmark-save 3; }
+    Mod+Alt+4 { bookmark-goto 4; }
+    Mod+Alt+Shift+4 { bookmark-save 4; }
+    Mod+Alt+5 { bookmark-goto 5; }
+    Mod+Alt+Shift+5 { bookmark-save 5; }
+    Mod+Alt+6 { bookmark-goto 6; }
+    Mod+Alt+Shift+6 { bookmark-save 6; }
+    Mod+Alt+7 { bookmark-goto 7; }
+    Mod+Alt+Shift+7 { bookmark-save 7; }
+    Mod+Alt+8 { bookmark-goto 8; }
+    Mod+Alt+Shift+8 { bookmark-save 8; }
+    Mod+Alt+9 { bookmark-goto 9; }
+    Mod+Alt+Shift+9 { bookmark-save 9; }
 
     Mod+Tab { view-previous; }
     Mod+0 { view-all; }

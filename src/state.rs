@@ -75,6 +75,8 @@ pub struct Client {
     pub prev_size: Option<Size<i32, Logical>>,
     /// Minimized (the scratchpad): 0 = no, else the order it was hidden in (newest highest).
     pub minimized: u32,
+    /// What the rules' `open { }` blocks said, decided at the first configure, used when it maps.
+    pub open: crate::rules::Open,
     /// Ids for the four border rects, stable so the damage tracker can tell frames apart.
     pub border_ids: [Id; 4],
     /// Ids for the dim, backdrop, border and shadow shader elements.
@@ -161,6 +163,8 @@ pub struct Monitor {
     pub vp: [Viewport; TAGCOUNT],
     /// The view before the overview was opened.
     pub overview: Option<Viewport>,
+    /// Saved views per tag: `bookmarks[tag][n]`.
+    pub bookmarks: [[Option<Viewport>; 9]; TAGCOUNT],
 }
 
 impl Monitor {
@@ -192,6 +196,8 @@ pub struct Uwc {
     pub popups: PopupManager,
     pub seat: Seat<Uwc>,
     pub layer_shell_state: WlrLayerShellState,
+    /// Rules added over IPC (`rule { ... }`), until the next reload.
+    pub ipc_rules: Vec<crate::rules::Rule>,
     pub workspaces: crate::workspace::WorkspaceState,
     /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
     pub layer_focus: Option<WlSurface>,
@@ -277,6 +283,7 @@ impl Uwc {
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
             popups: PopupManager::default(),
             layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
+            ipc_rules: Vec::new(),
             workspaces: crate::workspace::WorkspaceState::new(&dh),
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
@@ -362,6 +369,7 @@ impl Uwc {
             prev_tagset: 1,
             vp: [Viewport::default(); TAGCOUNT],
             overview: None,
+            bookmarks: [[None; 9]; TAGCOUNT],
         });
         self.cursor = (size.w as f64 / 2.0, size.h as f64 / 2.0).into();
     }
@@ -683,6 +691,24 @@ impl Uwc {
         }
     }
 
+    /// Remember the view of the tag in use as bookmark `n` (0-based).
+    pub fn bookmark_save(&mut self, n: usize) {
+        if let Some(m) = self.mon.as_mut() {
+            let t = crate::canvas::lowest_tag(m.tagset);
+            m.bookmarks[t][n] = Some(m.viewport());
+            self.ipc.dirty = true;
+        }
+    }
+
+    /// Jump to bookmark `n` of the tag in use; false if it was never saved.
+    pub fn bookmark_goto(&mut self, n: usize) -> bool {
+        let Some(v) = self.mon.as_ref().and_then(|m| m.bookmarks[crate::canvas::lowest_tag(m.tagset)][n]) else {
+            return false;
+        };
+        self.with_viewport(|vp, _| *vp = v);
+        true
+    }
+
     /// Bring back the window minimized last.
     pub fn restore_newest(&mut self) {
         if let Some(id) = self.clients.iter().filter(|c| c.minimized != 0).max_by_key(|c| c.minimized).map(|c| c.id) {
@@ -838,9 +864,34 @@ impl Uwc {
                 }
             }
             Action::RestoreWindow => self.restore_newest(),
+            Action::BookmarkSave(n) => self.bookmark_save(*n),
+            Action::BookmarkGoto(n) => {
+                self.bookmark_goto(*n);
+            }
             // Mouse-only actions are handled where the button press is.
             Action::DragMove | Action::DragResize | Action::DragPan => {}
             Action::SwitchVt(vt) => self.backend.switch_vt(*vt),
+        }
+    }
+
+    /// What rules see of a window, and its decoration: the options with every fitting rule applied
+    /// (the file's rules, then those added over IPC).
+    pub fn deco_for(&self, c: &Client) -> crate::rules::Deco {
+        let (app_id, title) = (c.app_id(), c.title());
+        let f = self.facts(c, &app_id, &title);
+        let rules: Vec<&crate::rules::Rule> = self.config.rules.iter().chain(&self.ipc_rules).collect();
+        crate::rules::resolve_deco(&self.config.deco, &rules, &f, &self.config.vars)
+    }
+
+    pub fn facts<'a>(&self, c: &Client, app_id: &'a str, title: &'a str) -> crate::rules::Facts<'a> {
+        crate::rules::Facts {
+            app_id,
+            title,
+            tags: c.tags,
+            focused: self.focus == Some(c.id),
+            pinned: c.pin.is_some(),
+            fullscreen: c.fullscreen,
+            urgent: c.urgent,
         }
     }
 
@@ -886,6 +937,7 @@ impl Uwc {
         match Config::load(self.config_path.as_deref()) {
             Ok(c) => {
                 self.config = c;
+                self.ipc_rules.clear();
                 self.apply_input_config();
                 self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
                 self.backend.config_changed(&self.config);

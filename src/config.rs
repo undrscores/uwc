@@ -86,6 +86,9 @@ pub enum Action {
     TogglePin,
     MinimizeWindow,
     RestoreWindow,
+    /// 0-based slot.
+    BookmarkSave(usize),
+    BookmarkGoto(usize),
     DragMove,
     DragResize,
     DragPan,
@@ -194,30 +197,12 @@ pub struct Config {
     pub mod_key: ModKey,
     pub sloppy_focus: bool,
     pub warp_cursor: bool,
-    pub border_width: i32,
     pub root_color: Color,
-    pub border_color: Color,
-    pub focus_color: Color,
-    pub urgent_color: Color,
     pub fullscreen_bg: Color,
-    // Decoration (see config.def.kdl). Sizes are canvas px and scale with zoom.
-    pub corner_radius: f64,
-    pub shadow_size: f64,
-    pub shadow_offset: (f64, f64),
-    pub shadow_color: Color,
-    pub shadow_spread: f64,
-    /// Alpha 0 = the same as shadow_color.
-    pub focus_shadow_color: Color,
-    /// -1 = the same as shadow_size.
-    pub focus_shadow_size: f64,
-    pub backdrop_color: Color,
-    pub opacity: f64,
-    pub inactive_opacity: f64,
-    pub inactive_dim: f64,
-    pub border_gradient: Option<Gradient>,
-    pub focus_gradient: Option<Gradient>,
-    pub urgent_gradient: Option<Gradient>,
-    pub border_spin_ms: f64,
+    /// Window decoration: the options (rules override them per window).
+    pub deco: crate::rules::Deco,
+    /// `rule { }` sections, in file order.
+    pub rules: Vec<crate::rules::Rule>,
     /// The `vars` of the file, so IPC `set` can use them too.
     pub vars: HashMap<String, String>,
     pub pan_step: f64,
@@ -312,27 +297,10 @@ impl Config {
             mod_key: ModKey::Super,
             sloppy_focus: true,
             warp_cursor: true,
-            border_width: 0,
             root_color: [0.133, 0.133, 0.133, 1.0],
-            border_color: [0.267, 0.267, 0.267, 1.0],
-            focus_color: [0.0, 0.333, 0.467, 1.0],
-            urgent_color: [1.0, 0.0, 0.0, 1.0],
             fullscreen_bg: [0.0, 0.0, 0.0, 1.0],
-            corner_radius: 10.0,
-            shadow_size: 24.0,
-            shadow_offset: (0.0, 6.0),
-            shadow_color: [0.0, 0.0, 0.0, 0.6],
-            shadow_spread: 0.0,
-            focus_shadow_color: [0.0; 4],
-            focus_shadow_size: -1.0,
-            backdrop_color: [0.0; 4],
-            opacity: 1.0,
-            inactive_opacity: 1.0,
-            inactive_dim: 0.0,
-            border_gradient: None,
-            focus_gradient: None,
-            urgent_gradient: None,
-            border_spin_ms: 0.0,
+            deco: crate::rules::Deco::default(),
+            rules: Vec::new(),
             vars: HashMap::new(),
             pan_step: 200.0,
             move_step: 50.0,
@@ -356,6 +324,10 @@ impl Config {
         for n in &nodes {
             match n.name.as_str() {
                 "vars" | "include" | "binds" => {}
+                "rule" => {
+                    let r = crate::rules::Rule::parse(n, &vars).with_context(|| format!("rule (line {})", n.line))?;
+                    cfg.rules.push(r);
+                }
                 "options" => {
                     for o in &n.kids {
                         cfg.set_option(o, &vars).with_context(|| format!("option `{}` (line {})", o.name, o.line))?;
@@ -391,11 +363,8 @@ impl Config {
 
     fn set_option(&mut self, n: &Node, vars: &HashMap<String, String>) -> Result<()> {
         let name = n.name.as_str();
-        match name {
-            "border-gradient" => return parse_gradient(n, vars).map(|g| self.border_gradient = g),
-            "focus-gradient" => return parse_gradient(n, vars).map(|g| self.focus_gradient = g),
-            "urgent-gradient" => return parse_gradient(n, vars).map(|g| self.urgent_gradient = g),
-            _ => {}
+        if self.deco.set(n, vars)? {
+            return Ok(());
         }
         let v = n.args.first().ok_or_else(|| anyhow!("missing value"))?;
         let boolean = || v.as_bool().ok_or_else(|| anyhow!("expected true or false"));
@@ -416,28 +385,8 @@ impl Config {
             }
             "sloppy-focus" => self.sloppy_focus = boolean()?,
             "warp-cursor" => self.warp_cursor = boolean()?,
-            "border-width" => self.border_width = range(num()?, 0.0, 64.0)? as i32,
             "root-color" => self.root_color = col()?,
-            "border-color" => self.border_color = col()?,
-            "focus-color" => self.focus_color = col()?,
-            "urgent-color" => self.urgent_color = col()?,
             "fullscreen-bg" => self.fullscreen_bg = col()?,
-            "corner-radius" => self.corner_radius = range(num()?, 0.0, 500.0)?,
-            "shadow-size" => self.shadow_size = range(num()?, 0.0, 500.0)?,
-            "shadow-offset-x" => self.shadow_offset.0 = range(num()?, -1000.0, 1000.0)?,
-            "shadow-offset-y" => self.shadow_offset.1 = range(num()?, -1000.0, 1000.0)?,
-            "shadow-color" => self.shadow_color = col()?,
-            "shadow-spread" => self.shadow_spread = range(num()?, -500.0, 500.0)?,
-            "focus-shadow-color" => self.focus_shadow_color = col()?,
-            "focus-shadow-size" => {
-                let v = num()?;
-                self.focus_shadow_size = if v < 0.0 { -1.0 } else { range(v, 0.0, 500.0)? };
-            }
-            "backdrop-color" => self.backdrop_color = col()?,
-            "opacity" => self.opacity = range(num()?, 0.0, 1.0)?,
-            "inactive-opacity" => self.inactive_opacity = range(num()?, 0.0, 1.0)?,
-            "inactive-dim" => self.inactive_dim = range(num()?, 0.0, 1.0)?,
-            "border-spin-ms" => self.border_spin_ms = range(num()?, -1e7, 1e7)?,
             "pan-step" => self.pan_step = range(num()?, 1.0, 10000.0)?,
             "move-step" => self.move_step = range(num()?, 1.0, 10000.0)?,
             "zoom-scroll" => self.zoom_scroll = range(num()?, 1.01, 3.0)?,
@@ -499,38 +448,12 @@ pub fn lower(sym: Keysym) -> Keysym {
     }
 }
 
-fn range(v: f64, lo: f64, hi: f64) -> Result<f64> {
+pub(crate) fn range(v: f64, lo: f64, hi: f64) -> Result<f64> {
     if v.is_finite() && v >= lo && v <= hi {
         Ok(v)
     } else {
         bail!("{v} is out of range ({lo} to {hi})")
     }
-}
-
-fn parse_gradient(n: &Node, vars: &HashMap<String, String>) -> Result<Option<Gradient>> {
-    let colors = n
-        .args
-        .iter()
-        .map(|v| match v {
-            Val::Str(s) => parse_color(s, vars),
-            _ => Err(anyhow!("gradient colors are strings like \"#rrggbb\"")),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    // No colors turns the gradient off.
-    if colors.is_empty() {
-        return Ok(None);
-    }
-    if !(2..=6).contains(&colors.len()) {
-        bail!("a gradient has 2 to 6 colors");
-    }
-    let mut angle = 90.0;
-    for (k, v) in &n.props {
-        match k.as_str() {
-            "angle" => angle = range(v.as_num().ok_or_else(|| anyhow!("angle needs a number"))?, -3600.0, 3600.0)?,
-            other => bail!("unknown gradient property `{other}` (angle)"),
-        }
-    }
-    Ok(Some(Gradient { colors, angle }))
 }
 
 fn parse_keyboard(n: &Node, k: &mut Keyboard) -> Result<()> {
@@ -804,6 +727,17 @@ fn parse_action(n: &Node) -> Result<Action> {
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,
         "restore-window" => Action::RestoreWindow,
+        "bookmark-save" | "bookmark-goto" => {
+            let b = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("needs a bookmark number 1 to 9"))?;
+            if b.fract() != 0.0 || !(1.0..=9.0).contains(&b) {
+                bail!("bookmarks are 1 to 9");
+            }
+            if n.name == "bookmark-save" {
+                Action::BookmarkSave(b as usize - 1)
+            } else {
+                Action::BookmarkGoto(b as usize - 1)
+            }
+        }
         "drag-move" => Action::DragMove,
         "drag-resize" => Action::DragResize,
         "drag-pan" => Action::DragPan,
@@ -833,9 +767,9 @@ mod tests {
             Some(Path::new("/nonexistent/x.kdl")),
         )
         .unwrap();
-        assert_eq!(c.border_width, 3);
+        assert_eq!(c.deco.border_width, 3);
         assert!(!c.sloppy_focus);
-        assert!((c.focus_color[0] - 1.0).abs() < 1e-6 && (c.focus_color[1] - 0.533).abs() < 1e-3);
+        assert!((c.deco.focus_color[0] - 1.0).abs() < 1e-6 && (c.deco.focus_color[1] - 0.533).abs() < 1e-3);
     }
 
     #[test]
@@ -907,13 +841,16 @@ mod tests {
             Some(Path::new("/x/c.kdl")),
         )
         .unwrap();
-        assert_eq!((c.corner_radius, c.shadow_size, c.inactive_opacity, c.inactive_dim), (12.0, 30.0, 0.9, 0.2));
-        let g = c.focus_gradient.as_ref().unwrap();
+        assert_eq!(
+            (c.deco.corner_radius, c.deco.shadow_size, c.deco.inactive_opacity, c.deco.inactive_dim),
+            (12.0, 30.0, 0.9, 0.2)
+        );
+        let g = c.deco.focus_gradient.as_ref().unwrap();
         assert_eq!((g.colors.len(), g.angle), (2, 45.0));
-        assert_eq!(c.focus_shadow_size, -1.0, "any negative size means 'same as shadow-size'");
+        assert_eq!(c.deco.focus_shadow_size, -1.0, "any negative size means 'same as shadow-size'");
         // An empty gradient turns it off.
         let c2 = Config::parse("options { focus-gradient }", Some(Path::new("/x/c.kdl"))).unwrap();
-        assert!(c2.focus_gradient.is_none());
+        assert!(c2.deco.focus_gradient.is_none());
         for bad in [
             "options { focus-gradient \"#fff\" }",
             "options { focus-gradient \"#fff\" \"#000\" spin=1 }",
@@ -928,9 +865,9 @@ mod tests {
     fn set_line_validates_and_uses_vars() {
         let c = Config::parse("vars { accent \"#00ff00\" }", Some(Path::new("/x/c.kdl"))).unwrap();
         let c2 = c.set_line("focus-color \"$accent\"").unwrap();
-        assert_eq!(c2.focus_color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(c2.deco.focus_color, [0.0, 1.0, 0.0, 1.0]);
         let c3 = c.set_line("border-gradient \"#ff0000\" \"#0000ff\" angle=10").unwrap();
-        assert_eq!(c3.border_gradient.unwrap().angle, 10.0);
+        assert_eq!(c3.deco.border_gradient.unwrap().angle, 10.0);
         assert!(c.set_line("mod-key \"Alt\"").is_err());
         assert!(c.set_line("opacity 7").is_err());
         assert!(c.set_line("nonsense 1").is_err());

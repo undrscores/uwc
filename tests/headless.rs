@@ -242,6 +242,8 @@ impl Client {
         toplevel.set_app_id("uwc.test".into());
         surface.commit();
         self.queue.roundtrip(&mut self.app).unwrap(); // initial configure arrives and is acked
+                                                      // Like a toolkit: a size in the first configure wins over the one it would pick itself.
+        let (w, h) = self.app.asked.take().unwrap_or((w, h));
         let buf = self.buffer(title, w, h);
         surface.attach(Some(&buf), 0, 0);
         surface.commit();
@@ -904,4 +906,116 @@ fn fullscreen_covers_the_output_and_gives_the_size_back() {
     std::thread::sleep(Duration::from_millis(50));
     c.follow_configure("A", &mut a);
     uwc.wait("client left fullscreen", |s| win(s, "A")["fullscreen"] == false && win(s, "A")["width"] == 300);
+}
+
+const RULES: &str = r#"
+rule {
+    match title="Pip"
+    open { pinned; size 320 180; position 20 20; focus false }
+}
+rule {
+    match title="Later"
+    open { tag 5 }
+}
+rule {
+    match title="Hidden*"
+    open { minimized }
+}
+rule {
+    match title="Big"
+    open { fullscreen }
+}
+rule {
+    match app-id="uwc.*" focused=false
+    exclude title="Pip"
+    border-width 9
+}
+"#;
+
+#[test]
+fn open_rules_place_size_and_hide_new_windows() {
+    let mut uwc = Uwc::start("open-rules", Some(RULES));
+    let mut c = uwc.connect();
+    let _main = c.window("Main", 300, 200);
+    let main = win(&uwc.wait("Main", |s| !s["windows"].as_array().unwrap().is_empty()), "Main")["id"].clone();
+
+    let _pip = c.window("Pip", 500, 500);
+    let s = uwc.wait("Pip", |s| s["windows"].as_array().unwrap().len() == 2);
+    let pip = win(&s, "Pip");
+    assert_eq!(
+        (pip["pinned"].clone(), pip["width"].clone(), pip["height"].clone()),
+        (true.into(), 320.into(), 180.into())
+    );
+    assert_eq!((num(&pip["x"]), num(&pip["y"])), (20.0, 20.0), "a pinned window's position is a screen spot");
+    assert_eq!(s["keyboard_focus"]["window"], main, "focus false keeps the keyboard where it was");
+
+    let _later = c.window("Later", 100, 100);
+    let s = uwc.wait("Later", |s| s["windows"].as_array().unwrap().len() == 3);
+    assert_eq!(win(&s, "Later")["tags"], 16);
+    assert_eq!(s["keyboard_focus"]["window"], main, "a window opening out of sight does not take the keyboard");
+
+    let _hidden = c.window("Hidden scratch", 100, 100);
+    let s = uwc.wait("Hidden", |s| s["windows"].as_array().unwrap().len() == 4);
+    assert_eq!(win(&s, "Hidden scratch")["minimized"], true);
+
+    let _big = c.window("Big", 100, 100);
+    let s = uwc.wait("Big", |s| s["windows"].as_array().unwrap().len() == 5);
+    let big = win(&s, "Big");
+    assert_eq!(
+        (big["fullscreen"].clone(), big["width"].clone(), big["height"].clone()),
+        (true.into(), 1000.into(), 600.into()),
+        "fullscreen from the very first configure"
+    );
+}
+
+#[test]
+fn decoration_rules_follow_window_state_live() {
+    let mut uwc = Uwc::start("deco-rules", Some(RULES));
+    let mut c = uwc.connect();
+    let _a = c.window("A", 300, 200);
+    let _b = c.window("B", 300, 200);
+    let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (a, b) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "B")["id"].as_u64().unwrap());
+    let bw = |uwc: &mut Uwc, id: u64| uwc.cmd(&format!("get-window {id}"))["options"]["border-width"].clone();
+    let base = uwc.cmd("get border-width")["value"].clone();
+    assert_ne!(base, 9);
+    // B has focus; the focused=false rule thickens A's border only.
+    assert_eq!((bw(&mut uwc, a), bw(&mut uwc, b)), (9.into(), base.clone()));
+    uwc.ok(&format!("focus {a}"));
+    assert_eq!((bw(&mut uwc, a), bw(&mut uwc, b)), (base, 9.into()), "the rule follows focus");
+
+    // Rules over IPC: later ones win, and `rule clear` / reload drop them.
+    uwc.ok(r#"rule { match title="A"; opacity 0.5; border-width 3 }"#);
+    let o = uwc.cmd(&format!("get-window {a}"))["options"].clone();
+    assert_eq!((o["opacity"].clone(), o["border-width"].clone()), (0.5.into(), 3.into()));
+    assert_eq!(uwc.cmd("rules"), serde_json::json!({"event": "rules", "file": 5, "ipc": 1}));
+    for bad in [r#"rule { match app-id=1 }"#, "rule { sloppy-focus false }", "rule nonsense", "rule { opacity 9 }"] {
+        assert!(uwc.cmd(bad).get("error").is_some(), "should refuse: {bad}");
+    }
+    uwc.ok("rule clear");
+    assert_eq!(uwc.cmd(&format!("get-window {a}"))["options"]["opacity"], 1.0);
+    uwc.ok(r#"rule { opacity 0.7 }"#);
+    uwc.ok("reload");
+    assert_eq!(uwc.cmd("rules")["ipc"], 0, "reload drops IPC rules");
+}
+
+#[test]
+fn bookmarks_remember_views_per_tag() {
+    let mut uwc = Uwc::start("bookmarks", None);
+    uwc.ok("panto 1000 -500");
+    uwc.ok("zoom 0.5");
+    uwc.ok("bookmark save 1");
+    let saved = uwc.state()["monitors"][0]["viewport"].clone();
+    uwc.ok("home");
+    uwc.ok("bookmark goto 1");
+    assert_eq!(uwc.state()["monitors"][0]["viewport"], saved);
+    let bm = uwc.state()["monitors"][0]["tags"][0]["bookmarks"].clone();
+    assert_eq!(bm.as_array().unwrap().len(), 1);
+    assert_eq!(bm[0]["n"], 1);
+    // Another tag has its own.
+    uwc.ok("view 2");
+    assert!(uwc.cmd("bookmark goto 1").get("error").is_some());
+    for bad in ["bookmark goto 0", "bookmark goto 10", "bookmark jump 1", "bookmark save"] {
+        assert!(uwc.cmd(bad).get("error").is_some(), "should refuse: {bad}");
+    }
 }

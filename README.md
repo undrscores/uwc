@@ -30,6 +30,8 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Decoration (uwm's options and names): `corner-radius`, gradient borders (`border-` / `focus-gradient`, `border-spin-ms`), shadows and the focus glow (`shadow-*`, `focus-shadow-*`), `backdrop-color`, `opacity` / `inactive-opacity`, `inactive-dim`; all scale with zoom; GLES shaders, square solid borders if they fail to compile | done |
 | ext-workspace-v1: the tags as workspaces "1".."9" (ids `uwc-tag-N`, 1-D coordinates, active/urgent) for bars that speak it; activate/deactivate applied per commit (only activations = view those tags, with a deactivation = toggle) | done |
 | Pinned windows (screen-fixed, unzoomed, on every tag), minimize/restore (the scratchpad, newest first, comes back on your tag), fullscreen (unscaled, undecorated, over bars and `fullscreen-bg`, size restored after; client requests too); actions `toggle-pin`, `minimize-window`, `restore-window`, `toggle-fullscreen`; IPC `pin`/`unpin`, `minimize`/`restore`, `fullscreen`/`unfullscreen` ID | done |
+| Window rules (uwc's own design, not uwm's): `rule { match ...; exclude ...; open { ... }; <decoration> }`; exact or glob app-id/title, state matchers (`focused`, `tag`, `pinned`, `fullscreen`, `urgent`) that decoration follows live; `open { tag size position pinned fullscreen minimized focus }` applied once (size and fullscreen in the first configure); IPC `rule { ... }` / `rule clear` / `rules`, `get-window ID` (a window's resolved decoration) | done |
+| Viewport bookmarks: 9 per tag, `bookmark-save` / `bookmark-goto` (Mod+Alt+[Shift+]1..9), IPC `bookmark save\|goto N`, listed per tag in the snapshot | done |
 | wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
 
 **The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
@@ -42,7 +44,7 @@ Limits: one GPU, and one output at a time (the first connected one not marked `o
 Not yet (roughly in the order to do them):
 
 1. Multiple monitors (the state has one `Monitor`; on hold).
-2. The rest of uwm's IPC (`theme`, `rule`, `bookmark`, `swipe`, `pinch`, `palette`, ...) and window rules.
+2. Gestures (`swipe`, `pinch`, touchpad pan/zoom); `theme` and `palette` come with the ricing below.
 3. Animations (open/close/move/tag-switch, eased pan, momentum), driven from the frame callback, never timers.
 4. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
@@ -114,6 +116,7 @@ src/input.rs       keyboard/pointer/drag handling, backend-independent
 src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
 src/ipc.rs         control socket
 src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
+src/rules.rs       window rules and the per-window decoration settings (`Deco`)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
 src/workspace.rs   ext-workspace-v1 (hand-written: smithay has none)
 src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
