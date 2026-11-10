@@ -330,6 +330,8 @@ pub struct Uwc {
     pub activation_state: smithay::wayland::xdg_activation::XdgActivationState,
     /// ext-idle-notify-v1 (idle daemons); its timers are reset by real input.
     pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Uwc>,
+    /// ext-session-lock-v1 (lock screen clients).
+    pub session_lock: crate::sessionlock::SessionLock,
     #[allow(dead_code)] // held so the global stays alive
     pub idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
     /// Live zwp-idle-inhibitor-v1 objects; any one pauses the idle notifications.
@@ -458,6 +460,7 @@ impl Uwc {
             screencopy: crate::screencopy::Screencopy::new(&dh),
             activation_state: smithay::wayland::xdg_activation::XdgActivationState::new::<Uwc>(&dh),
             idle_notifier: smithay::wayland::idle_notify::IdleNotifierState::new(&dh, loop_handle.clone()),
+            session_lock: crate::sessionlock::SessionLock::new(&dh),
             idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Uwc>(&dh),
             idle_inhibitors: 0,
             frames_drawn: 0,

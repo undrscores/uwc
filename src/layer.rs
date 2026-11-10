@@ -140,11 +140,15 @@ impl Uwc {
     }
 
     /// Point the keyboard at the focused layer surface if there is one, else at the focused window.
+    /// A session lock takes it over: the lock surface of the pointer's monitor gets every key.
     pub fn update_keyboard_focus(&mut self) {
-        let target = self
-            .layer_focus
-            .clone()
-            .or_else(|| self.focus.and_then(|id| self.client_index(id)).map(|i| self.clients[i].surface().clone()));
+        let target = if self.is_locked() {
+            self.lock_surface_on(self.cur).map(|s| s.wl_surface().clone())
+        } else {
+            self.layer_focus
+                .clone()
+                .or_else(|| self.focus.and_then(|id| self.client_index(id)).map(|i| self.clients[i].surface().clone()))
+        };
         let kb = self.keyboard();
         if kb.current_focus() != target {
             kb.set_focus(self, target, SERIAL_COUNTER.next_serial());

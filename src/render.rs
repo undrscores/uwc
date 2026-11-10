@@ -62,6 +62,16 @@ impl Uwc {
     pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, m: usize, with_cursor: bool) -> Vec<UwcElement> {
         use smithay::wayland::shell::wlr_layer::Layer;
         let scale = self.output_scale_of(m);
+        // A session lock covers everything: only the lock surface and the pointer are drawn.
+        if self.is_locked() {
+            let mut out = if with_cursor && self.mon_at(self.cursor) == m {
+                self.cursor_elements_at(renderer, scale, self.cursor - self.origin_of(m))
+            } else {
+                Vec::new()
+            };
+            out.extend(self.lock_surface_elements(renderer, m, scale));
+            return out;
+        }
         if self.step_animations() {
             self.animating = true;
         }

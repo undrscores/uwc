@@ -23,6 +23,7 @@ mod rules;
 mod scale;
 mod screencopy;
 mod session;
+mod sessionlock;
 mod state;
 mod sync;
 mod toplevels;

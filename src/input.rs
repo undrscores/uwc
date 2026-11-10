@@ -40,7 +40,7 @@ impl Uwc {
                     serial,
                     time,
                     |state, modifiers, handle| {
-                        if pressed {
+                        if pressed && !state.is_locked() {
                             let m = mods_of(modifiers);
                             for bind in &state.config.keys {
                                 if bind.mods == m
@@ -76,7 +76,7 @@ impl Uwc {
             InputEvent::PointerAxis { event } => {
                 let time = Event::time_msec(&event);
                 let mods = self.keyboard().modifier_state();
-                if self.mod_held(&mods) {
+                if !self.is_locked() && self.mod_held(&mods) {
                     let dy = event
                         .amount(Axis::Vertical)
                         .or_else(|| event.amount_v120(Axis::Vertical).map(|v| v / 120.0 * 15.0))
@@ -144,6 +144,16 @@ impl Uwc {
 
     /// Send the pointer to `pos` (screen px): moves a drag, or tells the surface under it.
     pub fn pointer_motion_to(&mut self, pos: Point<f64, Logical>, time: u32) {
+        // A session lock takes the pointer: it goes to the lock surface, nowhere else.
+        if self.is_locked() {
+            let m = self.mon_at(pos);
+            let local = pos - self.origin_of(m);
+            let focus = self.lock_surface_on(m).map(|s| (s.wl_surface().clone(), (0.0, 0.0).into()));
+            let ptr = self.pointer();
+            ptr.motion(self, focus, &MotionEvent { location: local, serial: SERIAL_COUNTER.next_serial(), time });
+            ptr.frame(self);
+            return;
+        }
         if let Some(drag) = self.drag {
             self.drag_motion(drag, pos);
             return;
@@ -222,6 +232,13 @@ impl Uwc {
 
     fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
         let serial = SERIAL_COUNTER.next_serial();
+        // A session lock takes the button: it goes to the lock surface, and nothing else happens.
+        if self.is_locked() {
+            let ptr = self.pointer();
+            ptr.button(self, &ButtonEvent { button, state, serial, time });
+            ptr.frame(self);
+            return;
+        }
         // A grab (a popup menu, a drag-and-drop) takes the button: a press outside a grabbed popup
         // dismisses it, and is not also a focus change, a drag or a pan on top of that.
         if self.pointer().is_grabbed() {

@@ -17,6 +17,7 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::ext::idle_notify::v1::client::{ext_idle_notification_v1, ext_idle_notifier_v1};
+use wayland_protocols::ext::session_lock::v1::client::{ext_session_lock_surface_v1, ext_session_lock_v1};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1 as ws_group, ext_workspace_handle_v1 as ws_handle,
     ext_workspace_manager_v1 as ws_manager,
@@ -222,6 +223,10 @@ struct App {
     idle_resumed: Vec<u32>,
     /// popup_done arrived for the grabbed popup.
     popup_done: bool,
+    /// ext-session-lock: the events so far ("locked", "finished", "configure WxH"), and the
+    /// serial to ack.
+    lock_events: Vec<String>,
+    lock_serial: Option<u32>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -293,6 +298,8 @@ impl Client {
             idle_fired: vec![],
             idle_resumed: vec![],
             popup_done: false,
+            lock_events: vec![],
+            lock_serial: None,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -436,6 +443,50 @@ impl Client {
         let m = self.globals.bind(&qh, 1..=1, ()).expect("zwp_idle_inhibit_manager_v1");
         self.sync();
         m
+    }
+
+    /// Lock the session over `output` (a lock screen client): returns the lock, the surface
+    /// covering the output and its buffer.
+    fn lock(&mut self, output: &wl_output::WlOutput) -> ext_session_lock_v1::ExtSessionLockV1 {
+        let qh = self.queue.handle();
+        let manager = self
+            .globals
+            .bind::<wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1, _, _>(&qh, 1..=1, ())
+            .expect("ext_session_lock_manager_v1");
+        let lock = manager.lock(&qh, ());
+        let surface = self.app.compositor.create_surface(&qh, ());
+        let _ls = lock.get_lock_surface(&surface, output, &qh, ());
+        self.sync();
+        // The configure told the output's size; draw a frame over it.
+        let (w, h) = self
+            .app
+            .lock_events
+            .iter()
+            .find_map(|e| {
+                e.strip_prefix("configure ")
+                    .and_then(|s| s.split_once('x'))
+                    .map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap()))
+            })
+            .expect("lock surface configure");
+        let buf = self.buffer("lock", w, h);
+        surface.attach(Some(&buf), 0, 0);
+        surface.commit();
+        self.sync();
+        lock
+    }
+
+    /// Roundtrips until a lock event named `what` arrives.
+    fn wait_lock(&mut self, what: &str) {
+        let start = Instant::now();
+        while !self.app.lock_events.iter().any(|e| e == what) {
+            self.sync();
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timed out waiting for {what}: {:?}",
+                self.app.lock_events
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// A grabbed popup (a menu opened by a click): created, grabbed and committed.
@@ -597,6 +648,38 @@ impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, u32> for App {
         }
     }
 }
+impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_session_lock_v1::ExtSessionLockV1,
+        e: ext_session_lock_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ext_session_lock_v1::Event::Locked => app.lock_events.push("locked".into()),
+            ext_session_lock_v1::Event::Finished => app.lock_events.push("finished".into()),
+            _ => {}
+        }
+    }
+}
+impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        s: &ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+        e: ext_session_lock_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_session_lock_surface_v1::Event::Configure { serial, width, height } = e {
+            s.ack_configure(serial);
+            app.lock_events.push(format!("configure {width}x{height}"));
+            app.lock_serial = Some(serial);
+        }
+    }
+}
 impl Dispatch<xdg_popup::XdgPopup, ()> for App {
     fn event(
         app: &mut Self,
@@ -618,6 +701,7 @@ noop!(export_manager::HyprlandToplevelExportManagerV1);
 noop!(sc_manager::ZwlrScreencopyManagerV1);
 noop!(xdg_activation_v1::XdgActivationV1);
 noop!(ext_idle_notifier_v1::ExtIdleNotifierV1);
+noop!(wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1);
 noop!(zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1);
 noop!(zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
 noop!(xdg_positioner::XdgPositioner);
@@ -1915,4 +1999,26 @@ fn multiple_monitors_share_the_canvas() {
     assert_eq!(s["monitors"][1]["viewport"]["x"], 0.0, "the other monitor keeps its view");
     uwc.wait("the pan to settle", |s| s["monitors"][0]["view_moving"] == false);
     assert_eq!(win(&uwc.state(), "A")["monitor"], "HEADLESS-2");
+}
+
+#[test]
+fn a_session_lock_covers_the_screen_and_unlocks() {
+    let mut uwc = Uwc::start("lock", None);
+    let mut c = uwc.connect();
+    let _w = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let id = win(&s, "A")["id"].clone();
+
+    // A lock screen client: the lock is confirmed once it covers the output, and it takes
+    // the keyboard (no window has focus while the session is locked).
+    let output = c.bind_output();
+    let lock = c.lock(&output);
+    c.wait_lock("locked");
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], serde_json::Value::Null);
+
+    // Unlocking ends the lock: the window has the keyboard again.
+    lock.unlock_and_destroy();
+    c.sync();
+    let s = uwc.wait("unlocked", |s| s["keyboard_focus"]["window"] == id);
+    assert_eq!(s["keyboard_focus"]["window"], id);
 }

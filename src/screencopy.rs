@@ -161,7 +161,8 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Uwc {
             _ => return,
         };
         let frame = init.init(frame, FrameData { mon, region, cursor, used: Mutex::new(false) });
-        if !valid {
+        // Nothing on screen can be captured while the session is locked.
+        if state.is_locked() || !valid {
             frame.failed();
             return;
         }
