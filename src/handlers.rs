@@ -247,6 +247,18 @@ impl XdgShellHandler for Uwc {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
+            // Keep the last frame to fade out over close-ms: the one captured when the close was
+            // asked for, else one captured now if the surface is still alive (skipped without a
+            // renderer, so closing stays instant headless).
+            let idle = !self.anim_running();
+            let g = self.pending_ghosts.remove(&self.clients[i].id).or_else(|| self.closing_ghost(i));
+            if let Some(g) = g {
+                self.ghosts.push(g);
+                if idle {
+                    self.begin_anim();
+                }
+                self.damage();
+            }
             let gone = self.clients.remove(i);
             self.export_on_close(gone.id);
             if self.focus == Some(gone.id) {

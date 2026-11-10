@@ -784,6 +784,32 @@ fn windows_animate_in_moves_and_tag_switches() {
 }
 
 #[test]
+fn closing_windows_fade_out() {
+    // The fade itself needs a renderer (nested.py checks it pixel by pixel); headless skips the
+    // ghost, but closing must behave with the option on: the window goes, focus falls back at
+    // once (not after the fade), and nothing is left animating.
+    let mut uwc = Uwc::start("close", Some("options { close-ms 300 }"));
+    let mut c = uwc.connect();
+    let wa = c.window("A", 300, 200);
+    let _wb = c.window("B", 200, 100);
+    let s = uwc.wait("two windows", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (ia, ib) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "B")["id"].as_u64().unwrap());
+    assert_eq!(uwc.cmd("get close-ms")["value"], 300.0);
+
+    uwc.ok(&format!("close {ia}"));
+    c.sync();
+    c.dispatch_pending();
+    wa.toplevel.destroy();
+    wa.xdg.destroy();
+    wa.surface.destroy();
+    c.sync();
+    let s = uwc.wait("A gone", |s| s["windows"].as_array().unwrap().len() == 1);
+    assert_eq!(win(&s, "B")["focused"], true, "focus falls back at once, not after the fade");
+    assert_eq!(win(&s, "B")["id"].as_u64().unwrap(), ib);
+    uwc.wait("nothing left animating", |s| s["monitors"][0]["animating"] == false);
+}
+
+#[test]
 fn move_resize_focus_close() {
     let mut uwc = Uwc::start("wm", None);
     let mut c = uwc.connect();

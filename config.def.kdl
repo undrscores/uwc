@@ -61,6 +61,7 @@ options {
     open-scale 0.92             // the size it starts at, 0.1 to 1
     move-ms 140                 // windows moved by key or IPC glide for about this long; 0 = jump. Dragging is always instant
     tag-ms 140                  // windows that come into view with a tag switch fade in over this long; 0 = at once
+    close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
     view-ms 180                 // eased view moves (pan and zoom keys, scroll zoom, center/fit, reveal, bookmarks, home) take about this long; 0 = jump. Dragging is always instant
     move-step 50                // canvas px for move-window / resize-window
     zoom-scroll 1.1             // zoom factor per scroll notch with Mod held

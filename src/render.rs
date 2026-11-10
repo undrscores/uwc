@@ -38,6 +38,8 @@ render_elements! {
     Solid=SolidColorRenderElement,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
     Layer=WaylandSurfaceRenderElement<GlesRenderer>,
+    Ghost=RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    RoundedGhost=RoundedElement<RescaleRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>>,
 }
 
 /// How one window looks right now, resolved from the options and its focus.
@@ -76,6 +78,7 @@ impl Uwc {
             .iter()
             .filter(|c| self.visible(c) && !c.fullscreen)
             .map(|c| self.deco_for(c).border_shader)
+            .chain(self.ghosts.iter().filter(|g| !g.fullscreen).map(|g| g.deco.border_shader.clone()))
             .filter(|s| !s.is_empty())
             .collect();
         let mut animated = false;
@@ -95,7 +98,8 @@ impl Uwc {
         let mut out = if with_cursor { self.cursor_elements(renderer, scale) } else { Vec::new() };
         out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
-        let fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true);
+        let mut fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true);
+        fullscreen.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, true));
         if !fullscreen.is_empty() {
             out.extend(fullscreen);
             let (w, h) = self.screen_size();
@@ -110,6 +114,7 @@ impl Uwc {
         }
         out.extend(self.layer_elements(renderer, scale, &[Layer::Top]));
         out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, false));
+        out.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, false));
         out.extend(self.layer_elements(renderer, scale, &[Layer::Bottom, Layer::Background]));
         if let Some((program, _)) = background {
             let (w, h) = self.screen_size();
@@ -176,7 +181,11 @@ impl Uwc {
     }
 
     fn look(&self, c: &Client, o: &Deco) -> Look {
-        let focused = self.focus == Some(c.id);
+        self.look_of(self.focus == Some(c.id), c.fx.alpha, o)
+    }
+
+    /// A window's look for a given focus and fade (the same for a ghost, with its own fade).
+    fn look_of(&self, focused: bool, fade: f64, o: &Deco) -> Look {
         let spin = spin_degrees(o.border_spin_ms, self.start_time.elapsed().as_secs_f64() * 1000.0);
         let border = match (focused, &o.focus_gradient, &o.border_gradient) {
             (true, Some(g), _) => Paint::Gradient(g.clone(), spin),
@@ -192,8 +201,7 @@ impl Uwc {
         } else {
             (o.shadow_size, o.shadow_color)
         };
-        // A window fading in or out: everything it draws fades with it.
-        let fade = c.fx.alpha as f32;
+        let fade = fade as f32;
         let faded = |mut c: Color| {
             c[3] *= fade;
             c
@@ -208,7 +216,7 @@ impl Uwc {
         Look {
             border,
             alpha: if focused { o.opacity } else { o.inactive_opacity } as f32 * fade,
-            dim: if focused { 0.0 } else { o.inactive_dim } * c.fx.alpha,
+            dim: if focused { 0.0 } else { o.inactive_dim } * fade as f64,
             shadow_size,
             shadow_color: faded(shadow_color),
         }
@@ -333,6 +341,134 @@ impl Uwc {
                         &look.border,
                         self.start_time.elapsed().as_secs_f64(),
                         self.focus == Some(c.id),
+                    ),
+                    None => {
+                        ShaderElement::rounded_box(s, border_id, commit, outer.to_i32_round(), radius, bw, &look.border)
+                    }
+                }));
+            }
+            if look.shadow_size > 0.0 && look.shadow_color[3] > 0.0 {
+                let spread = o.shadow_spread * k;
+                let caster = Rectangle::new(
+                    (outer.loc.x - spread + o.shadow_offset_x * k, outer.loc.y - spread + o.shadow_offset_y * k).into(),
+                    Size::from(((outer.size.w + 2.0 * spread).max(1.0), (outer.size.h + 2.0 * spread).max(1.0))),
+                );
+                let size = look.shadow_size * k;
+                out.push(UwcElement::from(ShaderElement::shadow(
+                    s,
+                    shadow_id,
+                    commit,
+                    caster,
+                    radius + spread.max(0.0),
+                    size / 3.0,
+                    size,
+                    look.shadow_color,
+                    outer,
+                    radius,
+                )));
+            }
+        }
+        out
+    }
+
+    /// Closing windows fading out: their captured last frame drawn where the window is now, with
+    /// the decoration it closed with. Mirrors `render_elements` without popups.
+    pub fn ghost_elements(
+        &self,
+        renderer: &mut GlesRenderer,
+        shaders: Option<&Shaders>,
+        user: &HashMap<String, GlesPixelProgram>,
+        scale: f64,
+        fullscreen: bool,
+    ) -> Vec<UwcElement> {
+        let mut out: Vec<UwcElement> = Vec::new();
+        let commit = self.deco_commit;
+        let vp = self.viewport();
+
+        for g in self.ghosts.iter().filter(|g| g.fullscreen == fullscreen) {
+            let o = &g.deco;
+            let look = self.look_of(g.focused, g.alpha, o);
+            let pl = g.place(vp);
+            let size = g.size;
+            let k = pl.zoom * scale;
+            let content = Rectangle::new(
+                Point::<f64, Physical>::from((pl.origin.x * scale, pl.origin.y * scale)),
+                Size::from((size.w as f64 * k, size.h as f64 * k)),
+            );
+            let decorated = !g.fullscreen;
+            let bw = if decorated { o.border_width as f64 * k } else { 0.0 };
+            let outer = Rectangle::new(
+                (content.loc.x - bw, content.loc.y - bw).into(),
+                Size::from((content.size.w + 2.0 * bw, content.size.h + 2.0 * bw)),
+            );
+            let radius = if decorated { o.corner_radius * k } else { 0.0 };
+            let inner_radius = (radius - bw).max(0.0);
+            let [dim_id, backdrop_id, border_id, shadow_id] = &g.deco_ids;
+
+            if let (Some(s), true) = (shaders, decorated && look.dim > 0.0) {
+                out.push(UwcElement::from(ShaderElement::rounded_box(
+                    s,
+                    dim_id,
+                    commit,
+                    content.to_i32_round(),
+                    inner_radius,
+                    0.0,
+                    &Paint::Solid([0.0, 0.0, 0.0, look.dim as f32]),
+                )));
+            }
+
+            // The last frame. It was captured at `g.k` px per window px; the element is that many
+            // physical px, rescaled to where the window is drawn now (so the view may have moved
+            // or zoomed since, and the fade shrinks it, without it going soft).
+            let origin: Point<i32, Physical> = content.loc.to_i32_round();
+            let e = MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                content.loc,
+                &g.buffer,
+                Some(look.alpha),
+                None,
+                None,
+                Kind::Unspecified,
+            );
+            match e {
+                Ok(e) => {
+                    let e = RescaleRenderElement::from_element(e, origin, pl.zoom * scale / g.k);
+                    out.push(RoundedElement::wrap(e, shaders, content, inner_radius, Scale::from(scale)));
+                }
+                Err(e) => tracing::warn!("ghost: {e}"),
+            }
+
+            if !decorated {
+                continue;
+            }
+            let Some(s) = shaders else { continue };
+            if o.backdrop_color[3] > 0.0 && g.alpha > 0.0 {
+                out.push(UwcElement::from(ShaderElement::rounded_box(
+                    s,
+                    backdrop_id,
+                    commit,
+                    content.to_i32_round(),
+                    inner_radius,
+                    0.0,
+                    &Paint::Solid({
+                        let mut b = o.backdrop_color;
+                        b[3] *= g.alpha as f32;
+                        b
+                    }),
+                )));
+            }
+            if bw > 0.0 {
+                out.push(UwcElement::from(match user.get(&o.border_shader) {
+                    Some(program) => ShaderElement::user_box(
+                        program,
+                        border_id,
+                        commit,
+                        outer.to_i32_round(),
+                        radius,
+                        bw,
+                        &look.border,
+                        self.start_time.elapsed().as_secs_f64(),
+                        g.focused,
                     ),
                     None => {
                         ShaderElement::rounded_box(s, border_id, commit, outer.to_i32_round(), radius, bw, &look.border)
