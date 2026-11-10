@@ -72,15 +72,16 @@ canvas), but the machine this was written on has no GPU or seat, so the udev pat
 
 Not yet (roughly in the order to do them):
 
-0. **Run it on real hardware** (the udev backend, NVIDIA, a portal for screen sharing, touch and tablet devices): the
-   protocols above are tested against headless and nested runs only.
-1. The rest of the animations (open, move, tag fade, the close fade, eased pan and zoom and momentum are done), driven
-   from the frame callback, never timers.
-2. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
-   rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
-   themes (which set `grid`) are rejected as a whole.
-3. Protocols still missing: tablet-v2 (pressure, tilt), presentation-time, security-context (Flatpak), alpha-modifier,
-   fifo/commit-timing, a dmabuf path for capture, xdg-toplevel-icon.
-4. Multi-GPU (output-management, clipboard bridging for Xwayland, animated cursors, DPMS/output
-   power, popup grabs, xdg-activation, idle-inhibit/idle-notify, session-lock, pointer constraints,
-   Xwayland and IME are done).
+0. **Run it on real hardware**: the udev backend, NVIDIA, a portal for screen sharing, touch and tablet devices.
+   Everything above is tested against headless and nested runs only.
+1. **A dmabuf path for screen capture** (ext-image-copy-capture offers shm only). It needs the renderer's DRM node and
+   a GPU to test, so it waits for item 0.
+2. **tablet-v2** (pressure and tilt reach clients; pens act as a mouse today). Needs a tablet to test.
+3. **Blur** (and ext-background-effect for bars), the headline missing visual effect: it needs a render pass that
+   captures what is behind a window, blurs it and draws it under the window. The canvas grid is covered by `snap-grid`
+   and the example shaders; uwm's themes (which set `grid`) are still rejected as a whole.
+4. Protocols still missing: presentation-time, fifo/commit-timing (a client waiting on a fifo barrier stalls unless it
+   is signalled every frame, so it has to be done properly), security-context (Flatpak; only worth it together with
+   restricting privileged globals), alpha-modifier, xdg-toplevel-icon.
+5. A minimap or overview strip for Quickshell (the window previews it needs already work), and `focus-ms` fades.
+6. Multi-GPU.
