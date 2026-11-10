@@ -29,6 +29,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | NVIDIA: modesetting check with the fix in the error, `hardware-cursor` / `direct-scanout` / `explicit-sync` switches | done |
 | Decoration (uwm's options and names): `corner-radius`, gradient borders (`border-` / `focus-gradient`, `border-spin-ms`), shadows and the focus glow (`shadow-*`, `focus-shadow-*`), `backdrop-color`, `opacity` / `inactive-opacity`, `inactive-dim`; all scale with zoom; GLES shaders, square solid borders if they fail to compile | done |
 | ext-workspace-v1: the tags as workspaces "1".."9" (ids `uwc-tag-N`, 1-D coordinates, active/urgent) for bars that speak it; activate/deactivate applied per commit (only activations = view those tags, with a deactivation = toggle) | done |
+| Pinned windows (screen-fixed, unzoomed, on every tag), minimize/restore (the scratchpad, newest first, comes back on your tag), fullscreen (unscaled, undecorated, over bars and `fullscreen-bg`, size restored after; client requests too); actions `toggle-pin`, `minimize-window`, `restore-window`, `toggle-fullscreen`; IPC `pin`/`unpin`, `minimize`/`restore`, `fullscreen`/`unfullscreen` ID | done |
 | wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
 
 **The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
@@ -40,7 +41,7 @@ Limits: one GPU, and one output at a time (the first connected one not marked `o
 
 Not yet (roughly in the order to do them):
 
-1. Multiple monitors (the state has one `Monitor`), pinned windows, minimize/scratchpad, fullscreen.
+1. Multiple monitors (the state has one `Monitor`; on hold).
 2. The rest of uwm's IPC (`theme`, `rule`, `bookmark`, `swipe`, `pinch`, `palette`, ...) and window rules.
 3. Animations (open/close/move/tag-switch, eased pan, momentum), driven from the frame callback, never timers.
 4. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
@@ -62,6 +63,7 @@ cargo run -- -s foot                 # nested (winit) when WAYLAND_DISPLAY/DISPL
 cargo run -- --headless 1280x720     # no display, for tests
 cargo run -- -t                      # validate the config and exit
 cargo test                           # unit tests + end-to-end tests against a headless uwc
+python3 tests/nested.py              # drawing and real pointer input, nested in Xvfb (needs Xvfb, xdotool, ImageMagick, PIL)
 cargo run --example paint -- "red" 400 300 d03030    # a test client that draws a solid window
 cargo run --example paint -- --bar 32 30a0d0         # ... or a layer-shell bar
 ```

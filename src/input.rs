@@ -139,14 +139,13 @@ impl Uwc {
             self.drag_motion(drag, pos);
             return;
         }
-        let vp = self.viewport();
-        let canvas: Point<f64, Logical> = vp.screen_to_canvas((pos.x, pos.y)).into();
-        // Window surfaces live in canvas px, layer surfaces in screen px: the location handed to the
-        // seat is in the space of whatever is under the pointer, so surface-local coordinates come out right.
+        // Canvas windows live in canvas px; pinned and fullscreen windows and layer surfaces in screen
+        // px. The location handed to the seat is in the space of whatever is under the pointer, so
+        // surface-local coordinates come out right whatever the zoom.
         let (location, focus) = match self.under(pos) {
-            Some(Under::Window { surface, origin, .. }) => (canvas, Some((surface, origin))),
+            Some(Under::Window { surface, origin, location, .. }) => (location, Some((surface, origin))),
             Some(Under::Layer { surface, origin, .. }) => (pos, Some((surface, origin))),
-            None => (canvas, None),
+            None => (pos, None),
         };
         let ptr = self.pointer();
         ptr.motion(self, focus, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });
@@ -154,12 +153,25 @@ impl Uwc {
     }
 
     fn drag_motion(&mut self, drag: Drag, pos: Point<f64, Logical>) {
-        let vp = self.viewport();
-        let (cx, cy) = vp.screen_to_canvas((pos.x, pos.y));
+        // A screen delta in the dragged window's own px (canvas px under zoom, screen px if pinned).
+        let delta = |s: &Uwc, id: u32, start: Point<f64, Logical>| -> (f64, f64) {
+            let z = s.client_index(id).map(|i| s.place(&s.clients[i]).zoom).unwrap_or(1.0);
+            ((pos.x - start.x) / z, (pos.y - start.y) / z)
+        };
         match drag {
-            Drag::Move { id, grab, orig } => self.move_client(id, orig.x + cx - grab.x, orig.y + cy - grab.y),
+            Drag::Move { id, start, orig } => {
+                let (dx, dy) = delta(self, id, start);
+                match self.client_index(id) {
+                    Some(i) if self.clients[i].pin.is_some() => {
+                        self.clients[i].pin = Some((orig.x + dx, orig.y + dy).into());
+                        self.refresh_pointer();
+                    }
+                    _ => self.move_client(id, orig.x + dx, orig.y + dy),
+                }
+            }
             Drag::Resize { id, start, orig } => {
-                self.resize_client(id, orig.w + (cx - start.x) as i32, orig.h + (cy - start.y) as i32)
+                let (dx, dy) = delta(self, id, start);
+                self.resize_client(id, orig.w + dx as i32, orig.h + dy as i32)
             }
             Drag::Pan => {
                 let (dx, dy) = (pos.x - self.drag_last.x, pos.y - self.drag_last.y);
@@ -170,17 +182,23 @@ impl Uwc {
         self.damage();
     }
 
+    /// Fullscreen windows are not dragged.
     pub fn begin_move(&mut self, i: usize) {
-        let vp = self.viewport();
-        let (cx, cy) = vp.screen_to_canvas((self.cursor.x, self.cursor.y));
-        self.drag = Some(Drag::Move { id: self.clients[i].id, grab: (cx, cy).into(), orig: self.clients[i].canvas });
+        let c = &self.clients[i];
+        if c.fullscreen {
+            return;
+        }
+        let orig = c.pin.unwrap_or(c.canvas);
+        self.drag = Some(Drag::Move { id: c.id, start: self.cursor, orig });
         self.drag_last = self.cursor;
     }
 
     pub fn begin_resize(&mut self, i: usize) {
-        let vp = self.viewport();
-        let (cx, cy) = vp.screen_to_canvas((self.cursor.x, self.cursor.y));
-        self.drag = Some(Drag::Resize { id: self.clients[i].id, start: (cx, cy).into(), orig: self.clients[i].size() });
+        let c = &self.clients[i];
+        if c.fullscreen {
+            return;
+        }
+        self.drag = Some(Drag::Resize { id: c.id, start: self.cursor, orig: c.size() });
         self.drag_last = self.cursor;
     }
 

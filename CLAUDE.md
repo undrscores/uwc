@@ -13,8 +13,13 @@ reason not to; `README.md` has the status table and the roadmap. Not goals: clie
 - `cargo test` runs the unit tests (canvas maths, KDL parser, config) and `tests/headless.rs`: each test spawns
   `uwc --headless` in its own `XDG_RUNTIME_DIR`, connects real Wayland clients (wayland-client) and reads state
   through the IPC socket. Add a check when fixing a bug. Never `pkill` by name; kill test processes by PID.
-- To see rendering: `Xvfb :77 &`, then `DISPLAY=:77 WINIT_UNIX_BACKEND=x11 LIBGL_ALWAYS_SOFTWARE=1 target/debug/uwc`,
-  run `cargo run --example paint` against its `WAYLAND_DISPLAY`, and screenshot with `import -window root`.
+- `tests/nested.py` checks drawing and real pointer input: uwc nested in Xvfb with software GL, `examples/paint`
+  clients, `xdotool` moving the X pointer, pixels read from `import -window root` screenshots, focus read over IPC
+  (needs Xvfb, xdotool, ImageMagick, python3-pil). Run it after touching rendering, stacking or hit-testing, and
+  extend it rather than looking at screenshots by hand. Sample pixels away from paint's 10 px lighter frame.
+- Windows have a placement (`Uwc::place`): canvas windows follow the viewport and zoom; pinned and fullscreen
+  windows are fixed to the screen at zoom 1. Drawing, hit-testing (`window_under`), the pointer location given to
+  the seat and drags all go through it; never compute a window's screen position from the viewport directly.
 - System libs: see README. The sandbox needs `libxkbcommon-x11-0` for winit's X11 path.
 - The udev backend cannot run in a sandbox (no GPU, no seat); it only builds there. Say so when changing it, and keep
   backend-independent logic (input, cursor, rendering, frame callbacks) out of it so the nested and headless runs
@@ -28,7 +33,8 @@ reason not to; `README.md` has the status table and the roadmap. Not goals: clie
 - One crate, small modules (see the layout in README). `Uwc` (state.rs) owns everything; protocol handlers, input and
   IPC are `impl Uwc` blocks in their own files.
 - Canvas px are what clients are told and IPC reports (`Client.canvas`). Screen px = `Viewport::canvas_to_screen`.
-  The seat's pointer location is in **canvas** px; `Uwc.cursor` is screen px.
+  The seat's pointer location is in the space of what is under it (canvas px for canvas windows, screen px for
+  pinned/fullscreen windows and layer surfaces); `Uwc.cursor` is screen px.
 - Panning only changes the viewport; it never reconfigures clients and never changes keyboard focus. Keyboard/IPC focus
   changes reveal (`reveal`/`focus_and_reveal`); mouse clicks and sloppy focus do not.
 - Anything that needs a new frame calls `damage()` (sets `redraw`, marks IPC dirty). IPC subscribers get one snapshot

@@ -37,8 +37,8 @@ use crate::{canvas::Area, render::UwcElement, state::Uwc};
 
 /// What is under a screen point.
 pub enum Under {
-    /// A window's surface; `origin` is the surface's position in canvas px.
-    Window { idx: usize, surface: WlSurface, origin: Point<f64, Logical> },
+    /// A window's surface; `origin` and `location` are in the window's space (see `WindowHit`).
+    Window { idx: usize, surface: WlSurface, origin: Point<f64, Logical>, location: Point<f64, Logical> },
     /// A layer surface (or one of its popups / subsurfaces); `origin` is in screen px.
     Layer { root: WlSurface, surface: WlSurface, origin: Point<f64, Logical>, interactive: bool },
 }
@@ -86,18 +86,31 @@ impl Uwc {
         Some(Under::Layer { root: l.wl_surface().clone(), surface, origin: (geo.loc + loc).to_f64(), interactive })
     }
 
-    /// Topmost thing under screen point `p`: overlay and top layers, windows, then bottom and background.
+    /// Topmost thing under screen point `p`, in drawing order: overlay layer, fullscreen windows, top
+    /// layer, windows, bottom and background layers.
     pub fn under(&self, p: Point<f64, Logical>) -> Option<Under> {
         let o = self.output();
-        if let Some(o) = &o {
-            for l in [WlrLayer::Overlay, WlrLayer::Top] {
-                if let Some(u) = self.layer_under(o, l, p) {
-                    return Some(u);
-                }
-            }
+        let window = |h: crate::state::WindowHit| Under::Window {
+            idx: h.idx,
+            surface: h.surface,
+            origin: h.origin,
+            location: h.location,
+        };
+        if let Some(u) = o.as_ref().and_then(|o| self.layer_under(o, WlrLayer::Overlay, p)) {
+            return Some(u);
         }
-        if let Some((idx, surface, origin)) = self.surface_under_screen(p) {
-            return Some(Under::Window { idx, surface, origin });
+        if let Some(h) = self.window_under(p, true) {
+            return Some(window(h));
+        }
+        // Under a fullscreen window everything is covered by fullscreen-bg: nothing there takes the pointer.
+        if self.clients.iter().any(|c| c.fullscreen && self.visible(c)) {
+            return None;
+        }
+        if let Some(u) = o.as_ref().and_then(|o| self.layer_under(o, WlrLayer::Top, p)) {
+            return Some(u);
+        }
+        if let Some(h) = self.window_under(p, false) {
+            return Some(window(h));
         }
         if let Some(o) = &o {
             for l in [WlrLayer::Bottom, WlrLayer::Background] {

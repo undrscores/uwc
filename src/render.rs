@@ -56,8 +56,23 @@ impl Uwc {
         }
         let shaders = Shaders::get(renderer);
         let mut out = self.cursor_elements(renderer, scale);
-        out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay, Layer::Top]));
-        out.extend(self.render_elements(renderer, shaders.as_ref(), scale));
+        out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay]));
+        // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
+        let fullscreen = self.render_elements(renderer, shaders.as_ref(), scale, true);
+        if !fullscreen.is_empty() {
+            out.extend(fullscreen);
+            let (w, h) = self.screen_size();
+            let geo = Rectangle::from_size(Size::from(((w * scale).round() as i32, (h * scale).round() as i32)));
+            out.push(UwcElement::from(SolidColorRenderElement::new(
+                self.fullscreen_bg_id.clone(),
+                geo,
+                self.deco_commit,
+                self.config.fullscreen_bg,
+                Kind::Unspecified,
+            )));
+        }
+        out.extend(self.layer_elements(renderer, scale, &[Layer::Top]));
+        out.extend(self.render_elements(renderer, shaders.as_ref(), scale, false));
         out.extend(self.layer_elements(renderer, scale, &[Layer::Bottom, Layer::Background]));
         out
     }
@@ -97,36 +112,43 @@ impl Uwc {
     }
 
     /// Every visible window (and its popups and decoration) as elements, topmost first.
+    /// The visible windows that are fullscreen (or the ones that are not), topmost first.
     pub fn render_elements(
         &self,
         renderer: &mut GlesRenderer,
         shaders: Option<&Shaders>,
         scale: f64,
+        fullscreen: bool,
     ) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
-        let vp = self.viewport();
-        let z = vp.zoom;
         let o = &self.config;
-        // Canvas px to physical output px.
-        let k = z * scale;
-        let phys = |p: (f64, f64)| -> Point<f64, Physical> {
-            let s = vp.canvas_to_screen(p);
-            (s.0 * scale, s.1 * scale).into()
-        };
         let commit = self.deco_commit;
 
-        for c in self.clients.iter().rev().filter(|c| self.visible(c)) {
+        for c in self.clients.iter().rev().filter(|c| self.visible(c) && c.fullscreen == fullscreen) {
             let look = self.look(c);
-            let origin = phys((c.surface_origin().x, c.surface_origin().y)).to_i32_round();
-            let r = c.rect();
-            // The content box and the outer (border) box, physical px.
-            let content = Rectangle::new(phys((r.loc.x, r.loc.y)), Size::from((r.size.w * k, r.size.h * k)));
-            let bw = o.border_width as f64 * k;
+            let pl = self.place(c);
+            // Window px to physical output px.
+            let z = pl.zoom;
+            let k = z * scale;
+            let g = c.window.geometry().loc;
+            let size = c.size();
+            // The content box (the window geometry) and the outer (border) box, physical px.
+            let content = Rectangle::new(
+                Point::<f64, Physical>::from((pl.origin.x * scale, pl.origin.y * scale)),
+                Size::from((size.w as f64 * k, size.h as f64 * k)),
+            );
+            // Where the surface origin goes; the geometry may start inside the surface (client shadows).
+            let origin: Point<i32, Physical> =
+                Point::<f64, Physical>::from((content.loc.x - g.x as f64 * k, content.loc.y - g.y as f64 * k))
+                    .to_i32_round();
+            // Fullscreen windows get no decoration.
+            let deco = !c.fullscreen;
+            let bw = if deco { o.border_width as f64 * k } else { 0.0 };
             let outer = Rectangle::new(
                 (content.loc.x - bw, content.loc.y - bw).into(),
                 Size::from((content.size.w + 2.0 * bw, content.size.h + 2.0 * bw)),
             );
-            let radius = o.corner_radius * k;
+            let radius = if deco { o.corner_radius * k } else { 0.0 };
             // Content corners follow the border's inner edge.
             let inner_radius = (radius - bw).max(0.0);
             let [dim_id, backdrop_id, border_id, shadow_id] = &c.deco_ids;
@@ -147,7 +169,7 @@ impl Uwc {
                 out.extend(els.into_iter().map(|e| UwcElement::from(RescaleRenderElement::from_element(e, origin, z))));
             }
 
-            if let (Some(s), true) = (shaders, look.dim > 0.0) {
+            if let (Some(s), true) = (shaders, deco && look.dim > 0.0) {
                 out.push(UwcElement::from(ShaderElement::rounded_box(
                     s,
                     dim_id,
@@ -171,6 +193,9 @@ impl Uwc {
                 out.push(RoundedElement::wrap(e, shaders, content, inner_radius, Scale::from(scale)));
             }
 
+            if !deco {
+                continue;
+            }
             let Some(s) = shaders else {
                 out.extend(self.solid_border(c, &look, scale));
                 continue;
@@ -227,15 +252,16 @@ impl Uwc {
         if bw <= 0 {
             return vec![];
         }
-        let vp = self.viewport();
-        let phys = |p: (f64, f64)| -> Point<i32, Physical> {
-            let s = vp.canvas_to_screen(p);
-            ((s.0 * scale).round() as i32, (s.1 * scale).round() as i32).into()
+        let pl = self.place(c);
+        // Window px (relative to the geometry's top-left) to physical px.
+        let phys = |x: f64, y: f64| -> Point<i32, Physical> {
+            (((pl.origin.x + x * pl.zoom) * scale).round() as i32, ((pl.origin.y + y * pl.zoom) * scale).round() as i32)
+                .into()
         };
-        let r = c.rect();
-        let b = bw as f64;
-        let (o0, o1) = (phys((r.loc.x - b, r.loc.y - b)), phys((r.loc.x + r.size.w + b, r.loc.y + r.size.h + b)));
-        let (i0, i1) = (phys((r.loc.x, r.loc.y)), phys((r.loc.x + r.size.w, r.loc.y + r.size.h)));
+        let s = c.size();
+        let (w, h, b) = (s.w as f64, s.h as f64, bw as f64);
+        let (o0, o1) = (phys(-b, -b), phys(w + b, h + b));
+        let (i0, i1) = (phys(0.0, 0.0), phys(w, h));
         let color = match &look.border {
             Paint::Solid(c) => *c,
             Paint::Gradient(g, _) => g.colors[0],

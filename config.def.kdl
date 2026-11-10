@@ -15,6 +15,7 @@ options {
     border-color "#444444"
     focus-color "#005577"
     urgent-color "#ff0000"
+    fullscreen-bg "#000000"     // behind a fullscreen window that does not cover the whole output
 
     // Window decoration. Sizes are canvas px and scale with zoom.
     corner-radius 10            // rounded window corners; 0 = square
@@ -115,6 +116,10 @@ binds {
     Mod+O { toggle-overview; }
     Mod+C { center-window; }
     Mod+M { fit-window; }
+    Mod+E { toggle-fullscreen; }
+    Mod+Shift+Space { toggle-pin; }     // keep on screen while the view moves, unzoomed, on every tag
+    Mod+Y { minimize-window; }          // hide the focused window until restored (a scratchpad)
+    Mod+Shift+Y { restore-window; }     // bring back the one hidden last
     Mod+minus { zoom 0.8; }
     Mod+equal { zoom 1.25; }
     Mod+Shift+0 { zoom-reset; }

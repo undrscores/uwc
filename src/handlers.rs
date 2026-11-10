@@ -140,6 +140,10 @@ impl XdgShellHandler for Uwc {
             tags: self.tagset(),
             mapped: false,
             urgent: false,
+            pin: None,
+            fullscreen: false,
+            prev_size: None,
+            minimized: 0,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
         });
@@ -179,10 +183,12 @@ impl XdgShellHandler for Uwc {
         }
     }
 
-    // Windows float on the canvas; a request to maximize or fullscreen is acknowledged unchanged
-    // (the client must get a configure back or it waits forever).
+    // Windows float on the canvas; a request to maximize is acknowledged unchanged (the client must
+    // get a configure back or it waits forever).
     fn maximize_request(&mut self, surface: ToplevelSurface) {
-        surface.send_pending_configure();
+        if surface.is_initial_configure_sent() {
+            surface.send_pending_configure();
+        }
     }
 
     fn fullscreen_request(
@@ -190,7 +196,22 @@ impl XdgShellHandler for Uwc {
         surface: ToplevelSurface,
         _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
     ) {
-        surface.send_pending_configure();
+        match self.client_by_surface(surface.wl_surface()) {
+            Some(i) => {
+                let id = self.clients[i].id;
+                self.set_fullscreen(id, true);
+            }
+            None => {
+                surface.send_pending_configure();
+            }
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(i) = self.client_by_surface(surface.wl_surface()) {
+            let id = self.clients[i].id;
+            self.set_fullscreen(id, false);
+        }
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {

@@ -818,3 +818,90 @@ fn bars_see_tags_as_workspaces_and_can_switch_them() {
     c.sync();
     assert_eq!(c.app.ws_group_outputs, 1);
 }
+
+#[test]
+fn pinned_windows_stay_on_screen_and_on_every_tag() {
+    let mut uwc = Uwc::start("pin", None);
+    let mut c = uwc.connect();
+    let _a = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A").clone();
+    let id = a["id"].as_u64().unwrap();
+    uwc.ok(&format!("pin {id}"));
+    assert_eq!(win(&uwc.state(), "A")["pinned"], true);
+    // Panning moves the canvas under it: its canvas position follows the fixed screen spot.
+    uwc.ok("pan 500 -100");
+    let s = uwc.state();
+    assert_eq!((num(&win(&s, "A")["x"]), num(&win(&s, "A")["y"])), (num(&a["x"]) + 500.0, num(&a["y"]) - 100.0));
+    // Shown on every tag: it keeps the focus across a tag switch.
+    uwc.ok("view 4");
+    let s = uwc.state();
+    assert_eq!(win(&s, "A")["focused"], true);
+    assert_eq!(s["keyboard_focus"]["window"], id);
+    // Unpinned, it lands on the canvas where it was on screen, on the tag in view.
+    uwc.ok(&format!("unpin {id}"));
+    let s = uwc.state();
+    let a2 = win(&s, "A");
+    assert_eq!((a2["pinned"].clone(), a2["tags"].clone()), (false.into(), 8.into()));
+    // Tag 4's view is at the origin, so the screen spot (350, 200) is canvas (350, 200).
+    assert_eq!((num(&a2["x"]), num(&a2["y"])), (350.0, 200.0));
+}
+
+#[test]
+fn minimized_windows_leave_and_come_back_where_you_are() {
+    let mut uwc = Uwc::start("minimize", None);
+    let mut c = uwc.connect();
+    let _a = c.window("A", 300, 200);
+    let _b = c.window("B", 300, 200);
+    let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (ia, ib) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "B")["id"].as_u64().unwrap());
+    uwc.ok(&format!("minimize {ib}"));
+    let s = uwc.state();
+    assert_eq!(win(&s, "B")["minimized"], true);
+    assert_eq!(s["keyboard_focus"]["window"], ia, "focus moves to what is left");
+    // Restored on another tag: it comes to you.
+    uwc.ok("view 3");
+    uwc.ok(&format!("restore {ib}"));
+    let s = uwc.state();
+    let b = win(&s, "B");
+    assert_eq!(
+        (b["minimized"].clone(), b["tags"].clone(), b["focused"].clone()),
+        (false.into(), 4.into(), true.into())
+    );
+}
+
+#[test]
+fn fullscreen_covers_the_output_and_gives_the_size_back() {
+    let mut uwc = Uwc::start("fullscreen", None);
+    let mut c = uwc.connect();
+    let mut a = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let (id, x, y) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "A")["x"].clone(), win(&s, "A")["y"].clone());
+
+    uwc.ok(&format!("fullscreen {id}"));
+    std::thread::sleep(Duration::from_millis(50));
+    c.follow_configure("A", &mut a);
+    let s = uwc.wait("fullscreen size", |s| win(s, "A")["width"] == 1000);
+    assert_eq!((win(&s, "A")["height"].clone(), win(&s, "A")["fullscreen"].clone()), (600.into(), true.into()));
+    assert!(uwc.cmd(&format!("pin {id}")).get("error").is_some(), "no pinning while fullscreen");
+
+    uwc.ok(&format!("unfullscreen {id}"));
+    std::thread::sleep(Duration::from_millis(50));
+    c.follow_configure("A", &mut a);
+    let s = uwc.wait("size back", |s| win(s, "A")["width"] == 300);
+    let w = win(&s, "A");
+    assert_eq!((w["height"].clone(), w["fullscreen"].clone()), (200.into(), false.into()));
+    assert_eq!((w["x"].clone(), w["y"].clone()), (x, y), "same place on the canvas");
+
+    // The client can ask for it too.
+    a.toplevel.set_fullscreen(None);
+    c.sync();
+    std::thread::sleep(Duration::from_millis(50));
+    c.follow_configure("A", &mut a);
+    uwc.wait("client-requested fullscreen", |s| win(s, "A")["fullscreen"] == true && win(s, "A")["width"] == 1000);
+    a.toplevel.unset_fullscreen();
+    c.sync();
+    std::thread::sleep(Duration::from_millis(50));
+    c.follow_configure("A", &mut a);
+    uwc.wait("client left fullscreen", |s| win(s, "A")["fullscreen"] == false && win(s, "A")["width"] == 300);
+}

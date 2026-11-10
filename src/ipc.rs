@@ -208,7 +208,11 @@ impl Uwc {
             .iter()
             .filter(|c| c.mapped)
             .map(|c| {
-                let r = c.rect();
+                let mut r = c.rect();
+                // A pinned window's canvas position is wherever its screen spot is over the canvas now.
+                if let Some(p) = c.pin {
+                    r.loc = self.viewport().screen_to_canvas((p.x, p.y)).into();
+                }
                 json!({
                     "id": c.id,
                     "title": c.title(),
@@ -217,11 +221,11 @@ impl Uwc {
                     "tags": c.tags,
                     "focused": self.focus == Some(c.id),
                     "floating": true,
-                    "fullscreen": false,
+                    "fullscreen": c.fullscreen,
                     "urgent": c.urgent,
                     "x": r.loc.x.round() as i64, "y": r.loc.y.round() as i64, "width": r.size.w as i64, "height": r.size.h as i64,
-                    "pinned": false,
-                    "minimized": false,
+                    "pinned": c.pin.is_some(),
+                    "minimized": c.minimized != 0,
                 })
             })
             .collect();
@@ -263,6 +267,7 @@ impl Uwc {
             "border-color": hex(c.border_color),
             "focus-color": hex(c.focus_color),
             "urgent-color": hex(c.urgent_color),
+            "fullscreen-bg": hex(c.fullscreen_bg),
             "corner-radius": c.corner_radius,
             "shadow-size": c.shadow_size,
             "shadow-offset-x": c.shadow_offset.0,
@@ -414,6 +419,21 @@ impl Uwc {
                 self.resize_client(w, cw as i32, ch as i32);
             }
             "overview" => self.toggle_overview(),
+            "pin" | "unpin" => {
+                let w = win(self, 0)?;
+                if cmd == "pin" && self.clients[self.client_index(w).unwrap()].fullscreen {
+                    return Err("a fullscreen window cannot be pinned".into());
+                }
+                self.set_pinned(w, cmd == "pin");
+            }
+            "minimize" | "restore" => {
+                let w = win(self, 0)?;
+                self.set_minimized(w, cmd == "minimize");
+            }
+            "fullscreen" | "unfullscreen" => {
+                let w = win(self, 0)?;
+                self.set_fullscreen(w, cmd == "fullscreen");
+            }
             "home" => self.with_viewport(|v, _| *v = Default::default()),
             "reload" => {
                 self.reload_config()?;

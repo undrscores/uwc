@@ -22,7 +22,7 @@ use smithay::{
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
-            Display, DisplayHandle,
+            Display, DisplayHandle, Resource,
         },
     },
     utils::{Logical, Point, Rectangle, Size},
@@ -67,6 +67,14 @@ pub struct Client {
     pub mapped: bool,
     /// Wants attention (set by xdg-activation once that exists).
     pub urgent: bool,
+    /// Pinned: the window's screen position (geometry top-left, logical px). It stays there while the
+    /// view moves, is not zoomed and is shown on every tag.
+    pub pin: Option<Point<f64, Logical>>,
+    pub fullscreen: bool,
+    /// The size to go back to when leaving fullscreen.
+    pub prev_size: Option<Size<i32, Logical>>,
+    /// Minimized (the scratchpad): 0 = no, else the order it was hidden in (newest highest).
+    pub minimized: u32,
     /// Ids for the four border rects, stable so the damage tracker can tell frames apart.
     pub border_ids: [Id; 4],
     /// Ids for the dim, backdrop, border and shadow shader elements.
@@ -76,12 +84,6 @@ pub struct Client {
 impl Client {
     pub fn size(&self) -> Size<i32, Logical> {
         self.window.geometry().size
-    }
-
-    /// Where the surface origin goes: the geometry may start inside the surface (client shadows).
-    pub fn surface_origin(&self) -> Point<f64, Logical> {
-        let g = self.window.geometry().loc;
-        (self.canvas.x - g.x as f64, self.canvas.y - g.y as f64).into()
     }
 
     pub fn rect(&self) -> Rectangle<f64, Logical> {
@@ -115,9 +117,39 @@ impl Client {
 /// What a pointer drag with Mod held is doing.
 #[derive(Debug, Clone, Copy)]
 pub enum Drag {
-    Move { id: u32, grab: Point<f64, Logical>, orig: Point<f64, Logical> },
-    Resize { id: u32, start: Point<f64, Logical>, orig: Size<i32, Logical> },
+    /// `start` is the pointer's screen position when the drag began, `orig` the window's position
+    /// then (canvas px, or screen px for a pinned window).
+    Move {
+        id: u32,
+        start: Point<f64, Logical>,
+        orig: Point<f64, Logical>,
+    },
+    Resize {
+        id: u32,
+        start: Point<f64, Logical>,
+        orig: Size<i32, Logical>,
+    },
     Pan,
+}
+
+/// Where a window is drawn: its geometry's top-left on the screen (logical px), and screen px per
+/// window px. Canvas windows follow the viewport; pinned and fullscreen ones are fixed to the screen
+/// and never zoomed.
+#[derive(Debug, Clone, Copy)]
+pub struct Place {
+    pub origin: Point<f64, Logical>,
+    pub zoom: f64,
+    pub on_canvas: bool,
+}
+
+/// A window surface under the pointer. `origin` and `location` are in the window's own space (canvas
+/// px for canvas windows, screen px for pinned and fullscreen ones) so surface-local coordinates
+/// come out right whatever the zoom.
+pub struct WindowHit {
+    pub idx: usize,
+    pub surface: WlSurface,
+    pub origin: Point<f64, Logical>,
+    pub location: Point<f64, Logical>,
 }
 
 pub struct Monitor {
@@ -192,6 +224,10 @@ pub struct Uwc {
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
     pub redraw: bool,
+    /// Counts minimize calls, so the newest minimized window comes back first.
+    pub minimize_stamp: u32,
+    /// The rect behind a fullscreen window (`fullscreen-bg`).
+    pub fullscreen_bg_id: Id,
     /// Set while drawing a frame that is part of an animation: the backend asks for the next one.
     pub animating: bool,
     pub ipc: Ipc,
@@ -268,6 +304,8 @@ impl Uwc {
             drag_last: (0.0, 0.0).into(),
             deco_commit: Default::default(),
             redraw: true,
+            minimize_stamp: 0,
+            fullscreen_bg_id: Id::new(),
             animating: false,
             ipc,
         })
@@ -337,7 +375,18 @@ impl Uwc {
     }
 
     pub fn visible(&self, c: &Client) -> bool {
-        c.mapped && self.mon.as_ref().is_some_and(|m| c.tags & m.tagset != 0)
+        c.mapped && c.minimized == 0 && (c.pin.is_some() || self.mon.as_ref().is_some_and(|m| c.tags & m.tagset != 0))
+    }
+
+    pub fn place(&self, c: &Client) -> Place {
+        if c.fullscreen {
+            return Place { origin: (0.0, 0.0).into(), zoom: 1.0, on_canvas: false };
+        }
+        if let Some(p) = c.pin {
+            return Place { origin: p, zoom: 1.0, on_canvas: false };
+        }
+        let vp = self.viewport();
+        Place { origin: vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into(), zoom: vp.zoom, on_canvas: true }
     }
 
     /// Apply `f` to the viewport in use, then re-send the pointer position so what is under
@@ -374,20 +423,19 @@ impl Uwc {
     }
 
     /// Topmost visible client under a screen point and the surface within it.
-    pub fn surface_under_screen(&self, p: Point<f64, Logical>) -> Option<(usize, WlSurface, Point<f64, Logical>)> {
-        let vp = self.viewport();
-        let (cx, cy) = vp.screen_to_canvas((p.x, p.y));
-        let canvas: Point<f64, Logical> = (cx, cy).into();
-        for (i, c) in self.clients.iter().enumerate().rev() {
-            if !self.visible(c) {
+    /// Topmost visible window surface under screen point `p`, among fullscreen windows or the others.
+    pub fn window_under(&self, p: Point<f64, Logical>, fullscreen: bool) -> Option<WindowHit> {
+        for (idx, c) in self.clients.iter().enumerate().rev() {
+            if !self.visible(c) || c.fullscreen != fullscreen {
                 continue;
             }
-            let origin = c.surface_origin();
-            let rel = canvas - origin;
-            if let Some((s, loc)) = c.window.surface_under(rel, smithay::desktop::WindowSurfaceType::ALL) {
-                // `loc` is the surface's offset inside the window; pointer focus wants the
-                // surface origin in the same space as the pointer location (canvas px).
-                return Some((i, s, origin + loc.to_f64()));
+            let pl = self.place(c);
+            // The point relative to the window geometry, in window px.
+            let local: Point<f64, Logical> = ((p.x - pl.origin.x) / pl.zoom, (p.y - pl.origin.y) / pl.zoom).into();
+            let g = c.window.geometry().loc.to_f64();
+            if let Some((surface, loc)) = c.window.surface_under(local + g, smithay::desktop::WindowSurfaceType::ALL) {
+                let space = if pl.on_canvas { c.canvas } else { pl.origin };
+                return Some(WindowHit { idx, surface, origin: space - g + loc.to_f64(), location: space + local });
             }
         }
         None
@@ -432,6 +480,10 @@ impl Uwc {
     /// Pan (not zoom) so the window is fully on screen if it is not; used by keyboard focus changes.
     pub fn reveal(&mut self, id: u32) {
         let Some(i) = self.client_index(id) else { return };
+        // Pinned and fullscreen windows are on screen wherever the view is.
+        if !self.place(&self.clients[i]).on_canvas {
+            return;
+        }
         let r = self.clients[i].rect();
         let (ax, ay, aw, ah) = self.work_area();
         let vp = self.viewport();
@@ -488,7 +540,7 @@ impl Uwc {
             .clients
             .iter()
             .enumerate()
-            .filter(|(i, c)| *i != cur && self.visible(c))
+            .filter(|(i, c)| *i != cur && self.visible(c) && !c.fullscreen)
             .filter_map(|(_, c)| {
                 let r = c.rect();
                 let to = (r.loc.x + r.size.w / 2.0 - from.0, r.loc.y + r.size.h / 2.0 - from.1);
@@ -511,8 +563,13 @@ impl Uwc {
         }
     }
 
+    /// Move a window to canvas position `x`, `y`. A pinned window goes where that is on screen now.
     pub fn move_client(&mut self, id: u32, x: f64, y: f64) {
         if let Some(i) = self.client_index(id) {
+            if self.clients[i].pin.is_some() {
+                let s = self.viewport().canvas_to_screen((x, y));
+                self.clients[i].pin = Some(s.into());
+            }
             self.clients[i].canvas = (x, y).into();
             self.refresh_pointer();
             self.damage();
@@ -573,9 +630,112 @@ impl Uwc {
         }
     }
 
+    // ---- pin, minimize, fullscreen -------------------------------------------------------------
+
+    /// Pin (keep on screen while the view moves, unzoomed, on every tag) or unpin, as in uwm.
+    /// A fullscreen window cannot be pinned.
+    pub fn set_pinned(&mut self, id: u32, on: bool) {
+        let Some(i) = self.client_index(id) else { return };
+        if self.clients[i].fullscreen || self.clients[i].pin.is_some() == on {
+            return;
+        }
+        let vp = self.viewport();
+        let ts = self.tagset();
+        let c = &mut self.clients[i];
+        if on {
+            c.pin = Some(vp.canvas_to_screen((c.canvas.x, c.canvas.y)).into());
+            c.tags = ALLTAGS;
+        } else {
+            let p = c.pin.take().unwrap();
+            c.canvas = vp.screen_to_canvas((p.x, p.y)).into();
+            c.tags = ts;
+        }
+        self.focus_client(Some(id));
+        self.refresh_pointer();
+        self.damage();
+    }
+
+    /// Hide a window until it is restored (the scratchpad), or bring it back where you are.
+    pub fn set_minimized(&mut self, id: u32, on: bool) {
+        let Some(i) = self.client_index(id) else { return };
+        if (self.clients[i].minimized != 0) == on || !self.clients[i].mapped {
+            return;
+        }
+        if on {
+            if self.clients[i].fullscreen {
+                self.set_fullscreen(id, false);
+            }
+            self.minimize_stamp += 1;
+            self.clients[i].minimized = self.minimize_stamp;
+            if self.focus == Some(id) {
+                let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
+                self.focus_client(top);
+            }
+            self.refresh_pointer();
+            self.damage();
+        } else {
+            self.clients[i].minimized = 0;
+            if self.clients[i].pin.is_none() {
+                self.clients[i].tags = self.tagset();
+            }
+            self.focus_and_reveal(id);
+            self.damage();
+        }
+    }
+
+    /// Bring back the window minimized last.
+    pub fn restore_newest(&mut self) {
+        if let Some(id) = self.clients.iter().filter(|c| c.minimized != 0).max_by_key(|c| c.minimized).map(|c| c.id) {
+            self.set_minimized(id, false);
+        }
+    }
+
+    /// Make a window cover the monitor (unscaled, undecorated, above bars), or put it back at its
+    /// earlier size. The canvas position is kept throughout.
+    pub fn set_fullscreen(&mut self, id: u32, on: bool) {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+        let Some(i) = self.client_index(id) else { return };
+        let screen = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
+        let c = &mut self.clients[i];
+        let Some(t) = c.window.toplevel().cloned() else { return };
+        if c.fullscreen != on {
+            c.fullscreen = on;
+            if on {
+                // A repeated request must not overwrite the saved size with the fullscreen one.
+                c.prev_size = Some(c.size()).filter(|s| s.w > 0 && s.h > 0);
+            }
+        }
+        let prev = c.prev_size;
+        let output = self.mon.as_ref().and_then(|m| {
+            let client = self.display_handle.get_client(t.wl_surface().id()).ok()?;
+            m.output.client_outputs(&client).next()
+        });
+        t.with_pending_state(|s| {
+            if on {
+                s.states.set(State::Fullscreen);
+                s.size = Some(screen);
+                s.fullscreen_output = output;
+            } else {
+                s.states.unset(State::Fullscreen);
+                s.size = prev;
+                s.fullscreen_output = None;
+            }
+        });
+        // Before the first configure the state simply goes out with it.
+        if t.is_initial_configure_sent() {
+            t.send_pending_configure();
+        }
+        if on {
+            self.focus_client(Some(id));
+        }
+        self.refresh_pointer();
+        self.damage();
+    }
+
     pub fn toggle_overview(&mut self) {
+        // Only canvas windows: pinned and fullscreen ones are on screen anyway.
         let rects: Vec<Rectangle<f64, Logical>> =
-            self.clients.iter().filter(|c| self.visible(c)).map(|c| c.rect()).collect();
+            self.clients.iter().filter(|c| self.visible(c) && self.place(c).on_canvas).map(|c| c.rect()).collect();
         let screen = self.work_area();
         let Some(m) = self.mon.as_mut() else { return };
         if let Some(prev) = m.overview.take() {
@@ -660,6 +820,24 @@ impl Uwc {
                 }
             }
             Action::ToggleOverview => self.toggle_overview(),
+            Action::ToggleFullscreen => {
+                if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
+                    let (id, on) = (self.clients[i].id, !self.clients[i].fullscreen);
+                    self.set_fullscreen(id, on);
+                }
+            }
+            Action::TogglePin => {
+                if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
+                    let (id, on) = (self.clients[i].id, self.clients[i].pin.is_none());
+                    self.set_pinned(id, on);
+                }
+            }
+            Action::MinimizeWindow => {
+                if let Some(id) = self.focus {
+                    self.set_minimized(id, true);
+                }
+            }
+            Action::RestoreWindow => self.restore_newest(),
             // Mouse-only actions are handled where the button press is.
             Action::DragMove | Action::DragResize | Action::DragPan => {}
             Action::SwitchVt(vt) => self.backend.switch_vt(*vt),
