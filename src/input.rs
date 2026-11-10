@@ -323,6 +323,7 @@ impl Uwc {
                 }
             }
         }
+        self.hot_zone_check();
         self.ipc.dirty = true;
     }
 

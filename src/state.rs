@@ -501,6 +501,7 @@ pub struct Uwc {
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
     pub fling: Option<Fling>,
+    pub hot: crate::hotzones::HotState,
     /// Labelled regions of the canvas (frames.rs).
     pub frames: crate::frames::Frames,
     /// Alignment lines drawn while a window is dragged (snap.rs).
@@ -658,6 +659,7 @@ impl Uwc {
             drag: None,
             gesture: None,
             fling: None,
+            hot: Default::default(),
             frames: Default::default(),
             guides: Default::default(),
             hints: None,

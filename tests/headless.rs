@@ -1799,6 +1799,57 @@ fn hooks_run_commands_with_the_event_in_their_environment() {
 }
 
 #[test]
+fn hot_zones_fire_once_when_the_pointer_rests_in_a_corner() {
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start(
+        "hot",
+        Some("options { hot-zone-delay-ms 150 }\nhot-zones {\n top-left { view-tag 2; }\n bottom-right { view-tag 3; }\n}"),
+    );
+    assert!(uwc.state()["config_error"].is_null());
+    let c = uwc.connect();
+    let qh = c.queue.handle();
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let mut c = c;
+    let active = |uwc: &mut Uwc| {
+        let s = uwc.state();
+        s["monitors"][0]["tags"].as_array().unwrap().iter().position(|t| t["active"] == true).unwrap() + 1
+    };
+    p.motion_absolute(0, 500, 300, 1000, 600);
+    p.frame();
+    c.sync();
+    assert_eq!(active(&mut uwc), 1);
+    // Passing through the corner without resting does nothing.
+    p.motion_absolute(1, 0, 0, 1000, 600);
+    p.frame();
+    p.motion_absolute(2, 500, 300, 1000, 600);
+    p.frame();
+    c.sync();
+    std::thread::sleep(Duration::from_millis(350));
+    assert_eq!(active(&mut uwc), 1, "no dwell, no action");
+    // Resting in it fires.
+    p.motion_absolute(3, 0, 0, 1000, 600);
+    p.frame();
+    c.sync();
+    uwc.wait("the top-left zone to fire", |s| s["monitors"][0]["tags"][1]["active"] == true);
+    // Staying does not fire again; going to the other corner fires that one.
+    p.motion_absolute(4, 999, 599, 1000, 600);
+    p.frame();
+    c.sync();
+    uwc.wait("the bottom-right zone to fire", |s| s["monitors"][0]["tags"][2]["active"] == true);
+    // Bad zone names and actions are config errors.
+    for bad in ["hot-zones { middle { zoom-reset; } }", "hot-zones { left { } }", "hot-zones { left { sing; } }"] {
+        let f = std::env::temp_dir().join(format!("uwc-test-{}-hot.kdl", std::process::id()));
+        std::fs::write(&f, bad).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_uwc")).args(["-t", "-c", f.to_str().unwrap()]).output().unwrap();
+        assert!(!out.status.success(), "{bad}");
+        let _ = std::fs::remove_file(&f);
+    }
+}
+
+#[test]
 fn windows_animate_in_moves_and_tag_switches() {
     let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
     let mut c = uwc.connect();

@@ -298,6 +298,10 @@ pub struct Config {
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
     pub hooks: crate::hooks::Hooks,
+    /// `hot-zones { top-left { action; } ... }`.
+    pub hot_zones: Vec<(crate::hotzones::Zone, Action)>,
+    pub hot_zone_size: f64,
+    pub hot_zone_delay_ms: f64,
     /// `tag N { ... }`: what a tag looks like, over the global options (index = tag - 1).
     pub tag_looks: Vec<TagLook>,
     pub keyboard: Keyboard,
@@ -419,6 +423,9 @@ impl Config {
             keys: Vec::new(),
             mouse: Vec::new(),
             hooks: Default::default(),
+            hot_zones: Vec::new(),
+            hot_zone_size: 2.0,
+            hot_zone_delay_ms: 250.0,
             tag_looks: vec![TagLook::default(); crate::canvas::TAGCOUNT],
             keyboard: Keyboard::default(),
             touchpad: Pointer::default(),
@@ -431,6 +438,20 @@ impl Config {
         for n in &nodes {
             match n.name.as_str() {
                 "vars" | "include" | "binds" => {}
+                "hot-zones" => {
+                    for z in &n.kids {
+                        let zone = crate::hotzones::Zone::parse(&z.name).ok_or_else(|| {
+                            anyhow!("unknown hot zone `{}` (line {}); known: top-left, top-right, bottom-left, bottom-right, top, bottom, left, right", z.name, z.line)
+                        })?;
+                        let act = z.kids.first().ok_or_else(|| {
+                            anyhow!("hot zone `{}` needs an action in braces (line {})", z.name, z.line)
+                        })?;
+                        let action =
+                            parse_action(act).with_context(|| format!("hot zone `{}` (line {})", z.name, z.line))?;
+                        cfg.hot_zones.retain(|(h, _)| *h != zone);
+                        cfg.hot_zones.push((zone, action));
+                    }
+                }
                 "tag" => {
                     let (i, look) = parse_tag_look(n, &vars).with_context(|| format!("tag (line {})", n.line))?;
                     cfg.tag_looks[i] = look;

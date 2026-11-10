@@ -17,6 +17,7 @@ mod frames;
 mod handlers;
 mod hints;
 mod hooks;
+mod hotzones;
 mod idle;
 mod ime;
 mod input;

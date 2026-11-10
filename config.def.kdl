@@ -74,6 +74,8 @@ options {
     frame-opacity 0.08          // how much the inside is tinted
     frame-label-scale 2         // size of the label, in screen px per font pixel (the strip is 11 of them tall)
     frame-border-width 2        // px; 0 = none
+    hot-zone-size 2             // hot zones (below) are this many px deep at the screen's corners and edges; 0 = off
+    hot-zone-delay-ms 250       // the pointer has to rest in one this long, so passing by does nothing
     hint-keys "asdfghjkl"       // jump-hints labels windows with these keys (letters and digits; pairs when there are more windows than keys). Not uwm's option
     hint-scale 3                // size of a hint label, in screen px per font pixel
     edge-pan-size 12            // dragging a window (Mod+drag) with the pointer this many px from a screen edge pans the view that way, the window with it; 0 = off. Not uwm's option
@@ -167,6 +169,14 @@ options {
 //     match focused=false
 //     exclude app-id="mpv"
 //     inactive-opacity 0.85
+// }
+
+// Hot zones: an action when the pointer rests in a screen corner or edge (corners and edges are of the whole
+// screen, all monitors together; each fires once per visit). Any bind action works.
+// hot-zones {
+//     top-left     { toggle-overview; }
+//     bottom-right { frame-next; }
+//     left         { view-previous; }
 // }
 
 // A tag's own look: the colour behind the canvas and the background shader, over the options above.
