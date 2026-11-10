@@ -11,6 +11,7 @@ mod input;
 mod ipc;
 mod kdl;
 mod layer;
+mod options;
 mod render;
 mod rules;
 mod state;

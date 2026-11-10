@@ -98,7 +98,7 @@ impl Uwc {
         };
         let (shadow_size, shadow_color) = if focused {
             (
-                if o.focus_shadow_size < 0.0 { o.shadow_size } else { o.focus_shadow_size },
+                o.focus_shadow_size.unwrap_or(o.shadow_size),
                 if o.focus_shadow_color[3] == 0.0 { o.shadow_color } else { o.focus_shadow_color },
             )
         } else {
@@ -229,7 +229,7 @@ impl Uwc {
             if look.shadow_size > 0.0 && look.shadow_color[3] > 0.0 {
                 let spread = o.shadow_spread * k;
                 let caster = Rectangle::new(
-                    (outer.loc.x - spread + o.shadow_offset.0 * k, outer.loc.y - spread + o.shadow_offset.1 * k).into(),
+                    (outer.loc.x - spread + o.shadow_offset_x * k, outer.loc.y - spread + o.shadow_offset_y * k).into(),
                     Size::from(((outer.size.w + 2.0 * spread).max(1.0), (outer.size.h + 2.0 * spread).max(1.0))),
                 );
                 let size = look.shadow_size * k;

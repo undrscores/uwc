@@ -39,8 +39,9 @@ uwm is awkward (the user said it need not be 1:1); `README.md` has the status ta
   changes reveal (`reveal`/`focus_and_reveal`); mouse clicks and sloppy focus do not.
 - Anything that needs a new frame calls `damage()` (sets `redraw`, marks IPC dirty). IPC subscribers get one snapshot
   per event-loop turn (`ipc_flush`).
-- Adding an option: a field in `Config`, an arm in `set_option` (with a range if a bad value could break something),
-  a line in `config.def.kdl` (documented), an entry in `ipc_options`, and a test. Adding an action: `Action`,
+- Adding an option: a field (in `rules::Deco` if it is about how a window looks, else `Config`) and one line in a
+  table in `options.rs` (name, field, range); that gives parsing, range checks, `set` and `get`. Then document it in
+  `config.def.kdl` (a test fails until you do). A new value type implements `OptValue`. Adding an action: `Action`,
   `parse_action`, `run_action`, a default bind if sensible.
 - Animations are stepped from the frame handler, never timers: set `animating` while drawing a frame that needs a
   next one (the border spin does), and the backend asks for it.

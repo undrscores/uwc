@@ -362,43 +362,11 @@ impl Config {
     }
 
     fn set_option(&mut self, n: &Node, vars: &HashMap<String, String>) -> Result<()> {
-        let name = n.name.as_str();
-        if self.deco.set(n, vars)? {
+        use crate::options::{set, DECO, GLOBAL};
+        if set(DECO, &mut self.deco, n, vars)? || set(GLOBAL, self, n, vars)? {
             return Ok(());
         }
-        let v = n.args.first().ok_or_else(|| anyhow!("missing value"))?;
-        let boolean = || v.as_bool().ok_or_else(|| anyhow!("expected true or false"));
-        let num = || v.as_num().ok_or_else(|| anyhow!("expected a number"));
-        let col = || match v {
-            Val::Str(s) => parse_color(s, vars),
-            _ => Err(anyhow!("expected a color string")),
-        };
-        match name {
-            "mod-key" => {
-                self.mod_key = match v.as_str().unwrap_or("") {
-                    "Super" | "Logo" => ModKey::Super,
-                    "Alt" => ModKey::Alt,
-                    "Ctrl" | "Control" => ModKey::Ctrl,
-                    "Shift" => ModKey::Shift,
-                    s => bail!("unknown mod-key `{s}` (Super, Alt, Ctrl or Shift)"),
-                }
-            }
-            "sloppy-focus" => self.sloppy_focus = boolean()?,
-            "warp-cursor" => self.warp_cursor = boolean()?,
-            "root-color" => self.root_color = col()?,
-            "fullscreen-bg" => self.fullscreen_bg = col()?,
-            "pan-step" => self.pan_step = range(num()?, 1.0, 10000.0)?,
-            "move-step" => self.move_step = range(num()?, 1.0, 10000.0)?,
-            "zoom-scroll" => self.zoom_scroll = range(num()?, 1.01, 3.0)?,
-            "new-window-offset" => self.new_window_offset = range(num()?, 0.0, 500.0)? as i32,
-            "cursor-theme" => self.cursor_theme = v.as_str().ok_or_else(|| anyhow!("expected a theme name"))?.into(),
-            "cursor-size" => self.cursor_size = range(num()?, 8.0, 256.0)? as u32,
-            "hardware-cursor" => self.hardware_cursor = boolean()?,
-            "direct-scanout" => self.direct_scanout = boolean()?,
-            "explicit-sync" => self.explicit_sync = boolean()?,
-            other => bail!("unknown option `{other}`"),
-        }
-        Ok(())
+        bail!("unknown option `{}`", n.name)
     }
 
     /// IPC `set`: one line of the `options` block (`focus-color "#ff8800"`), applied to a copy so a
@@ -847,7 +815,7 @@ mod tests {
         );
         let g = c.deco.focus_gradient.as_ref().unwrap();
         assert_eq!((g.colors.len(), g.angle), (2, 45.0));
-        assert_eq!(c.deco.focus_shadow_size, -1.0, "any negative size means 'same as shadow-size'");
+        assert_eq!(c.deco.focus_shadow_size, None, "any negative size means 'same as shadow-size'");
         // An empty gradient turns it off.
         let c2 = Config::parse("options { focus-gradient }", Some(Path::new("/x/c.kdl"))).unwrap();
         assert!(c2.deco.focus_gradient.is_none());

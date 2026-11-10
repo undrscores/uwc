@@ -35,13 +35,14 @@ pub struct Deco {
     pub urgent_color: Color,
     pub corner_radius: f64,
     pub shadow_size: f64,
-    pub shadow_offset: (f64, f64),
+    pub shadow_offset_x: f64,
+    pub shadow_offset_y: f64,
     pub shadow_color: Color,
     pub shadow_spread: f64,
     /// Alpha 0 = the same as shadow_color.
     pub focus_shadow_color: Color,
-    /// -1 = the same as shadow_size.
-    pub focus_shadow_size: f64,
+    /// None = the same as shadow_size (-1 in the config and over IPC).
+    pub focus_shadow_size: Option<f64>,
     pub backdrop_color: Color,
     pub opacity: f64,
     pub inactive_opacity: f64,
@@ -61,11 +62,12 @@ impl Default for Deco {
             urgent_color: [1.0, 0.0, 0.0, 1.0],
             corner_radius: 10.0,
             shadow_size: 24.0,
-            shadow_offset: (0.0, 6.0),
+            shadow_offset_x: 0.0,
+            shadow_offset_y: 6.0,
             shadow_color: [0.0, 0.0, 0.0, 0.6],
             shadow_spread: 0.0,
             focus_shadow_color: [0.0; 4],
-            focus_shadow_size: -1.0,
+            focus_shadow_size: None,
             backdrop_color: [0.0; 4],
             opacity: 1.0,
             inactive_opacity: 1.0,
@@ -81,56 +83,8 @@ impl Default for Deco {
 impl Deco {
     /// Apply one decoration setting. `Ok(false)`: `n` is not a decoration setting at all.
     pub fn set(&mut self, n: &Node, vars: &HashMap<String, String>) -> Result<bool> {
-        match n.name.as_str() {
-            "border-gradient" => self.border_gradient = parse_gradient(n, vars)?,
-            "focus-gradient" => self.focus_gradient = parse_gradient(n, vars)?,
-            "urgent-gradient" => self.urgent_gradient = parse_gradient(n, vars)?,
-            name => {
-                let Some(v) = n.args.first() else {
-                    return match is_deco(name) {
-                        true => Err(anyhow!("missing value")),
-                        false => Ok(false),
-                    };
-                };
-                let num = || v.as_num().ok_or_else(|| anyhow!("expected a number"));
-                let col = || match v {
-                    Val::Str(s) => parse_color(s, vars),
-                    _ => Err(anyhow!("expected a color string")),
-                };
-                match name {
-                    "border-width" => self.border_width = range(num()?, 0.0, 64.0)? as i32,
-                    "border-color" => self.border_color = col()?,
-                    "focus-color" => self.focus_color = col()?,
-                    "urgent-color" => self.urgent_color = col()?,
-                    "corner-radius" => self.corner_radius = range(num()?, 0.0, 500.0)?,
-                    "shadow-size" => self.shadow_size = range(num()?, 0.0, 500.0)?,
-                    "shadow-offset-x" => self.shadow_offset.0 = range(num()?, -1000.0, 1000.0)?,
-                    "shadow-offset-y" => self.shadow_offset.1 = range(num()?, -1000.0, 1000.0)?,
-                    "shadow-color" => self.shadow_color = col()?,
-                    "shadow-spread" => self.shadow_spread = range(num()?, -500.0, 500.0)?,
-                    "focus-shadow-color" => self.focus_shadow_color = col()?,
-                    "focus-shadow-size" => {
-                        let v = num()?;
-                        self.focus_shadow_size = if v < 0.0 { -1.0 } else { range(v, 0.0, 500.0)? };
-                    }
-                    "backdrop-color" => self.backdrop_color = col()?,
-                    "opacity" => self.opacity = range(num()?, 0.0, 1.0)?,
-                    "inactive-opacity" => self.inactive_opacity = range(num()?, 0.0, 1.0)?,
-                    "inactive-dim" => self.inactive_dim = range(num()?, 0.0, 1.0)?,
-                    "border-spin-ms" => self.border_spin_ms = range(num()?, -1e7, 1e7)?,
-                    _ => return Ok(false),
-                }
-            }
-        }
-        Ok(true)
+        crate::options::set(crate::options::DECO, self, n, vars)
     }
-}
-
-fn is_deco(name: &str) -> bool {
-    let mut d = Deco::default();
-    // A probe: a decoration setting with a dummy value either applies or fails on the value.
-    let probe = Node { name: name.into(), args: vec![Val::Num(0.0)], ..Default::default() };
-    !matches!(d.set(&probe, &HashMap::new()), Ok(false))
 }
 
 pub fn parse_gradient(n: &Node, vars: &HashMap<String, String>) -> Result<Option<Gradient>> {

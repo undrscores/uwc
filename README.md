@@ -109,6 +109,7 @@ documentation; a file only needs what it changes, and it is reloaded when saved.
 src/main.rs        CLI, event loop, signals, config watching
 src/canvas.rs      Viewport maths (pure, unit-tested), tag constants
 src/config.rs      config model, includes/vars, binds, validation
+src/options.rs     every option once: name, field, range -> parsing, set, get
 src/kdl.rs         the KDL subset parser (a port of uwm's kdl.h)
 src/state.rs       Uwc state: windows, tags, viewport, focus, actions
 src/handlers.rs    wayland protocol handlers

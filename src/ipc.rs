@@ -12,7 +12,7 @@ use std::{
 use serde_json::{json, Value};
 use smithay::reexports::calloop::{generic::Generic, Interest, LoopHandle, Mode, PostAction};
 
-use crate::{canvas::TAGCOUNT, config::Color, state::Uwc};
+use crate::{canvas::TAGCOUNT, state::Uwc};
 
 const MAX_LINE: usize = 511;
 
@@ -64,42 +64,9 @@ impl Ipc {
     }
 }
 
-fn gradient(g: &Option<crate::config::Gradient>) -> Value {
-    match g {
-        Some(g) => json!({"angle": g.angle, "colors": g.colors.iter().map(|c| hex(*c)).collect::<Vec<_>>()}),
-        None => Value::Null,
-    }
-}
-
 /// Decoration settings under their option names, as `get` reports them.
 fn deco_json(d: &crate::rules::Deco) -> Value {
-    json!({
-        "border-width": d.border_width,
-        "border-color": hex(d.border_color),
-        "focus-color": hex(d.focus_color),
-        "urgent-color": hex(d.urgent_color),
-        "corner-radius": d.corner_radius,
-        "shadow-size": d.shadow_size,
-        "shadow-offset-x": d.shadow_offset.0,
-        "shadow-offset-y": d.shadow_offset.1,
-        "shadow-color": hex(d.shadow_color),
-        "shadow-spread": d.shadow_spread,
-        "focus-shadow-color": hex(d.focus_shadow_color),
-        "focus-shadow-size": d.focus_shadow_size,
-        "backdrop-color": hex(d.backdrop_color),
-        "opacity": d.opacity,
-        "inactive-opacity": d.inactive_opacity,
-        "inactive-dim": d.inactive_dim,
-        "border-gradient": gradient(&d.border_gradient),
-        "focus-gradient": gradient(&d.focus_gradient),
-        "urgent-gradient": gradient(&d.urgent_gradient),
-        "border-spin-ms": d.border_spin_ms,
-    })
-}
-
-fn hex(c: Color) -> String {
-    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!("#{:02x}{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]), b(c[3]))
+    Value::Object(crate::options::json(crate::options::DECO, d))
 }
 
 impl Uwc {
@@ -286,26 +253,10 @@ impl Uwc {
     }
 
     fn ipc_options(&self) -> Value {
-        let c = &self.config;
-        let mut v = json!({
-            "sloppy-focus": c.sloppy_focus,
-            "warp-cursor": c.warp_cursor,
-            "root-color": hex(c.root_color),
-            "fullscreen-bg": hex(c.fullscreen_bg),
-            "pan-step": c.pan_step,
-            "move-step": c.move_step,
-            "zoom-scroll": c.zoom_scroll,
-            "new-window-offset": c.new_window_offset,
-            "cursor-theme": c.cursor_theme,
-            "cursor-size": c.cursor_size,
-            "hardware-cursor": c.hardware_cursor,
-            "direct-scanout": c.direct_scanout,
-            "explicit-sync": c.explicit_sync,
-        });
-        if let (Some(o), Value::Object(d)) = (v.as_object_mut(), deco_json(&c.deco)) {
-            o.extend(d);
-        }
-        v
+        use crate::options::{json, DECO, GLOBAL};
+        let mut all = json(GLOBAL, &self.config);
+        all.extend(json(DECO, &self.config.deco));
+        Value::Object(all)
     }
 
     fn ipc_line(&mut self, id: u32, line: &str) {
