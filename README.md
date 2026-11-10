@@ -101,15 +101,11 @@ cargo run --example paint -- --bar 32 30a0d0         # ... or a layer-shell bar
 
 ### As a session
 
-```sh
-make                      # cargo build --release
-sudo make install         # /usr/local/bin/uwc, uwc-session, share/wayland-sessions/uwc.desktop
-```
-
-Then pick "uwc" in your display manager, or log in on a TTY and run `uwc-session` (plain `uwc` works too; with no
-`WAYLAND_DISPLAY`/`DISPLAY` set it picks the udev backend). It needs seat access: logind (systemd) or seatd with your
-user in its group. `uwc-session` logs to `~/.local/state/uwc.log` (the previous run in `uwc.log.old`), exports the
-session variables to D-Bus/systemd for portals, then runs `~/.config/uwc/startup` if it is executable (start your bar,
+**[INSTALL.md](INSTALL.md)** has install instructions for NixOS (flake and module), Gentoo (ebuild) and building from
+source on any other distro, plus first start, config, startup script and screen sharing. In short, from a checkout:
+`make && sudo make install PREFIX=/usr`, then pick "uwc" in your display manager or run `uwc-session` on a TTY (it needs
+seat access: logind, or seatd with your user in its group). `uwc-session` logs to `~/.local/state/uwc.log`, exports the
+session variables to D-Bus/systemd for portals, and runs `~/.config/uwc/startup` if it is executable (start your bar,
 notification daemon, etc. there). Ctrl+Alt+Backspace quits; Ctrl+Alt+F1..F12 switch VTs.
 
 ### NVIDIA
@@ -164,6 +160,7 @@ src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
 src/cursor.rs      the pointer image (xcursor theme, animated cursors, client surfaces, fallback arrow)
 src/output_management.rs  zwlr-output-management-v1: heads and apply
 src/output_power.rs       zwlr-output-power-management-v1: DPMS blanking
+packaging/        nix (package, NixOS module) and gentoo (live ebuild); flake.nix at the root
 src/extras.rs      small protocols: cursor-shape, data-control, virtual keyboard, shortcuts inhibit, xdg-foreign, ...
 src/touch.rs       touchscreen input and its pan/pinch gesture maths
 src/virtual_pointer.rs  wlr-virtual-pointer
