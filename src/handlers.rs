@@ -74,6 +74,8 @@ impl CompositorHandler for Uwc {
             self.ipc.dirty = true;
         }
 
+        self.layer_commit(&root);
+
         self.popups.commit(surface);
         if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
             if !popup.is_initial_configure_sent() {
@@ -89,12 +91,13 @@ impl Uwc {
     fn map_client(&mut self, i: usize) {
         let size = self.clients[i].size();
         let vp = self.viewport();
-        let (sw, sh) = self.screen_size();
+        let (ax, ay, aw, ah) = self.work_area();
         let n = self.clients.iter().filter(|c| c.mapped).count() as i32;
         let off = (n % 8) * self.config.new_window_offset;
-        // Centre on the view, cascading so windows don't hide each other exactly.
-        let cx = vp.x + sw / vp.zoom / 2.0 - size.w as f64 / 2.0 + off as f64;
-        let cy = vp.y + sh / vp.zoom / 2.0 - size.h as f64 / 2.0 + off as f64;
+        // Centre in the work area (the screen minus bars), cascading so windows don't hide each other exactly.
+        let (mx, my) = vp.screen_to_canvas((ax + aw / 2.0, ay + ah / 2.0));
+        let cx = mx - size.w as f64 / 2.0 + off as f64;
+        let cy = my - size.h as f64 / 2.0 + off as f64;
         self.clients[i].canvas = (cx.round(), cy.round()).into();
         self.clients[i].mapped = true;
         self.clients[i].tags = self.tagset();

@@ -9,6 +9,7 @@ mod handlers;
 mod input;
 mod ipc;
 mod kdl;
+mod layer;
 mod render;
 mod state;
 

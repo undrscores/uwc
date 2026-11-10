@@ -25,14 +25,19 @@ render_elements! {
     Surface=RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     Solid=SolidColorRenderElement,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
+    Layer=WaylandSurfaceRenderElement<GlesRenderer>,
 }
 
 impl Uwc {
-    /// Everything on one output for one frame, front to back: the pointer, then the canvas.
+    /// Everything on one output for one frame, front to back: the pointer, overlay and top layer
+    /// surfaces, the canvas, then bottom and background layer surfaces.
     /// `scale` is the output scale (physical px per logical px).
     pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
+        use smithay::wayland::shell::wlr_layer::Layer;
         let mut out = self.cursor_elements(renderer, scale);
+        out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay, Layer::Top]));
         out.extend(self.render_elements(renderer, scale));
+        out.extend(self.layer_elements(renderer, scale, &[Layer::Bottom, Layer::Background]));
         out
     }
 

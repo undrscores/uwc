@@ -16,6 +16,7 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 // ---- the compositor under test -----------------------------------------------------------
 
@@ -133,9 +134,18 @@ struct App {
     compositor: wl_compositor::WlCompositor,
     shm: wl_shm::WlShm,
     wm: xdg_wm_base::XdgWmBase,
+    layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1,
     closed: Vec<String>,
     /// The size the compositor last asked a toplevel for.
     asked: Option<(i32, i32)>,
+    /// The size the last layer-surface configure gave.
+    layer_size: Option<(u32, u32)>,
+}
+
+struct Layer {
+    surface: wl_surface::WlSurface,
+    layer: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+    _buf: wl_buffer::WlBuffer,
 }
 
 struct Window {
@@ -162,11 +172,41 @@ impl Client {
             compositor: globals.bind(&qh, 4..=6, ()).unwrap(),
             shm: globals.bind(&qh, 1..=1, ()).unwrap(),
             wm: globals.bind(&qh, 1..=6, ()).unwrap(),
+            layer_shell: globals.bind(&qh, 1..=4, ()).unwrap(),
             closed: vec![],
             asked: None,
+            layer_size: None,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, _dir: runtime_dir.to_path_buf() }
+    }
+
+    /// A layer surface the way a bar or launcher makes one: set it up, commit, take the configured
+    /// size, attach a buffer of that size.
+    fn layer(
+        &mut self,
+        name: &str,
+        layer: zwlr_layer_shell_v1::Layer,
+        anchor: zwlr_layer_surface_v1::Anchor,
+        size: (u32, u32),
+        exclusive: i32,
+        keyboard: zwlr_layer_surface_v1::KeyboardInteractivity,
+    ) -> Layer {
+        let qh = self.queue.handle();
+        let surface = self.app.compositor.create_surface(&qh, ());
+        let l = self.app.layer_shell.get_layer_surface(&surface, None, layer, name.into(), &qh, ());
+        l.set_size(size.0, size.1);
+        l.set_anchor(anchor);
+        l.set_exclusive_zone(exclusive);
+        l.set_keyboard_interactivity(keyboard);
+        surface.commit();
+        self.queue.roundtrip(&mut self.app).unwrap();
+        let (w, h) = self.app.layer_size.take().expect("layer surface configured");
+        let buf = self.buffer(name, w as i32, h as i32);
+        surface.attach(Some(&buf), 0, 0);
+        surface.commit();
+        self.queue.roundtrip(&mut self.app).unwrap();
+        Layer { surface, layer: l, _buf: buf }
     }
 
     /// Open a toplevel the way a toolkit does: configure, ack, attach a buffer, commit.
@@ -290,6 +330,22 @@ macro_rules! noop {
         }
     )*};
 }
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        l: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        e: zwlr_layer_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwlr_layer_surface_v1::Event::Configure { serial, width, height } = e {
+            l.ack_configure(serial);
+            app.layer_size = Some((width, height));
+        }
+    }
+}
+noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_surface::WlSurface);
 
 // ---- tests ---------------------------------------------------------------------------------
@@ -322,6 +378,7 @@ fn window_maps_centered_and_focused() {
     // Centred on the 1000x600 view.
     assert_eq!((num(&a["x"]), num(&a["y"])), (350.0, 200.0));
     assert_eq!(a["focused"], true);
+    assert_eq!(s["keyboard_focus"]["window"], a["id"], "the seat's keyboard follows window focus");
     assert_eq!(a["app_id"], "uwc.test");
     assert_eq!(a["tags"], 1);
     assert_eq!(s["monitors"][0]["tags"][0]["occupied"], true);
@@ -501,4 +558,70 @@ fn quit_ends_the_compositor() {
         assert!(start.elapsed() < Duration::from_secs(5), "did not exit");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn bars_reserve_space_and_windows_open_in_the_rest() {
+    use zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity as K};
+    let mut uwc = Uwc::start("bar", None);
+    let mut c = uwc.connect();
+    // A 30 px bar along the top edge, full width (width 0 = stretch between the anchors).
+    let _bar = c.layer(
+        "bar",
+        zwlr_layer_shell_v1::Layer::Top,
+        Anchor::Top | Anchor::Left | Anchor::Right,
+        (0, 30),
+        30,
+        K::None,
+    );
+    let s = uwc.wait("bar", |s| !s["monitors"][0]["layers"].as_array().unwrap().is_empty());
+    let m = &s["monitors"][0];
+    let bar = &m["layers"][0];
+    assert_eq!((&bar["namespace"], &bar["layer"]), (&"bar".into(), &"top".into()));
+    assert_eq!((num(&bar["x"]), num(&bar["y"]), num(&bar["width"]), num(&bar["height"])), (0.0, 0.0, 1000.0, 30.0));
+    let wa = &m["work_area"];
+    assert_eq!((num(&wa["y"]), num(&wa["height"])), (30.0, 570.0), "the bar's exclusive zone is reserved");
+
+    // A window opens centred in what is left: y = 30 + (570 - 200) / 2.
+    let _w = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+    let a = win(&s, "A");
+    assert_eq!((num(&a["x"]), num(&a["y"])), (350.0, 215.0));
+    // The bar is screen-fixed: panning and zooming leave it alone.
+    uwc.ok("pan 500 500");
+    uwc.ok("zoom 0.5");
+    let bar = &uwc.state()["monitors"][0]["layers"][0];
+    assert_eq!((num(&bar["x"]), num(&bar["y"]), num(&bar["width"])), (0.0, 0.0, 1000.0));
+}
+
+#[test]
+fn an_exclusive_launcher_takes_the_keyboard_and_gives_it_back() {
+    use zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity as K};
+    let mut uwc = Uwc::start("launcher", None);
+    let mut c = uwc.connect();
+    let _w = c.window("A", 300, 200);
+    uwc.wait("A", |s| win(s, "A")["focused"] == true);
+
+    let l = c.layer("launcher", zwlr_layer_shell_v1::Layer::Overlay, Anchor::empty(), (400, 300), 0, K::Exclusive);
+    let s = uwc.wait("launcher has the keyboard", |s| {
+        s["monitors"][0]["layers"].as_array().unwrap().iter().any(|l| l["keyboard"] == true)
+    });
+    assert_eq!(s["keyboard_focus"]["layer"], "launcher");
+    let la = &s["monitors"][0]["layers"][0];
+    // Centred when not anchored.
+    assert_eq!((num(&la["x"]), num(&la["y"])), (300.0, 150.0));
+    assert!(uwc.cmd("focus 1").get("ok").is_some());
+    let s = uwc.state();
+    assert_eq!(
+        s["monitors"][0]["layers"][0]["keyboard"], true,
+        "window focus does not take it from an exclusive layer"
+    );
+    assert_eq!(s["keyboard_focus"]["layer"], "launcher");
+
+    l.layer.destroy();
+    l.surface.destroy();
+    c.sync();
+    let s = uwc.wait("launcher gone", |s| s["monitors"][0]["layers"].as_array().unwrap().is_empty());
+    assert_eq!(win(&s, "A")["focused"], true);
+    assert_eq!(s["keyboard_focus"]["window"], win(&s, "A")["id"], "the window gets the seat's keyboard back");
 }

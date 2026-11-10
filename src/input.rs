@@ -15,6 +15,7 @@ use smithay::{
 
 use crate::{
     config::{Action, ModKey, Mods, BTN_LEFT},
+    layer::Under,
     state::{Drag, Uwc},
 };
 
@@ -121,7 +122,7 @@ impl Uwc {
         self.redraw = true;
         self.pointer_motion_to(self.cursor, time);
         if self.drag.is_none() && self.config.sloppy_focus {
-            if let Some((i, _, _)) = self.surface_under_screen(self.cursor) {
+            if let Some(i) = self.under(self.cursor).and_then(|u| u.window()) {
                 let id = self.clients[i].id;
                 if self.focus != Some(id) {
                     // Sloppy focus does not raise or pan; it only hands over keyboard focus.
@@ -139,10 +140,16 @@ impl Uwc {
             return;
         }
         let vp = self.viewport();
-        let (cx, cy) = vp.screen_to_canvas((pos.x, pos.y));
-        let under = self.surface_under_screen(pos).map(|(_, s, loc)| (s, loc));
+        let canvas: Point<f64, Logical> = vp.screen_to_canvas((pos.x, pos.y)).into();
+        // Window surfaces live in canvas px, layer surfaces in screen px: the location handed to the
+        // seat is in the space of whatever is under the pointer, so surface-local coordinates come out right.
+        let (location, focus) = match self.under(pos) {
+            Some(Under::Window { surface, origin, .. }) => (canvas, Some((surface, origin))),
+            Some(Under::Layer { surface, origin, .. }) => (pos, Some((surface, origin))),
+            None => (canvas, None),
+        };
         let ptr = self.pointer();
-        ptr.motion(self, under, &MotionEvent { location: (cx, cy).into(), serial: SERIAL_COUNTER.next_serial(), time });
+        ptr.motion(self, focus, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });
         ptr.frame(self);
     }
 
@@ -181,7 +188,8 @@ impl Uwc {
         let serial = SERIAL_COUNTER.next_serial();
         if state == ButtonState::Pressed {
             let mods = mods_of(&self.keyboard().modifier_state());
-            let under = self.surface_under_screen(self.cursor).map(|(i, _, _)| i);
+            let hit = self.under(self.cursor);
+            let under = hit.as_ref().and_then(Under::window);
             let bind =
                 self.config.mouse.iter().find(|b| b.button == button && b.mods == mods).map(|b| b.action.clone());
             match (bind, under) {
@@ -202,16 +210,25 @@ impl Uwc {
                 }
                 _ => {}
             }
-            match under {
-                // A click focuses and raises, but never pans the view.
-                Some(i) => self.focus_client(Some(self.clients[i].id)),
+            match (&hit, under) {
+                // A click on a layer surface that takes keyboard input gives it the keyboard.
+                (Some(Under::Layer { root, interactive: true, .. }), _) => self.set_layer_focus(Some(root.clone())),
+                (Some(Under::Layer { .. }), _) => {}
+                // A click focuses and raises, but never pans the view. It takes the keyboard back from a
+                // layer surface unless that one holds it exclusively.
+                (_, Some(i)) => {
+                    if !self.layer_focus_is_exclusive() {
+                        self.layer_focus = None;
+                    }
+                    self.focus_client(Some(self.clients[i].id));
+                }
                 // Dragging empty canvas pans it.
-                None if button == BTN_LEFT => {
+                (None, None) if button == BTN_LEFT => {
                     self.drag = Some(Drag::Pan);
                     self.drag_last = self.cursor;
                     return;
                 }
-                None => {}
+                _ => {}
             }
         } else if self.drag.take().is_some() {
             // The press that started the drag never reached a client, so neither does its release.

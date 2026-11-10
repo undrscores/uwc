@@ -156,6 +156,7 @@ impl Uwc {
 
     pub fn ipc_state(&self) -> Value {
         let screen = self.screen_size();
+        let wa = self.work_area();
         let ts = self.tagset();
         let mut occ = 0u32;
         for c in &self.clients {
@@ -185,6 +186,8 @@ impl Uwc {
                     "x": 0, "y": 0, "width": screen.0 as i64, "height": screen.1 as i64,
                     "scale": m.output.current_scale().fractional_scale(),
                     "viewport": {"x": vp.x.round() as i64, "y": vp.y.round() as i64, "zoom": vp.zoom},
+                    "work_area": {"x": wa.0 as i64, "y": wa.1 as i64, "width": wa.2 as i64, "height": wa.3 as i64},
+                    "layers": self.layer_info(),
                     "tags": tags,
                 })
             })
@@ -218,10 +221,26 @@ impl Uwc {
             "config_error": self.config_error,
             "config_rev": self.config_rev,
             "backend": self.backend.name(),
+            "keyboard_focus": self.keyboard_focus_json(),
             "monitors": mons,
             "cursor": {"x": self.cursor.x.round() as i64, "y": self.cursor.y.round() as i64, "hidden": false},
             "windows": windows,
         })
+    }
+
+    /// Where the seat's keyboard really is: `{"window": id}`, `{"layer": namespace}` or null.
+    fn keyboard_focus_json(&self) -> Value {
+        let Some(f) = self.keyboard().current_focus() else { return Value::Null };
+        if let Some(i) = self.client_by_surface(&f) {
+            return json!({"window": self.clients[i].id});
+        }
+        if let Some(o) = self.output() {
+            let map = smithay::desktop::layer_map_for_output(&o);
+            if let Some(l) = map.layer_for_surface(&f, smithay::desktop::WindowSurfaceType::TOPLEVEL) {
+                return json!({"layer": l.namespace()});
+            }
+        }
+        json!({"other": true})
     }
 
     fn ipc_options(&self) -> Value {

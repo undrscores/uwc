@@ -76,6 +76,20 @@ pub fn send_frame_callbacks(state: &Uwc, output: &Output) {
             );
         }
     }
+    let map = smithay::desktop::layer_map_for_output(output);
+    for l in map.layers() {
+        l.send_frame(output, time, Some(Duration::ZERO), |_, _| Some(output.clone()));
+        for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(l.wl_surface()) {
+            smithay::desktop::utils::send_frames_surface_tree(
+                popup.wl_surface(),
+                output,
+                time,
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
+        }
+    }
+    drop(map);
     if let smithay::input::pointer::CursorImageStatus::Surface(s) = &state.cursor_status {
         smithay::desktop::utils::send_frames_surface_tree(s, output, time, Some(Duration::ZERO), |_, _| {
             Some(output.clone())

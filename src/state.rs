@@ -25,13 +25,16 @@ use smithay::{
             Display, DisplayHandle,
         },
     },
-    utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, Size},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         dmabuf::{DmabufGlobal, DmabufState},
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
-        shell::xdg::{decoration::XdgDecorationState, XdgShellState},
+        shell::{
+            wlr_layer::WlrLayerShellState,
+            xdg::{decoration::XdgDecorationState, XdgShellState},
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
     },
@@ -152,6 +155,9 @@ pub struct Uwc {
     pub data_device_state: DataDeviceState,
     pub popups: PopupManager,
     pub seat: Seat<Uwc>,
+    pub layer_shell_state: WlrLayerShellState,
+    /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
+    pub layer_focus: Option<WlSurface>,
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
     pub backend: Backend,
@@ -225,6 +231,8 @@ impl Uwc {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Uwc>(&dh),
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
             popups: PopupManager::default(),
+            layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
+            layer_focus: None,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             backend: Backend::None,
@@ -286,6 +294,9 @@ impl Uwc {
 
     /// Use `output` as the monitor. A new output after a hotplug keeps the tags and viewports.
     pub fn add_monitor(&mut self, output: Output, size: Size<i32, Logical>) {
+        if let Some(old) = self.mon.as_ref().map(|m| m.output.clone()) {
+            self.move_layers(&old, &output);
+        }
         if let Some(m) = self.mon.as_mut() {
             m.output = output;
             m.size = size;
@@ -319,11 +330,12 @@ impl Uwc {
 
     /// Apply `f` to the viewport in use, then re-send the pointer position so what is under
     /// it is right after the canvas moved.
-    pub fn with_viewport(&mut self, f: impl FnOnce(&mut Viewport, (f64, f64))) {
-        let screen = self.screen_size();
+    /// `f` gets the work area (the screen minus bars) for centring.
+    pub fn with_viewport(&mut self, f: impl FnOnce(&mut Viewport, crate::canvas::Area)) {
+        let area = self.work_area();
         if let Some(m) = self.mon.as_mut() {
             m.overview = None;
-            f(m.viewport_mut(), screen);
+            f(m.viewport_mut(), area);
         }
         self.refresh_pointer();
         self.damage();
@@ -376,9 +388,7 @@ impl Uwc {
 
     /// Give a client keyboard focus, optionally raising it (sloppy focus does not).
     pub fn set_focus(&mut self, id: Option<u32>, raise: bool) {
-        let serial = SERIAL_COUNTER.next_serial();
         self.focus = id;
-        let surface = id.and_then(|id| self.client_index(id)).map(|i| self.clients[i].surface().clone());
         if let Some(i) = id.and_then(|id| self.client_index(id)).filter(|_| raise) {
             let c = self.clients.remove(i);
             self.clients.push(c);
@@ -401,8 +411,8 @@ impl Uwc {
                 }
             }
         }
-        let kb = self.keyboard();
-        kb.set_focus(self, surface, serial);
+        // A layer surface holding the keyboard (a launcher) keeps it; the window focus is remembered.
+        self.update_keyboard_focus();
         self.deco_commit.increment();
         self.damage();
     }
@@ -411,11 +421,11 @@ impl Uwc {
     pub fn reveal(&mut self, id: u32) {
         let Some(i) = self.client_index(id) else { return };
         let r = self.clients[i].rect();
-        let screen = self.screen_size();
+        let (ax, ay, aw, ah) = self.work_area();
         let vp = self.viewport();
         let (sx, sy) = vp.canvas_to_screen((r.loc.x, r.loc.y));
         let (ex, ey) = vp.canvas_to_screen((r.loc.x + r.size.w, r.loc.y + r.size.h));
-        if sx >= 0.0 && sy >= 0.0 && ex <= screen.0 && ey <= screen.1 {
+        if sx >= ax && sy >= ay && ex <= ax + aw && ey <= ay + ah {
             return;
         }
         let c = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0);
@@ -554,7 +564,7 @@ impl Uwc {
     pub fn toggle_overview(&mut self) {
         let rects: Vec<Rectangle<f64, Logical>> =
             self.clients.iter().filter(|c| self.visible(c)).map(|c| c.rect()).collect();
-        let screen = self.screen_size();
+        let screen = self.work_area();
         let Some(m) = self.mon.as_mut() else { return };
         if let Some(prev) = m.overview.take() {
             *m.viewport_mut() = prev;

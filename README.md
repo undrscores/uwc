@@ -23,9 +23,10 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Pointer drawn by uwc: xcursor theme (`cursor-theme`, `cursor-size`), client cursor surfaces, built-in fallback arrow | done |
 | Config: KDL (uwm's parser, ported), `include`, `vars`, validation as a whole, live reload | done |
 | `input { keyboard / touchpad / mouse }` (XKB layout, repeat, libinput settings), `monitor "NAME" { mode scale transform off }` | done |
-| IPC: `state`, `subscribe`, `get`, `pan`, `panto`, `zoom`, `view`, `toggleview`, `focus`, `close`, `move`, `resize`, `overview`, `home`, `reload`, `quit` | done |
+| IPC: `state` (also `work_area`, `layers`, `keyboard_focus`, `backend`), `subscribe`, `get`, `pan`, `panto`, `zoom`, `view`, `toggleview`, `focus`, `close`, `move`, `resize`, `overview`, `home`, `reload`, `quit` | done |
 | Backends: `udev` (real session), `winit` (nested), `headless` (tests) | done, see below |
 | Borders (solid, focus color) | done |
+| wlr-layer-shell: bars, docks, launchers, notifications, wallpapers; exclusive zones shrink the work area (where windows open and what reveal/center/fit use); exclusive and on-demand keyboard interactivity; layer popups | done |
 
 **The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
 types and was reviewed against smithay's source, but the machine it was written on has no GPU or seat. Expect the first
@@ -36,7 +37,7 @@ Limits: one GPU, and one output at a time (the first connected one not marked `o
 
 Not yet (roughly in the order to do them):
 
-1. **`wlr-layer-shell`** (bars, panels, wallpaper programs, launchers) and `ext-workspace-v1`.
+1. `ext-workspace-v1` (tags for bars that speak it; the IPC has them already).
 2. Multiple monitors (the state has one `Monitor`), pinned windows, minimize/scratchpad, fullscreen.
 3. The rest of uwm's IPC (`set`, `theme`, `rule`, `bookmark`, `swipe`, `pinch`, `palette`, ...) and window rules.
 4. Animations (open/close/move/tag-switch, eased pan, momentum), driven from the frame callback, never timers.
@@ -60,6 +61,7 @@ cargo run -- --headless 1280x720     # no display, for tests
 cargo run -- -t                      # validate the config and exit
 cargo test                           # unit tests + end-to-end tests against a headless uwc
 cargo run --example paint -- "red" 400 300 d03030    # a test client that draws a solid window
+cargo run --example paint -- --bar 32 30a0d0         # ... or a layer-shell bar
 ```
 
 ### As a session
@@ -91,6 +93,7 @@ src/handlers.rs    wayland protocol handlers
 src/input.rs       keyboard/pointer/drag handling, backend-independent
 src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
 src/ipc.rs         control socket
+src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
 src/cursor.rs      the pointer image (xcursor theme, client surfaces, fallback arrow)
 src/backend/       udev (real session), winit (nested), headless (tests)
 tests/headless.rs  end-to-end: spawn uwc --headless, connect real wayland clients, drive over IPC

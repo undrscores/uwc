@@ -6,6 +6,9 @@
 pub const ZOOM_MIN: f64 = 0.05;
 pub const ZOOM_MAX: f64 = 8.0;
 
+/// A screen rectangle `(x, y, width, height)` in logical px.
+pub type Area = (f64, f64, f64, f64);
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
     pub x: f64,
@@ -53,19 +56,20 @@ impl Viewport {
         self.y = c.1 - at.1 / zoom;
     }
 
-    /// Centre the view on canvas point `c` for a screen of `screen` logical px.
-    pub fn center_on(&mut self, c: (f64, f64), screen: (f64, f64)) {
-        self.x = c.0 - screen.0 / self.zoom / 2.0;
-        self.y = c.1 - screen.1 / self.zoom / 2.0;
+    /// Centre canvas point `c` in `area`, a screen rectangle `(x, y, w, h)` in logical px (the work
+    /// area: the screen minus what bars reserve).
+    pub fn center_on(&mut self, c: (f64, f64), area: Area) {
+        self.x = c.0 - (area.0 + area.2 / 2.0) / self.zoom;
+        self.y = c.1 - (area.1 + area.3 / 2.0) / self.zoom;
     }
 
-    /// Zoom and pan so that the canvas rectangle `(x, y, w, h)` fits the screen with `margin` screen px around it.
-    pub fn fit(&mut self, rect: (f64, f64, f64, f64), screen: (f64, f64), margin: f64) {
+    /// Zoom and pan so the canvas rectangle `(x, y, w, h)` fits `area` with `margin` screen px around it.
+    pub fn fit(&mut self, rect: (f64, f64, f64, f64), area: Area, margin: f64) {
         let (x, y, w, h) = rect;
-        let zx = (screen.0 - 2.0 * margin) / w.max(1.0);
-        let zy = (screen.1 - 2.0 * margin) / h.max(1.0);
+        let zx = (area.2 - 2.0 * margin) / w.max(1.0);
+        let zy = (area.3 - 2.0 * margin) / h.max(1.0);
         self.zoom = zx.min(zy).clamp(ZOOM_MIN, ZOOM_MAX);
-        self.center_on((x + w / 2.0, y + h / 2.0), screen);
+        self.center_on((x + w / 2.0, y + h / 2.0), area);
     }
 }
 
@@ -125,10 +129,19 @@ mod tests {
     #[test]
     fn fit_contains_rect() {
         let mut v = Viewport::default();
-        v.fit((1000.0, 1000.0, 400.0, 200.0), (800.0, 600.0), 20.0);
+        v.fit((1000.0, 1000.0, 400.0, 200.0), (0.0, 0.0, 800.0, 600.0), 20.0);
         let (sx, sy) = v.canvas_to_screen((1000.0, 1000.0));
         let (ex, ey) = v.canvas_to_screen((1400.0, 1200.0));
         assert!(sx >= 19.9 && sy >= 0.0 && ex <= 780.1 && ey <= 600.0);
+    }
+
+    #[test]
+    fn center_respects_the_work_area() {
+        // A 30 px bar on top: the work area is 0,30 800x570, its centre is at screen (400, 315).
+        let mut v = Viewport { x: 0.0, y: 0.0, zoom: 2.0 };
+        v.center_on((500.0, 500.0), (0.0, 30.0, 800.0, 570.0));
+        let s = v.canvas_to_screen((500.0, 500.0));
+        assert!(close(s, (400.0, 315.0)), "{s:?}");
     }
 
     #[test]

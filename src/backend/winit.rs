@@ -54,6 +54,7 @@ pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>) -> anyhow::Resul
                 }
                 if let Some(m) = state.mon.as_mut() {
                     m.size = (size.w, size.h).into();
+                    smithay::desktop::layer_map_for_output(&m.output).arrange();
                 }
                 state.damage();
             }
