@@ -372,6 +372,7 @@ impl Monitor {
 pub struct Uwc {
     pub start_time: Instant,
     pub extras: crate::extras::Extras,
+    pub ext_capture: crate::ext_capture::ExtCapture,
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Uwc>,
     pub loop_signal: LoopSignal,
@@ -561,6 +562,7 @@ impl Uwc {
         Ok(Uwc {
             start_time: Instant::now(),
             extras,
+            ext_capture: crate::ext_capture::ExtCapture::new(&dh),
             compositor_state: CompositorState::new_v6::<Uwc>(&dh),
             xdg_shell_state: XdgShellState::new::<Uwc>(&dh),
             shm_state: ShmState::new::<Uwc>(&dh, vec![]),

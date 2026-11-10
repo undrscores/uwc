@@ -147,6 +147,18 @@ check("screencopy of the whole output", (rc, size), (0, f'{st["width"]}x{st["hei
 im = Image.open(SP+"/cap.ppm").convert("RGB")
 check("the bar where it is on screen", im.getpixel((600,10)), (0x24,0x28,0x3b))
 r,g,b = im.getpixel((850,200)); check("pinned B where it is on screen", (r,g,b), (0x30,0x50,0xd0))
+# The same through ext-image-copy-capture (what xdg-desktop-portal screen sharing uses): a window
+# through the toplevel list, and the whole output.
+rc, size = capture(["--ext-title", "B"])
+check("ext capture of a window by toplevel handle", (rc, size), (0, "300x200"))
+im = Image.open(SP+"/cap.ppm").convert("RGB")
+check("ext window pixels", im.getpixel((150,100)), (0x30,0x50,0xd0))
+check("ext window the right way up", im.getpixel((150,20)), (0xee,0xee,0xee))
+rc, size = capture(["--ext-output"])
+check("ext capture of the whole output", (rc, size), (0, f'{st["width"]}x{st["height"]}'))
+im = Image.open(SP+"/cap.ppm").convert("RGB")
+check("ext output: the bar where it is on screen", im.getpixel((600,10)), (0x24,0x28,0x3b))
+check("ext output: pinned B where it is on screen", im.getpixel((850,200)), (0x30,0x50,0xd0))
 # A region exactly over B (pinned at 700,100, 300x200): B's own picture, top-left included, so the
 # region is taken from the right place (not mirrored vertically).
 rc, size = capture(["--region", "700", "100", "300", "200"])
@@ -164,7 +176,7 @@ check("a region off the output fails", rc, 2)
 # screenshot can catch it), and ends up exactly its own colour; its reported position never moves.
 cmd("set open-ms 3000"); cmd("set background-shader \"\"")
 spawn(["./target/debug/examples/paint","F","300","200","d0d030"], env=wenv); time.sleep(0.7)
-st=cmd("state"); fw=win("F"); vp=st["monitors"][0]["viewport"]
+st=cmd("state"); fw=win("F"); F=fw["id"]; vp=st["monitors"][0]["viewport"]
 fx_, fy_ = int((fw["x"]-vp["x"])*vp["zoom"]+fw["width"]*vp["zoom"]/2), int((fw["y"]-vp["y"])*vp["zoom"]+fw["height"]*vp["zoom"]/2)
 mid = px(fx_, fy_)
 check("a new window is still fading in", (st["monitors"][0]["animating"], mid != (0xd0,0xd0,0x30)), (True, True))

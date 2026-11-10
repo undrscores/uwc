@@ -8,6 +8,9 @@
 //!     cargo run --example capture -- --output out.ppm            # the whole output (wlr-screencopy)
 //!     cargo run --example capture -- --region 10 20 300 200 out.ppm
 //!
+//!     cargo run --example capture -- --ext-output out.ppm        # the same through ext-image-copy-capture
+//!     cargo run --example capture -- --ext-title TITLE out.ppm   # a window, through ext-foreign-toplevel-list
+//!
 //! Windows go through hyprland-toplevel-export-v1 (what Quickshell's window previews use). The
 //! picture is written as a binary PPM. Exit status 2 when the compositor answers `failed`.
 
@@ -17,6 +20,19 @@ use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
     protocol::{wl_buffer, wl_registry, wl_shm, wl_shm_pool},
     Connection, Dispatch, Proxy, QueueHandle,
+};
+use wayland_protocols::ext::{
+    foreign_toplevel_list::v1::client::{
+        ext_foreign_toplevel_handle_v1 as ext_handle, ext_foreign_toplevel_list_v1 as ext_list,
+    },
+    image_capture_source::v1::client::{
+        ext_foreign_toplevel_image_capture_source_manager_v1 as ext_tl_sources,
+        ext_image_capture_source_v1 as ext_source, ext_output_image_capture_source_manager_v1 as ext_out_sources,
+    },
+    image_copy_capture::v1::client::{
+        ext_image_copy_capture_frame_v1 as ext_frame, ext_image_copy_capture_manager_v1 as ext_copy,
+        ext_image_copy_capture_session_v1 as ext_session,
+    },
 };
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1 as tl_handle, zwlr_foreign_toplevel_manager_v1 as tl_manager,
@@ -49,6 +65,10 @@ struct App {
     constraints_done: bool,
     ready: bool,
     failed: bool,
+    /// ext-image-copy-capture: the session's buffer size, and whether its constraints are complete.
+    ext_size: Option<(u32, u32)>,
+    ext_done: bool,
+    ext_handles: Vec<(ext_handle::ExtForeignToplevelHandleV1, String)>,
 }
 
 /// Write `len` bytes of ARGB8888 (B, G, R, A in memory) from `f` as a binary PPM.
@@ -113,9 +133,59 @@ fn output(region: Option<(i32, i32, i32, i32)>, path: &str) {
     println!("{w}x{h}");
 }
 
+/// The output or a window through ext-image-copy-capture-v1 (`title` None = the output).
+fn ext(title: Option<&str>, path: &str) {
+    let conn = Connection::connect_to_env().expect("WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).unwrap();
+    let qh = queue.handle();
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
+    let copy: ext_copy::ExtImageCopyCaptureManagerV1 = globals.bind(&qh, 1..=1, ()).unwrap();
+    let mut app = App::default();
+    let source = match title {
+        None => {
+            let out: wayland_client::protocol::wl_output::WlOutput = globals.bind(&qh, 1..=4, ()).unwrap();
+            let m: ext_out_sources::ExtOutputImageCaptureSourceManagerV1 = globals.bind(&qh, 1..=1, ()).unwrap();
+            m.create_source(&out, &qh, ())
+        }
+        Some(t) => {
+            let _list: ext_list::ExtForeignToplevelListV1 = globals.bind(&qh, 1..=1, ()).unwrap();
+            let m: ext_tl_sources::ExtForeignToplevelImageCaptureSourceManagerV1 =
+                globals.bind(&qh, 1..=1, ()).unwrap();
+            queue.roundtrip(&mut app).unwrap();
+            queue.roundtrip(&mut app).unwrap();
+            let h = app.ext_handles.iter().find(|(_, x)| x == t).map(|(h, _)| h.clone()).expect("no such window");
+            m.create_source(&h, &qh, ())
+        }
+    };
+    let session = copy.create_session(&source, ext_copy::Options::empty(), &qh, ());
+    while !app.ext_done {
+        queue.blocking_dispatch(&mut app).unwrap();
+    }
+    let (w, h) = app.ext_size.expect("a buffer size");
+    let stride = w * 4;
+    let mut f = shm_file((stride * h) as usize);
+    let pool = shm.create_pool(f.as_fd(), (stride * h) as i32, &qh, ());
+    let buf = pool.create_buffer(0, w as i32, h as i32, stride as i32, wl_shm::Format::Argb8888, &qh, ());
+    let frame = session.create_frame(&qh, ());
+    frame.attach_buffer(&buf);
+    frame.damage_buffer(0, 0, w as i32, h as i32);
+    frame.capture();
+    while !app.ready && !app.failed {
+        queue.blocking_dispatch(&mut app).unwrap();
+    }
+    if app.failed {
+        eprintln!("capture: failed");
+        std::process::exit(2);
+    }
+    write_ppm(&mut f, w, h, stride, path);
+    println!("{w}x{h}");
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
+        Some("--ext-output") if a.len() == 3 => return ext(None, &a[2]),
+        Some("--ext-title") if a.len() == 4 => return ext(Some(&a[2]), &a[3]),
         Some("--output") if a.len() == 3 => return output(None, &a[2]),
         Some("--region") if a.len() == 7 => {
             let n = |i: usize| a[i].parse::<i32>().expect("numbers");
@@ -282,5 +352,77 @@ macro_rules! noop {
         }
     )*};
 }
+impl Dispatch<ext_list::ExtForeignToplevelListV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_list::ExtForeignToplevelListV1,
+        e: ext_list::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_list::Event::Toplevel { toplevel } = e {
+            app.ext_handles.push((toplevel, String::new()));
+        }
+    }
+    wayland_client::event_created_child!(App, ext_list::ExtForeignToplevelListV1, [
+        ext_list::EVT_TOPLEVEL_OPCODE => (ext_handle::ExtForeignToplevelHandleV1, ()),
+    ]);
+}
+impl Dispatch<ext_handle::ExtForeignToplevelHandleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        h: &ext_handle::ExtForeignToplevelHandleV1,
+        e: ext_handle::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_handle::Event::Title { title } = e {
+            if let Some(x) = app.ext_handles.iter_mut().find(|(x, _)| x == h) {
+                x.1 = title;
+            }
+        }
+    }
+}
+impl Dispatch<ext_session::ExtImageCopyCaptureSessionV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_session::ExtImageCopyCaptureSessionV1,
+        e: ext_session::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ext_session::Event::BufferSize { width, height } => app.ext_size = Some((width, height)),
+            ext_session::Event::Done => app.ext_done = true,
+            ext_session::Event::Stopped => app.failed = true,
+            _ => {}
+        }
+    }
+}
+impl Dispatch<ext_frame::ExtImageCopyCaptureFrameV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_frame::ExtImageCopyCaptureFrameV1,
+        e: ext_frame::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ext_frame::Event::Ready => app.ready = true,
+            ext_frame::Event::Failed { .. } => app.failed = true,
+            _ => {}
+        }
+    }
+}
+noop!(
+    ext_copy::ExtImageCopyCaptureManagerV1,
+    ext_source::ExtImageCaptureSourceV1,
+    ext_out_sources::ExtOutputImageCaptureSourceManagerV1,
+    ext_tl_sources::ExtForeignToplevelImageCaptureSourceManagerV1
+);
 noop!(wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, export_v1::HyprlandToplevelExportManagerV1);
 noop!(sc_manager::ZwlrScreencopyManagerV1, wayland_client::protocol::wl_output::WlOutput);

@@ -10,6 +10,7 @@ mod constraints;
 mod cursor;
 mod deco;
 mod export;
+mod ext_capture;
 mod extras;
 mod handlers;
 mod idle;
@@ -240,6 +241,8 @@ fn run() -> Result<()> {
         state.workspace_refresh();
         state.toplevels_refresh();
         state.screencopy_flush();
+        state.ext_toplevels_refresh();
+        state.ext_capture_flush();
         state.ipc_flush();
         let _ = state.display_handle.flush_clients();
     })?;

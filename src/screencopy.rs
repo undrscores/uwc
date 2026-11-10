@@ -55,10 +55,29 @@ impl Screencopy {
 
 impl Uwc {
     /// A monitor's size in physical px.
-    fn output_pixels(&self, m: usize) -> Size<i32, Physical> {
+    pub fn output_pixels(&self, m: usize) -> Size<i32, Physical> {
         let (w, h) = self.monitors.get(m).map(|x| (x.size.w as f64, x.size.h as f64)).unwrap_or((1280.0, 720.0));
         let s = self.output_scale_of(m);
         ((w * s).round() as i32, (h * s).round() as i32).into()
+    }
+
+    /// Draw monitor `mon` (the part `region`) into the shm `buffer`.
+    pub fn capture_output(
+        &mut self,
+        mon: usize,
+        region: Rectangle<i32, Physical>,
+        cursor: bool,
+        buffer: &WlBuffer,
+    ) -> Result<(), String> {
+        let size = self.output_pixels(mon);
+        let scale = self.output_scale_of(mon);
+        // The root color is the real output's clear color, not an element: the picture needs it too.
+        let clear = self.config.root_color;
+        let res = self.with_renderer(|state, r| {
+            let elements = state.scene_elements(r, mon, cursor);
+            capture::render_region_to_shm(r, &elements, size, region, scale, clear, buffer)
+        });
+        res.unwrap_or_else(|| Err("this backend cannot render (headless)".into()))
     }
 
     fn screencopy_now(
@@ -70,15 +89,8 @@ impl Uwc {
         cursor: bool,
         damage: bool,
     ) {
-        let size = self.output_pixels(mon);
-        let scale = self.output_scale_of(mon);
-        // The root color is the real output's clear color, not an element: the picture needs it too.
-        let clear = self.config.root_color;
-        let res = self.with_renderer(|state, r| {
-            let elements = state.scene_elements(r, mon, cursor);
-            capture::render_region_to_shm(r, &elements, size, region, scale, clear, buffer)
-        });
-        match res.unwrap_or_else(|| Err("this backend cannot render (headless)".into())) {
+        let res = self.capture_output(mon, region, cursor, buffer);
+        match res {
             Ok(()) => {
                 frame.flags(zwlr_screencopy_frame_v1::Flags::empty());
                 if damage && frame.version() >= 2 {

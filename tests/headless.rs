@@ -16,7 +16,18 @@ use wayland_client::{
     protocol::{wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1 as ext_tl_handle, ext_foreign_toplevel_list_v1 as ext_tl_list,
+};
 use wayland_protocols::ext::idle_notify::v1::client::{ext_idle_notification_v1, ext_idle_notifier_v1};
+use wayland_protocols::ext::image_capture_source::v1::client::{
+    ext_foreign_toplevel_image_capture_source_manager_v1 as ext_tl_source_manager,
+    ext_image_capture_source_v1 as ext_source, ext_output_image_capture_source_manager_v1 as ext_output_source_manager,
+};
+use wayland_protocols::ext::image_copy_capture::v1::client::{
+    ext_image_copy_capture_frame_v1 as ext_frame, ext_image_copy_capture_manager_v1 as ext_copy_manager,
+    ext_image_copy_capture_session_v1 as ext_session,
+};
 use wayland_protocols::ext::session_lock::v1::client::{ext_session_lock_surface_v1, ext_session_lock_v1};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1 as ws_group, ext_workspace_handle_v1 as ws_handle,
@@ -235,6 +246,10 @@ struct App {
     /// zwp-text-input-v3: enter / leave.
     ti_enter: bool,
     ti_leave: bool,
+    /// ext-foreign-toplevel-list: (identifier, title, app-id, closed) per handle.
+    ext_tl: Vec<(ext_tl_handle::ExtForeignToplevelHandleV1, String, String, String, bool)>,
+    /// ext-image-copy-capture: what the session offered and how frames ended.
+    cap_events: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -311,6 +326,8 @@ impl Client {
             constraint_events: vec![],
             ti_enter: false,
             ti_leave: false,
+            ext_tl: Vec::new(),
+            cap_events: Vec::new(),
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -947,6 +964,124 @@ impl Dispatch<ws_handle::ExtWorkspaceHandleV1, ()> for App {
 noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer);
 noop!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 
+impl Dispatch<ext_tl_list::ExtForeignToplevelListV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_tl_list::ExtForeignToplevelListV1,
+        e: ext_tl_list::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_tl_list::Event::Toplevel { toplevel } = e {
+            app.ext_tl.push((toplevel, String::new(), String::new(), String::new(), false));
+        }
+    }
+
+    wayland_client::event_created_child!(App, ext_tl_list::ExtForeignToplevelListV1, [
+        ext_tl_list::EVT_TOPLEVEL_OPCODE => (ext_tl_handle::ExtForeignToplevelHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ext_tl_handle::ExtForeignToplevelHandleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        h: &ext_tl_handle::ExtForeignToplevelHandleV1,
+        e: ext_tl_handle::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(t) = app.ext_tl.iter_mut().find(|t| &t.0 == h) else { return };
+        match e {
+            ext_tl_handle::Event::Identifier { identifier } => t.1 = identifier,
+            ext_tl_handle::Event::Title { title } => t.2 = title,
+            ext_tl_handle::Event::AppId { app_id } => t.3 = app_id,
+            ext_tl_handle::Event::Closed => t.4 = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_tl_source_manager::ExtForeignToplevelImageCaptureSourceManagerV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ext_tl_source_manager::ExtForeignToplevelImageCaptureSourceManagerV1,
+        _: ext_tl_source_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ext_output_source_manager::ExtOutputImageCaptureSourceManagerV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ext_output_source_manager::ExtOutputImageCaptureSourceManagerV1,
+        _: ext_output_source_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ext_source::ExtImageCaptureSourceV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ext_source::ExtImageCaptureSourceV1,
+        _: ext_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ext_copy_manager::ExtImageCopyCaptureManagerV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ext_copy_manager::ExtImageCopyCaptureManagerV1,
+        _: ext_copy_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ext_session::ExtImageCopyCaptureSessionV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_session::ExtImageCopyCaptureSessionV1,
+        e: ext_session::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ext_session::Event::BufferSize { width, height } => app.cap_events.push(format!("size {width}x{height}")),
+            ext_session::Event::ShmFormat { .. } => app.cap_events.push("shm".into()),
+            ext_session::Event::Done => app.cap_events.push("done".into()),
+            ext_session::Event::Stopped => app.cap_events.push("stopped".into()),
+            _ => {}
+        }
+    }
+}
+impl Dispatch<ext_frame::ExtImageCopyCaptureFrameV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_frame::ExtImageCopyCaptureFrameV1,
+        e: ext_frame::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            ext_frame::Event::Ready => app.cap_events.push("ready".into()),
+            ext_frame::Event::Failed { .. } => app.cap_events.push("failed".into()),
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<wl_surface::WlSurface, ()> for App {
     fn event(
         app: &mut Self,
@@ -1033,6 +1168,67 @@ fn dialogs_open_over_their_parent() {
     assert_eq!(num(&d["x"]) + 100.0, num(&p["x"]) + 200.0, "{d} {p}");
     assert_eq!(num(&d["y"]) + 50.0, num(&p["y"]) + 150.0, "{d} {p}");
     assert_eq!(d["tags"], p["tags"]);
+}
+
+#[test]
+fn windows_and_outputs_can_be_captured_through_the_ext_protocols() {
+    let uwc = Uwc::start("extcap", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let list: ext_tl_list::ExtForeignToplevelListV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let w = c.window("shared", 320, 200);
+    c.sync();
+    c.sync();
+    // The window is on the list, with its title and app-id.
+    let t = c.app.ext_tl.iter().find(|t| t.2 == "shared").expect("window announced");
+    assert_eq!(t.3, "uwc.test");
+    assert!(!t.1.is_empty(), "an identifier");
+    let handle = t.0.clone();
+
+    let sources: ext_tl_source_manager::ExtForeignToplevelImageCaptureSourceManagerV1 =
+        c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let out_sources: ext_output_source_manager::ExtOutputImageCaptureSourceManagerV1 =
+        c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let copy: ext_copy_manager::ExtImageCopyCaptureManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let output = c.bind_output();
+
+    // A session on the window offers its size.
+    let src = sources.create_source(&handle, &qh, ());
+    let session = copy.create_session(&src, ext_copy_manager::Options::empty(), &qh, ());
+    c.sync();
+    assert_eq!(c.app.cap_events, ["size 320x200", "shm", "done"]);
+
+    // A session on the output offers the output's size.
+    c.app.cap_events.clear();
+    let osrc = out_sources.create_source(&output, &qh, ());
+    let osession = copy.create_session(&osrc, ext_copy_manager::Options::PaintCursors, &qh, ());
+    c.sync();
+    assert_eq!(c.app.cap_events, ["size 1000x600", "shm", "done"]);
+
+    // A frame into a matching buffer: headless cannot render, so it fails cleanly (and never hangs).
+    c.app.cap_events.clear();
+    let buf = c.buffer("cap", 320, 200);
+    let frame = session.create_frame(&qh, ());
+    frame.attach_buffer(&buf);
+    frame.capture();
+    c.sync();
+    assert_eq!(c.app.cap_events, ["failed"]);
+    frame.destroy();
+
+    // Closing the window closes its toplevel handle, and the session on it stops.
+    c.app.cap_events.clear();
+    w.toplevel.destroy();
+    w.xdg.destroy();
+    w.surface.destroy();
+    c.sync();
+    c.sync();
+    assert!(c.app.ext_tl.iter().find(|t| t.2 == "shared").unwrap().4, "handle closed");
+    let frame = session.create_frame(&qh, ());
+    frame.attach_buffer(&buf);
+    frame.capture();
+    c.sync();
+    assert_eq!(c.app.cap_events, ["failed", "stopped"]);
+    let _ = (list, osession);
 }
 
 #[test]
