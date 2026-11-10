@@ -3,12 +3,16 @@
 
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
+        GesturePinchUpdateEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
+        PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     input::{
         keyboard::{FilterResult, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
+            GesturePinchEndEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, MotionEvent,
+        },
     },
     utils::{Logical, Point, SERIAL_COUNTER},
 };
@@ -16,7 +20,7 @@ use smithay::{
 use crate::{
     config::{Action, ModKey, Mods, BTN_LEFT},
     layer::Under,
-    state::{Drag, Uwc},
+    state::{Drag, Gesture, Uwc},
 };
 
 fn mods_of(m: &ModifiersState) -> Mods {
@@ -117,6 +121,113 @@ impl Uwc {
                 let ptr = self.pointer();
                 ptr.axis(self, frame);
                 ptr.frame(self);
+            }
+            // Touchpad gestures. Three fingers are the compositor's: a swipe pans the view, a
+            // pinch zooms it. Anything else goes to the client under the pointer.
+            InputEvent::GestureSwipeBegin { event } => {
+                let (time, fingers) = (Event::time_msec(&event), event.fingers());
+                if fingers == 3 && !self.is_locked() {
+                    self.gesture = Some(Gesture::Swipe);
+                } else if !self.is_locked() {
+                    self.pointer().gesture_swipe_begin(
+                        self,
+                        &GestureSwipeBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
+                    );
+                }
+            }
+            InputEvent::GestureSwipeUpdate { event } => {
+                let time = Event::time_msec(&event);
+                match self.gesture {
+                    Some(Gesture::Swipe) => {
+                        self.with_viewport(|v, _| v.pan_screen(event.delta_x(), event.delta_y()));
+                        self.refresh_pointer();
+                        self.damage();
+                    }
+                    _ if !self.is_locked() => {
+                        self.pointer().gesture_swipe_update(
+                            self,
+                            &smithay::input::pointer::GestureSwipeUpdateEvent { time, delta: event.delta() },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            InputEvent::GestureSwipeEnd { event } => {
+                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
+                if self.gesture == Some(Gesture::Swipe) {
+                    self.gesture = None;
+                } else if !self.is_locked() {
+                    self.pointer().gesture_swipe_end(
+                        self,
+                        &GestureSwipeEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                    );
+                }
+            }
+            InputEvent::GesturePinchBegin { event } => {
+                let (time, fingers) = (Event::time_msec(&event), event.fingers());
+                if fingers == 3 && !self.is_locked() {
+                    self.gesture = Some(Gesture::Pinch { last: 1.0 });
+                } else if !self.is_locked() {
+                    self.pointer().gesture_pinch_begin(
+                        self,
+                        &GesturePinchBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
+                    );
+                }
+            }
+            InputEvent::GesturePinchUpdate { event } => {
+                let time = Event::time_msec(&event);
+                match self.gesture {
+                    Some(Gesture::Pinch { last }) => {
+                        // The pinch's scale is absolute since the begin; each update zooms by
+                        // what changed since the last one.
+                        let scale = event.scale();
+                        if last > 0.0 && (scale / last).is_finite() {
+                            self.zoom_by(scale / last);
+                        }
+                        self.gesture = Some(Gesture::Pinch { last: scale });
+                    }
+                    _ if !self.is_locked() => {
+                        self.pointer().gesture_pinch_update(
+                            self,
+                            &smithay::input::pointer::GesturePinchUpdateEvent {
+                                time,
+                                delta: event.delta(),
+                                scale: event.scale(),
+                                rotation: event.rotation(),
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            InputEvent::GesturePinchEnd { event } => {
+                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
+                if matches!(self.gesture, Some(Gesture::Pinch { .. })) {
+                    self.gesture = None;
+                } else if !self.is_locked() {
+                    self.pointer().gesture_pinch_end(
+                        self,
+                        &GesturePinchEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                    );
+                }
+            }
+            InputEvent::GestureHoldBegin { event } => {
+                let (time, fingers) = (Event::time_msec(&event), event.fingers());
+                if !self.is_locked() {
+                    self.pointer().gesture_hold_begin(
+                        self,
+                        &GestureHoldBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
+                    );
+                }
+            }
+            InputEvent::GestureHoldEnd { event } => {
+                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
+                if !self.is_locked() {
+                    self.pointer().gesture_hold_end(
+                        self,
+                        &GestureHoldEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                    );
+                }
             }
             _ => {}
         }

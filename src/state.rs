@@ -245,6 +245,17 @@ impl Client {
     }
 }
 
+/// A touchpad gesture the compositor takes (3 fingers): a swipe pans the view, a pinch zooms.
+/// Gestures with fewer fingers go to the client under the pointer (zwp-pointer-gestures-v1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    Swipe,
+    /// `last` is the scale the previous update reported (the pinch's is absolute).
+    Pinch {
+        last: f64,
+    },
+}
+
 /// What a pointer drag with Mod held is doing.
 #[derive(Debug, Clone, Copy)]
 pub enum Drag {
@@ -384,6 +395,10 @@ pub struct Uwc {
     pub xwayland: Option<smithay::reexports::calloop::RegistrationToken>,
     /// Override-redirect X11 windows (menus, tooltips): drawn on top, not managed.
     pub or_windows: Vec<smithay::xwayland::X11Surface>,
+    /// zwp-pointer-gestures-v1 (clients that want touchpad gestures); held so the global stays
+    /// alive.
+    #[allow(dead_code)]
+    pub pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState,
     /// zwp-text-input-v3 (clients that accept IME input); held so the global stays alive.
     #[allow(dead_code)]
     pub text_input: smithay::wayland::text_input::TextInputManagerState,
@@ -435,6 +450,8 @@ pub struct Uwc {
     /// The xcursor theme, loaded lazily per image.
     pub cursor_theme: crate::cursor::CursorTheme,
     pub drag: Option<Drag>,
+    /// The touchpad gesture in progress, when it is ours.
+    pub gesture: Option<Gesture>,
     /// Pointer position at the previous step of a pan drag.
     pub drag_last: Point<f64, Logical>,
     /// Bumped on anything that changes how decorations look, so the damage tracker redraws them.
@@ -527,6 +544,7 @@ impl Uwc {
             xwm: None,
             xwayland: None,
             or_windows: Vec::new(),
+            pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState::new::<Uwc>(&dh),
             text_input: smithay::wayland::text_input::TextInputManagerState::new::<Uwc>(&dh),
             input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |_| true),
             ime_popups: Vec::new(),
@@ -561,6 +579,7 @@ impl Uwc {
             prev_tagset: 1,
             cursor: (0.0, 0.0).into(),
             drag: None,
+            gesture: None,
             drag_last: (0.0, 0.0).into(),
             deco_commit: Default::default(),
             redraw: true,

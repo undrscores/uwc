@@ -29,6 +29,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | zwp-pointer-constraints-v1 + zwp-relative-pointer-manager-v1 (games, 3D apps): a confined pointer is kept inside the window (or the region it names), a locked one holds the cursor still (uwc's cursor is not drawn) and hands the motion to the client as relative deltas; constraints activate when the pointer is on the surface and deactivate when it leaves | done |
 | Xwayland (`xwayland true`, needs the Xwayland binary; real sessions only): X11 windows become clients like any other -- pinned to the monitor they asked for, with uwc's decoration, focus, move / resize / fullscreen and the IPC; override-redirect windows (X menus, tooltips) are drawn on top and take the pointer by their own geometry; no clipboard bridging yet | done |
 | IME: zwp-text-input-v3 (clients) + zwp-input-method-v2 (fcitx5 and friends): text input enters and leaves with the keyboard focus; while an input method holds the keyboard grab every key goes to it first and it answers through text input (uwc's own key bindings do not fire then); its popups (candidate lists) are drawn on top, under the focused window's corner, and take the pointer | done |
+| Gestures: a three-finger touchpad swipe pans the view and a three-finger pinch zooms it; gestures with fewer fingers (a browser's two-finger pinch) are forwarded to the client under the pointer (zwp-pointer-gestures-v1) | done |
 | Multiple monitors: all outputs tiled left to right, one shared canvas and tagset, a viewport and bookmarks per monitor per tag; the pointer's monitor is where view actions, new windows and pins land; a window is drawn on every monitor whose view shows it, fullscreen covers the monitor it is on | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
 | Mouse: Mod+drag move / resize / pan, empty-canvas drag pans, Mod+scroll zooms | done |
@@ -59,15 +60,14 @@ canvas), but the machine this was written on has no GPU or seat, so the udev pat
 
 Not yet (roughly in the order to do them):
 
-1. Gestures (`swipe`, `pinch`, touchpad pan/zoom); `theme` and `palette` come with the ricing below.
-2. The rest of the animations (momentum; open, move, tag fade, the close fade and eased pan and zoom are done), driven
+1. The rest of the animations (momentum; open, move, tag fade, the close fade and eased pan and zoom are done), driven
    from the frame callback, never timers.
-3. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
+2. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.
-4. Output-management, clipboard bridging for Xwayland (popup grabs, xdg-activation,
+3. Output-management, clipboard bridging for Xwayland (popup grabs, xdg-activation,
    idle-inhibit/idle-notify, session-lock, pointer constraints, Xwayland and IME are done).
-5. Multi-GPU, animated cursors, DPMS.
+4. Multi-GPU, animated cursors, DPMS.
 
 ## Build and run
 
