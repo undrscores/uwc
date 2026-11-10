@@ -25,6 +25,8 @@ fn mods_of(m: &ModifiersState) -> Mods {
 
 impl Uwc {
     pub fn process_input_event<B: InputBackend>(&mut self, event: InputEvent<B>) {
+        // Real user input, from whichever backend: it resets the idle timers (ext-idle-notify).
+        self.idle_notifier.notify_activity(&self.seat);
         match event {
             InputEvent::Keyboard { event } => {
                 let serial = SERIAL_COUNTER.next_serial();
@@ -125,7 +127,8 @@ impl Uwc {
         // The pointer is drawn by uwc, so moving it is a new frame.
         self.redraw = true;
         self.pointer_motion_to(self.cursor, time);
-        if self.drag.is_none() && self.config.sloppy_focus {
+        // A popup grab keeps the focus where it is while the pointer moves over others.
+        if self.drag.is_none() && self.config.sloppy_focus && !self.pointer().is_grabbed() {
             if let Some(i) = self.under(self.cursor).and_then(|u| u.window()) {
                 let id = self.clients[i].id;
                 if self.focus != Some(id) {
@@ -215,6 +218,14 @@ impl Uwc {
 
     fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
         let serial = SERIAL_COUNTER.next_serial();
+        // A grab (a popup menu, a drag-and-drop) takes the button: a press outside a grabbed popup
+        // dismisses it, and is not also a focus change, a drag or a pan on top of that.
+        if self.pointer().is_grabbed() {
+            let ptr = self.pointer();
+            ptr.button(self, &ButtonEvent { button, state, serial, time });
+            ptr.frame(self);
+            return;
+        }
         if state == ButtonState::Pressed {
             let mods = mods_of(&self.keyboard().modifier_state());
             let hit = self.under(self.cursor);

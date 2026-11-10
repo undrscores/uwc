@@ -23,7 +23,8 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Eased view moves: pan keys, zoom (scroll, keys, reset, IPC `zoom`; about the pointer or the given point), center/fit, reveal, bookmarks, `home` and IPC `pan`/`panto` glide to their target over `view-ms` (0 = jump), built on frame callbacks with exponential smoothing so a new target mid-move just bends the path; dragging stays instant; IPC reports the target and `view_moving` | done |
 | Window animations: a new window fades and grows in (`open-ms`, `open-scale`), moves by key or IPC glide (`move-ms`; dragging stays instant), windows that come into view with a tag switch fade in (`tag-ms`), and a closing window's last frame — captured when the close is asked for, before the client destroys its surface — fades out and shrinks (`close-ms`), border, shadow and dim fading with it; visual only (`Client.fx`, applied in `place`; ghosts are never hit-tested, focused, saved or reported), so IPC positions are the resting ones and `animating` says when everything has settled; `0` turns each off | done |
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
-| xdg-shell toplevels and popups, xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
+| xdg-shell toplevels and popups (with grabs: a click outside a menu closes it, and is not also a focus change or a drag), xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
+| xdg-activation (apps ask for focus: a fresh token focuses the window and reveals it, an unseen one goes `urgent`, answered by focusing), ext-idle-notify + zwp-idle-inhibit (idle daemons; video players keep the screen on; real input resets the timers) | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
 | Mouse: Mod+drag move / resize / pan, empty-canvas drag pans, Mod+scroll zooms | done |
 | Pointer drawn by uwc: xcursor theme (`cursor-theme`, `cursor-size`), client cursor surfaces, built-in fallback arrow | done |
@@ -59,8 +60,8 @@ Not yet (roughly in the order to do them):
 4. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.
-5. Popup grabs (clicking outside a menu closes it), xdg-activation, idle-inhibit/idle-notify, session-lock, pointer
-   constraints, Xwayland, input-method/text-input, output-management.
+5. Session-lock, pointer constraints, Xwayland, input-method/text-input, output-management (popup grabs,
+   xdg-activation and idle-inhibit/idle-notify are done).
 6. Multi-GPU, animated cursors, DPMS.
 
 ## Build and run

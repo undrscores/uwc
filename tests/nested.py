@@ -182,6 +182,23 @@ check("but its last frame is still fading", (st["monitors"][0]["animating"], px(
 time.sleep(6)
 check("close fade finished: animating off", cmd("state")["monitors"][0]["animating"], False)
 check("and the canvas is empty where it was", px(fx_, fy_), (32,32,32))
+# Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
+# also a drag or a focus change; a click on the popup itself keeps it open.
+p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True); pids.append(p3)
+time.sleep(1.5)
+check("the menu window is up", any(w["title"]=="P" for w in cmd("state")["windows"]), True)
+pw = win("P"); vp = cmd("state")["monitors"][0]["viewport"]
+# The popup sits at the window's top-left; its centre and a far corner of the canvas.
+(pcx, pcy) = (int((pw["x"]-vp["x"])*vp["zoom"]+50), int((pw["y"]-vp["y"])*vp["zoom"]+25))
+subprocess.run(["xdotool","mousemove",str(pcx),str(pcy),"click","1"], env=env); time.sleep(0.5)
+check("a click on the popup does not close it", p3.poll(), None)
+subprocess.run(["xdotool","mousemove","900","400","click","1"], env=env); time.sleep(0.5)
+try:
+    out, _ = p3.communicate(timeout=5)
+    check("a click outside closes the menu", "popup done" in out, True)
+except subprocess.TimeoutExpired:
+    check("a click outside closes the menu", False, True)
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

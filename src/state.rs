@@ -305,6 +305,14 @@ pub struct Uwc {
     pub toplevels: crate::toplevels::ForeignToplevels,
     pub export: crate::export::ToplevelExport,
     pub screencopy: crate::screencopy::Screencopy,
+    /// xdg-activation-v1 (apps asking for focus).
+    pub activation_state: smithay::wayland::xdg_activation::XdgActivationState,
+    /// ext-idle-notify-v1 (idle daemons); its timers are reset by real input.
+    pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Uwc>,
+    #[allow(dead_code)] // held so the global stays alive
+    pub idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// Live zwp-idle-inhibitor-v1 objects; any one pauses the idle notifications.
+    pub idle_inhibitors: u32,
     /// Frames the output has drawn (with damage), for screencopy's copy_with_damage.
     pub frames_drawn: u64,
     /// The layer surface that has the keyboard (a launcher, a lock screen), over any window focus.
@@ -425,6 +433,10 @@ impl Uwc {
             toplevels: crate::toplevels::ForeignToplevels::new(&dh),
             export: crate::export::ToplevelExport::new(&dh),
             screencopy: crate::screencopy::Screencopy::new(&dh),
+            activation_state: smithay::wayland::xdg_activation::XdgActivationState::new::<Uwc>(&dh),
+            idle_notifier: smithay::wayland::idle_notify::IdleNotifierState::new(&dh, loop_handle.clone()),
+            idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Uwc>(&dh),
+            idle_inhibitors: 0,
             frames_drawn: 0,
             layer_focus: None,
             dmabuf_state: DmabufState::new(),
@@ -831,6 +843,13 @@ impl Uwc {
         if let Some(i) = id.and_then(|id| self.client_index(id)).filter(|_| raise) {
             let c = self.clients.remove(i);
             self.clients.push(c);
+        }
+        // Being focused answers the attention request (xdg-activation) that flagged it.
+        if let Some(i) = id.and_then(|id| self.client_index(id)) {
+            if self.clients[i].urgent {
+                self.clients[i].urgent = false;
+                self.deco_commit.increment();
+            }
         }
         for c in &self.clients {
             if let Some(t) = c.window.toplevel() {

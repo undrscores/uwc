@@ -3,10 +3,13 @@
 use smithay::{
     backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
-    desktop::{utils::output_update, PopupKind, Window},
-    input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
+    delegate_output, delegate_seat, delegate_shm, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
+    input::{
+        pointer::{CursorImageStatus, Focus},
+        Seat, SeatHandler, SeatState,
+    },
     reexports::{
         wayland_protocols::xdg::{
             decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecoMode, shell::server::xdg_toplevel,
@@ -279,8 +282,25 @@ impl XdgShellHandler for Uwc {
         surface.send_repositioned(token);
     }
 
-    // TODO: popup grabs (click outside dismisses a menu) need a PointerGrab; popups work without.
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    // A popup asked for a grab (a menu opened by a click): smithay's PopupGrab redirects keyboard
+    // input to it and dismisses it when a press lands outside it (or its client), so the click that
+    // closes a menu does not also focus or drag what is under it.
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        let kind = PopupKind::Xdg(surface);
+        let Ok(root) = smithay::desktop::find_popup_root_surface(&kind) else { return };
+        let seat = self.seat.clone();
+        match self.popups.grab_popup(root, kind, &seat, serial) {
+            Ok(grab) => {
+                if let Some(kb) = seat.get_keyboard() {
+                    kb.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+                }
+                if let Some(ptr) = seat.get_pointer() {
+                    ptr.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+                }
+            }
+            Err(e) => tracing::warn!("popup grab: {e}"),
+        }
+    }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
@@ -449,3 +469,6 @@ delegate_seat!(Uwc);
 delegate_data_device!(Uwc);
 delegate_output!(Uwc);
 delegate_dmabuf!(Uwc);
+delegate_xdg_activation!(Uwc);
+delegate_idle_notify!(Uwc);
+delegate_idle_inhibit!(Uwc);
