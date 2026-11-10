@@ -1488,6 +1488,41 @@ fn minimized_windows_leave_and_come_back_where_you_are() {
 }
 
 #[test]
+fn a_window_that_hides_itself_unmaps_and_comes_back_where_it_was() {
+    let mut uwc = Uwc::start("unmap", None);
+    let mut c = uwc.connect();
+    let a = c.window("A", 300, 200);
+    let _b = c.window("B", 300, 200);
+    let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (ia, ib) = (win(&s, "A")["id"].as_u64().unwrap(), win(&s, "B")["id"].as_u64().unwrap());
+    let (ax, ay) = (win(&s, "A")["x"].clone(), win(&s, "A")["y"].clone());
+
+    // A NULL buffer attach is the client hiding its window: it vanishes and focus moves on.
+    uwc.ok(&format!("focus {ia}"));
+    a.surface.attach(None, 0, 0);
+    a.surface.commit();
+    c.sync();
+    let s = uwc.wait("A hidden", |s| s["windows"].as_array().unwrap().len() == 1);
+    assert_eq!(win(&s, "B")["id"].as_u64().unwrap(), ib);
+    assert_eq!(s["keyboard_focus"]["window"], ib, "focus falls to what is left");
+
+    // Committing a buffer again maps it where it was, not centred, with the same id.
+    a.surface.attach(Some(&a._buf), 0, 0);
+    a.surface.commit();
+    c.sync();
+    let s = uwc.wait("A back", |s| s["windows"].as_array().unwrap().len() == 2);
+    let w = win(&s, "A");
+    assert_eq!((w["id"].clone(), w["x"].clone(), w["y"].clone()), (ia.into(), ax, ay));
+
+    // The session keeps a window that hid itself, so it can be restored next time.
+    uwc.ok("session save");
+    let file =
+        std::env::temp_dir().join(format!("uwc-test-{}-unmap", std::process::id())).join("state/uwc/session.json");
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved["windows"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn fullscreen_covers_the_output_and_gives_the_size_back() {
     let mut uwc = Uwc::start("fullscreen", None);
     let mut c = uwc.connect();

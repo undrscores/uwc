@@ -58,6 +58,7 @@ impl Uwc {
             canvas: (0.0, 0.0).into(),
             tags: ALLTAGS,
             mapped: true,
+            ever_mapped: true,
             urgent: false,
             pin: Some(pin),
             pin_mon: m,

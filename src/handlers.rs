@@ -28,7 +28,8 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler, CompositorState,
+            get_parent, is_sync_subsurface, with_states, BufferAssignment, CompositorClientState, CompositorHandler,
+            CompositorState, SurfaceAttributes,
         },
         dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::OutputHandler,
@@ -71,6 +72,13 @@ impl CompositorHandler for Uwc {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // `on_commit_buffer_handler` consumes the buffer assignment, so read it first: a NULL attach
+        // (`Removed`) is the client hiding its window, and it may commit a buffer again later.
+        let (attached, removed) = with_states(surface, |s| {
+            let mut guard = s.cached_state.get::<SurfaceAttributes>();
+            let b = guard.current().buffer.as_ref();
+            (matches!(b, Some(BufferAssignment::NewBuffer(_))), matches!(b, Some(BufferAssignment::Removed)))
+        });
         on_commit_buffer_handler::<Self>(surface);
         if is_sync_subsurface(surface) {
             return;
@@ -93,8 +101,14 @@ impl CompositorHandler for Uwc {
                         self.open_rules(i);
                         toplevel.send_configure();
                     }
-                    if !self.clients[i].mapped && w.geometry().size.w > 0 {
-                        self.map_client(i);
+                    if root == *surface {
+                        if !self.clients[i].mapped {
+                            if attached && w.geometry().size.w > 0 {
+                                self.map_client(i);
+                            }
+                        } else if removed {
+                            self.unmap_client(i);
+                        }
                     }
                 }
                 // An X11 window maps when the X server asks for it, not on a commit.
@@ -159,46 +173,49 @@ impl Uwc {
     }
 
     /// The first buffer arrived: place the window as its rules say (else centred in the work area,
-    /// cascading), and focus it.
+    /// cascading), and focus it. A window that comes back after hiding itself maps where it was.
     fn map_client(&mut self, i: usize) {
-        let open = self.clients[i].open.clone();
-        let size = self.clients[i].size();
-        let vp = self.viewport();
-        let (ax, ay, aw, ah) = self.work_area();
         let n = self.clients.iter().filter(|c| c.mapped).count() as i32;
-        let off = (n % 8) * self.config.new_window_offset;
-        let (mx, my) = vp.screen_to_canvas((ax + aw / 2.0, ay + ah / 2.0));
-        let centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
-        let c = &mut self.clients[i];
-        c.mapped = true;
-        c.scale = open.scale.unwrap_or(1.0);
-        c.tags = open.tags.unwrap_or(self.tagset);
-        if open.pinned && !c.fullscreen {
-            // A pinned window's position is a screen position, on the monitor it opens on.
-            let at = open.position.unwrap_or(vp.canvas_to_screen(centred));
-            c.pin_mon = open.pin_mon.min(self.monitors.len().saturating_sub(1));
-            c.pin = Some(at.into());
-            c.canvas = vp.screen_to_canvas(at).into();
-            c.tags = ALLTAGS;
-        } else {
-            let (x, y) = open.position.unwrap_or(centred);
-            c.canvas = (x.round(), y.round()).into();
-        }
-        if self.config.open_ms > 0.0 && !open.minimized && !self.clients[i].fullscreen {
-            if !self.anim_running() {
-                self.begin_anim();
-            }
+        self.clients[i].mapped = true;
+        if !self.clients[i].ever_mapped {
+            self.clients[i].ever_mapped = true;
+            let open = self.clients[i].open.clone();
+            let size = self.clients[i].size();
+            let vp = self.viewport();
+            let (ax, ay, aw, ah) = self.work_area();
+            let off = (n % 8) * self.config.new_window_offset;
+            let (mx, my) = vp.screen_to_canvas((ax + aw / 2.0, ay + ah / 2.0));
+            let centred = (mx - size.w as f64 / 2.0 + off as f64, my - size.h as f64 / 2.0 + off as f64);
             let c = &mut self.clients[i];
-            c.fx = crate::state::Fx {
-                alpha: 0.0,
-                scale: self.config.open_scale,
-                fade_ms: self.config.open_ms,
-                ..crate::state::Fx::REST
-            };
-        }
-        if open.minimized {
-            self.minimize_stamp += 1;
-            self.clients[i].minimized = self.minimize_stamp;
+            c.scale = open.scale.unwrap_or(1.0);
+            c.tags = open.tags.unwrap_or(self.tagset);
+            if open.pinned && !c.fullscreen {
+                // A pinned window's position is a screen position, on the monitor it opens on.
+                let at = open.position.unwrap_or(vp.canvas_to_screen(centred));
+                c.pin_mon = open.pin_mon.min(self.monitors.len().saturating_sub(1));
+                c.pin = Some(at.into());
+                c.canvas = vp.screen_to_canvas(at).into();
+                c.tags = ALLTAGS;
+            } else {
+                let (x, y) = open.position.unwrap_or(centred);
+                c.canvas = (x.round(), y.round()).into();
+            }
+            if self.config.open_ms > 0.0 && !open.minimized && !self.clients[i].fullscreen {
+                if !self.anim_running() {
+                    self.begin_anim();
+                }
+                let c = &mut self.clients[i];
+                c.fx = crate::state::Fx {
+                    alpha: 0.0,
+                    scale: self.config.open_scale,
+                    fade_ms: self.config.open_ms,
+                    ..crate::state::Fx::REST
+                };
+            }
+            if open.minimized {
+                self.minimize_stamp += 1;
+                self.clients[i].minimized = self.minimize_stamp;
+            }
         }
         if let Some(surface) = self.clients[i].surface() {
             for m in &self.monitors {
@@ -208,8 +225,27 @@ impl Uwc {
         }
         let id = self.clients[i].id;
         // It takes the keyboard unless a rule says not to, or it opened out of sight.
-        if open.focus != Some(false) && self.visible(&self.clients[i]) {
+        if self.clients[i].open.focus != Some(false) && self.visible(&self.clients[i]) {
             self.focus_client(Some(id));
+        }
+        self.refresh_pointer();
+        self.damage();
+    }
+
+    /// The client took its buffer back (a NULL attach): hide it until it maps again.
+    fn unmap_client(&mut self, i: usize) {
+        self.clients[i].mapped = false;
+        let id = self.clients[i].id;
+        self.export_on_close(id);
+        if self.focus == Some(id) {
+            self.focus = None;
+            let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
+            self.focus_client(top);
+        }
+        if let Some(crate::state::Drag::Move { id: d, .. } | crate::state::Drag::Resize { id: d, .. }) = self.drag {
+            if d == id {
+                self.drag = None;
+            }
         }
         self.refresh_pointer();
         self.damage();
@@ -240,6 +276,7 @@ impl XdgShellHandler for Uwc {
             canvas: (0.0, 0.0).into(),
             tags: self.tagset(),
             mapped: false,
+            ever_mapped: false,
             urgent: false,
             pin: None,
             pin_mon: 0,
