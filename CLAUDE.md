@@ -5,7 +5,7 @@
 uwc: the Rust/smithay rewrite of uwm (`undrscores/uwm`, C and wlroots). An infinite 2D canvas with dwm-style tags, each
 with its own canvas, viewport and zoom; everything floats; meant to be ricked out through
 configuration. Start from uwm's config syntax, action names and IPC schema, but improve on them where
-uwm is awkward (the user said it need not be 1:1); `README.md` has the status table and the roadmap. Not goals: client-side decorations, a built-in bar.
+uwm is awkward (the user said it need not be 1:1); `docs/STATUS.md` has the status table and the roadmap. Not goals: client-side decorations, a built-in bar.
 
 ## Build and test
 
@@ -22,7 +22,7 @@ uwm is awkward (the user said it need not be 1:1); `README.md` has the status ta
 - Windows have a placement (`Uwc::place`): canvas windows follow the viewport and zoom; pinned and fullscreen
   windows are fixed to the screen at zoom 1. Drawing, hit-testing (`window_under`), the pointer location given to
   the seat and drags all go through it; never compute a window's screen position from the viewport directly.
-- System libs: see README. The sandbox needs `libxkbcommon-x11-0` for winit's X11 path.
+- System libs: see INSTALL.md. The sandbox needs `libxkbcommon-x11-0` for winit's X11 path.
 - The udev backend cannot run in a sandbox (no GPU, no seat); it only builds there. Say so when changing it, and keep
   backend-independent logic (input, cursor, rendering, frame callbacks) out of it so the nested and headless runs
   exercise it.
@@ -32,7 +32,7 @@ uwm is awkward (the user said it need not be 1:1); `README.md` has the status ta
 
 ## Conventions
 
-- One crate, small modules (see the layout in README). `Uwc` (state.rs) owns everything; protocol handlers, input and
+- One crate, small modules (see the layout in docs/HACKING.md). `Uwc` (state.rs) owns everything; protocol handlers, input and
   IPC are `impl Uwc` blocks in their own files.
 - Canvas px are what clients are told and IPC reports (`Client.canvas`). Screen px = `Viewport::canvas_to_screen`.
   The seat's pointer location is in the space of what is under it (canvas px for canvas windows, screen px for
