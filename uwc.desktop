@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=uwc
+Comment=Infinite-canvas Wayland compositor
+Exec=@PREFIX@/bin/uwc-session
+Type=Application
+DesktopNames=uwc

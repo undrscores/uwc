@@ -1,0 +1,226 @@
+// uwc config. KDL syntax (KDL v1, the same as uwm: true/false are bare words).
+// This file is built in as the default and documents every option; a config file only needs the
+// parts it changes. It lives at -c FILE, else $UWC_CONFIG, else ~/.config/uwc/config.kdl.
+//
+// A config with a `binds` section replaces the whole default one, so copy this file to start from.
+// Theming: `include "colors.kdl"` splices in another file's nodes; `vars { accent "#00aaff" }` names
+// colors, used as "$accent" anywhere a color goes.
+
+options {
+    // mod-key "Super"          // what `Mod` means in binds: Super (default), Alt, Ctrl, Shift
+    sloppy-focus true           // focus follows the mouse
+    warp-cursor true            // keyboard focus changes move the pointer into the window
+    border-width 2              // px of canvas; 0 = no border
+    root-color "#222222"        // "#rrggbb" or "#rrggbbaa"
+    border-color "#444444"
+    focus-color "#005577"
+    urgent-color "#ff0000"
+    fullscreen-bg "#000000"     // behind a fullscreen window that does not cover the whole output
+
+    // Window decoration. Sizes are canvas px and scale with zoom.
+    corner-radius 10            // rounded window corners; 0 = square
+    shadow-size 24              // shadow blur distance; 0 = no shadow
+    shadow-offset-x 0
+    shadow-offset-y 6
+    shadow-color "#00000099"    // "#rrggbbaa"
+    shadow-spread 0             // px the shadow grows (negative: shrinks) before it is blurred
+    // A glow: the focused window's shadow can differ. focus-shadow-color with alpha 0 means
+    // "the same as shadow-color", focus-shadow-size -1 "the same as shadow-size". For a glow in the
+    // focus color use  focus-shadow-color "#005577cc"  focus-shadow-size 30  shadow-offset-y 0.
+    focus-shadow-color "#00000000"
+    focus-shadow-size -1
+    // A color painted behind a window's surface, inside the border (shows through translucent
+    // windows). Alpha 0 = none.
+    backdrop-color "#00000000"
+    opacity 1                   // 0-1: focused windows (the surface only, not the border or shadow)
+    inactive-opacity 1          // 0-1: windows that do not have focus
+    inactive-dim 0              // 0-1: how much windows without focus are darkened
+    // Border gradients replace the border / focus color: 2 to 6 colors, angle in CSS degrees
+    // (0 = first color at the bottom, last at the top; 90 = first at the left; the default).
+    // No colors turns it off. Needs border-width > 0.
+    // border-gradient "#444444" "#222222" angle=45
+    // focus-gradient "#00aaff" "#aa00ff" angle=45
+    // urgent-gradient "#ff0000" "#ffaa00" angle=45
+    border-spin-ms 0            // a gradient border turns once around in this many ms (negative: the other way); 0 = still
+    // All of these can be changed live over IPC:  set focus-gradient "#ff0000" "#0000ff" angle=45
+    pan-step 200                // canvas px for the pan-view action
+    move-step 50                // canvas px for move-window / resize-window
+    zoom-scroll 1.1             // zoom factor per scroll notch with Mod held
+    new-window-offset 32        // each new window on a tag is offset by this much from the last
+    // Pointer image: the xcursor theme ("" = $XCURSOR_THEME, else "default") and size in px.
+    // Programs started afterwards inherit them through XCURSOR_THEME / XCURSOR_SIZE.
+    cursor-theme ""
+    cursor-size 24
+
+    // Real session (udev backend) only. These are on by default; turn one off when a driver gets it
+    // wrong (NVIDIA has had trouble with each at some point). hardware-cursor and explicit-sync apply
+    // after a restart, direct-scanout at once.
+    hardware-cursor true        // draw the pointer on the GPU's cursor plane; false = composite it
+    direct-scanout true         // show a client buffer that covers the output without compositing
+    explicit-sync true          // linux-drm-syncobj-v1, needed for flicker-free GL/Vulkan apps on NVIDIA
+}
+
+// Outputs (in a real session). Not listed: preferred mode, scale 1. Only one output is used for now:
+// the first connected one that is not `off`.
+// monitor "eDP-1" {
+//     mode 2560 1440 165         // width height [refresh]; the closest available mode is used
+//     scale 1.5
+//     transform "normal"         // normal, 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
+//     off                        // don't use this output
+// }
+
+// Keyboard and pointers. Unset keyboard fields come from the XKB_DEFAULT_* variables. A layout that does
+// not compile rejects the whole config. touchpad applies to devices that can tap, mouse to the rest.
+// input {
+//     keyboard {
+//         xkb-layout "us"            // also xkb-model, xkb-variant, xkb-options, xkb-rules
+//         xkb-options "ctrl:nocaps"
+//         repeat-rate 25
+//         repeat-delay 600
+//     }
+//     touchpad {
+//         tap; tap-and-drag; drag-lock; natural-scroll; disable-while-typing   // flags, or `tap false`
+//         left-handed; middle-emulation
+//         scroll-method "two-finger"    // none, two-finger, edge, on-button-down
+//         click-method "button-areas"   // none, button-areas, clickfinger
+//         accel-profile "adaptive"      // flat, adaptive
+//         accel-speed 0.0               // -1 to 1
+//         tap-button-map "lrm"          // lrm, lmr
+//         send-events "enabled"         // enabled, disabled, disabled-on-external-mouse
+//     }
+//     mouse { accel-profile "flat" }
+// }
+
+// Window rules. Every rule whose `match` fits a window applies, later rules over earlier ones.
+// - `match`: app-id / title are exact strings, or globs with * and ? ("org.gnome.*", "*YouTube*");
+//   tag=N, focused, pinned, fullscreen, urgent (true/false) look at the window as it is now. The
+//   properties of one match must all hold; several match lines are alternatives; no match = every window.
+// - `exclude`: same syntax; a window it fits is left out.
+// - `open { }`: what happens once, when the window appears:
+//       tag 3 5            the tags it opens on (default: the ones in view)
+//       size 900 600       canvas px
+//       position 3000 0    canvas px of its top-left corner (screen px when it also opens pinned)
+//       pinned / fullscreen / minimized    (minimized: it starts hidden, a scratchpad)
+//       focus false        it does not take the keyboard
+// - any decoration option (border-width, border-color, focus-color, focus-gradient, corner-radius,
+//   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, border-spin-ms,
+//   urgent-*): it applies to these windows live, and follows their state (e.g. match focused=false).
+// IPC: `rule { ... }` adds one until the next reload, `rule clear` removes those.
+//
+// rule {
+//     match app-id="mpv"
+//     open { pinned; size 640 360; position 20 20; focus false }
+//     corner-radius 0
+//     shadow-size 0
+// }
+// rule {
+//     match focused=false
+//     exclude app-id="mpv"
+//     inactive-opacity 0.85
+// }
+
+binds {
+    Mod+T { spawn "foot"; }
+    Mod+Return { spawn "foot"; }
+    Mod+Q { close-window; }
+    Mod+Shift+Q { quit; }
+    Ctrl+Alt+BackSpace { quit; }
+
+    Mod+H { focus-direction "left"; }
+    Mod+L { focus-direction "right"; }
+    Mod+K { focus-direction "up"; }
+    Mod+J { focus-direction "down"; }
+    Mod+Shift+H { move-window "left"; }
+    Mod+Shift+L { move-window "right"; }
+    Mod+Shift+K { move-window "up"; }
+    Mod+Shift+J { move-window "down"; }
+    Mod+Ctrl+H { resize-window "left"; }
+    Mod+Ctrl+L { resize-window "right"; }
+    Mod+Ctrl+K { resize-window "up"; }
+    Mod+Ctrl+J { resize-window "down"; }
+    Mod+N { focus-next-window; }
+    Mod+Shift+N { focus-previous-window; }
+
+    Mod+O { toggle-overview; }
+    Mod+C { center-window; }
+    Mod+M { fit-window; }
+    Mod+E { toggle-fullscreen; }
+    Mod+Shift+Space { toggle-pin; }     // keep on screen while the view moves, unzoomed, on every tag
+    Mod+Y { minimize-window; }          // hide the focused window until restored (a scratchpad)
+    Mod+Shift+Y { restore-window; }     // bring back the one hidden last
+    Mod+minus { zoom 0.8; }
+    Mod+equal { zoom 1.25; }
+    Mod+Shift+0 { zoom-reset; }
+    Mod+Alt+H { pan-view "left"; }
+    Mod+Alt+L { pan-view "right"; }
+    Mod+Alt+K { pan-view "up"; }
+    Mod+Alt+J { pan-view "down"; }
+    // viewport bookmarks: save the view (position and zoom) of the tag in use, jump back to it
+    Mod+Alt+1 { bookmark-goto 1; }
+    Mod+Alt+Shift+1 { bookmark-save 1; }
+    Mod+Alt+2 { bookmark-goto 2; }
+    Mod+Alt+Shift+2 { bookmark-save 2; }
+    Mod+Alt+3 { bookmark-goto 3; }
+    Mod+Alt+Shift+3 { bookmark-save 3; }
+    Mod+Alt+4 { bookmark-goto 4; }
+    Mod+Alt+Shift+4 { bookmark-save 4; }
+    Mod+Alt+5 { bookmark-goto 5; }
+    Mod+Alt+Shift+5 { bookmark-save 5; }
+    Mod+Alt+6 { bookmark-goto 6; }
+    Mod+Alt+Shift+6 { bookmark-save 6; }
+    Mod+Alt+7 { bookmark-goto 7; }
+    Mod+Alt+Shift+7 { bookmark-save 7; }
+    Mod+Alt+8 { bookmark-goto 8; }
+    Mod+Alt+Shift+8 { bookmark-save 8; }
+    Mod+Alt+9 { bookmark-goto 9; }
+    Mod+Alt+Shift+9 { bookmark-save 9; }
+
+    Mod+Tab { view-previous; }
+    Mod+0 { view-all; }
+    Mod+1 { view-tag 1; }
+    Mod+Ctrl+1 { toggle-view-tag 1; }
+    Mod+Shift+1 { send-to-tag 1; }
+    Mod+2 { view-tag 2; }
+    Mod+Ctrl+2 { toggle-view-tag 2; }
+    Mod+Shift+2 { send-to-tag 2; }
+    Mod+3 { view-tag 3; }
+    Mod+Ctrl+3 { toggle-view-tag 3; }
+    Mod+Shift+3 { send-to-tag 3; }
+    Mod+4 { view-tag 4; }
+    Mod+Ctrl+4 { toggle-view-tag 4; }
+    Mod+Shift+4 { send-to-tag 4; }
+    Mod+5 { view-tag 5; }
+    Mod+Ctrl+5 { toggle-view-tag 5; }
+    Mod+Shift+5 { send-to-tag 5; }
+    Mod+6 { view-tag 6; }
+    Mod+Ctrl+6 { toggle-view-tag 6; }
+    Mod+Shift+6 { send-to-tag 6; }
+    Mod+7 { view-tag 7; }
+    Mod+Ctrl+7 { toggle-view-tag 7; }
+    Mod+Shift+7 { send-to-tag 7; }
+    Mod+8 { view-tag 8; }
+    Mod+Ctrl+8 { toggle-view-tag 8; }
+    Mod+Shift+8 { send-to-tag 8; }
+    Mod+9 { view-tag 9; }
+    Mod+Ctrl+9 { toggle-view-tag 9; }
+    Mod+Shift+9 { send-to-tag 9; }
+
+    // mouse
+    Mod+MouseLeft { drag-move; }
+    Mod+MouseMiddle { drag-pan; }
+    Mod+MouseRight { drag-resize; }
+
+    // VT switching (in a real session); do not remove unless you know what a VT is
+    Ctrl+Alt+XF86Switch_VT_1 { switch-vt 1; }
+    Ctrl+Alt+XF86Switch_VT_2 { switch-vt 2; }
+    Ctrl+Alt+XF86Switch_VT_3 { switch-vt 3; }
+    Ctrl+Alt+XF86Switch_VT_4 { switch-vt 4; }
+    Ctrl+Alt+XF86Switch_VT_5 { switch-vt 5; }
+    Ctrl+Alt+XF86Switch_VT_6 { switch-vt 6; }
+    Ctrl+Alt+XF86Switch_VT_7 { switch-vt 7; }
+    Ctrl+Alt+XF86Switch_VT_8 { switch-vt 8; }
+    Ctrl+Alt+XF86Switch_VT_9 { switch-vt 9; }
+    Ctrl+Alt+XF86Switch_VT_10 { switch-vt 10; }
+    Ctrl+Alt+XF86Switch_VT_11 { switch-vt 11; }
+    Ctrl+Alt+XF86Switch_VT_12 { switch-vt 12; }
+}

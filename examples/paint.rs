@@ -1,0 +1,199 @@
+//! A tiny Wayland client for looking at uwc by eye: opens a toplevel filled with a solid color
+//! (with a lighter 10px frame so edges are visible) and keeps it up.
+//!
+//!     cargo run --example paint -- "title" 400 300 ff3366
+//!     cargo run --example paint -- --bar 32 30a0d0     # a layer-shell bar along the top edge
+
+use std::{io::Write, os::fd::AsFd};
+
+use wayland_client::{
+    globals::{registry_queue_init, GlobalListContents},
+    protocol::{wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface},
+    Connection, Dispatch, QueueHandle,
+};
+use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+
+struct App {
+    quit: bool,
+    layer_size: Option<(u32, u32)>,
+}
+
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(String::as_str) == Some("--bar") {
+        return bar(
+            a.get(2).and_then(|s| s.parse().ok()).unwrap_or(32),
+            a.get(3).map(String::as_str).unwrap_or("30a0d0"),
+        );
+    }
+    let title = a.get(1).cloned().unwrap_or_else(|| "paint".into());
+    let w: i32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(400);
+    let h: i32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(300);
+    let rgb = u32::from_str_radix(a.get(4).map(String::as_str).unwrap_or("3366ff"), 16).unwrap_or(0x3366ff);
+
+    let conn = Connection::connect_to_env().expect("WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).unwrap();
+    let qh = queue.handle();
+    let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 4..=6, ()).unwrap();
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
+    let wm: xdg_wm_base::XdgWmBase = globals.bind(&qh, 1..=6, ()).unwrap();
+    let mut app = App { quit: false, layer_size: None };
+
+    let surface = compositor.create_surface(&qh, ());
+    let xdg = wm.get_xdg_surface(&surface, &qh, ());
+    let toplevel = xdg.get_toplevel(&qh, ());
+    toplevel.set_title(title);
+    toplevel.set_app_id("uwc.paint".into());
+    surface.commit();
+    queue.roundtrip(&mut app).unwrap();
+
+    let (r, g, b) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let edge = x < 10 || y < 10 || x >= w - 10 || y >= h - 10;
+            let k = if edge { 255 } else { 0 };
+            px.extend_from_slice(&[b.saturating_add(k / 3), g.saturating_add(k / 3), r.saturating_add(k / 3), 255]);
+        }
+    }
+    let mut f = tempfile_in_runtime();
+    f.write_all(&px).unwrap();
+    let pool = shm.create_pool(f.as_fd(), w * h * 4, &qh, ());
+    let buf = pool.create_buffer(0, w, h, w * 4, wl_shm::Format::Argb8888, &qh, ());
+    surface.attach(Some(&buf), 0, 0);
+    surface.commit();
+    while !app.quit {
+        queue.blocking_dispatch(&mut app).unwrap();
+    }
+}
+
+fn bar(height: u32, color: &str) {
+    let rgb = u32::from_str_radix(color, 16).unwrap_or(0x30a0d0);
+    let conn = Connection::connect_to_env().expect("WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).unwrap();
+    let qh = queue.handle();
+    let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 4..=6, ()).unwrap();
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
+    let shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).unwrap();
+    let mut app = App { quit: false, layer_size: None };
+    let surface = compositor.create_surface(&qh, ());
+    use zwlr_layer_surface_v1::Anchor;
+    let layer = shell.get_layer_surface(&surface, None, zwlr_layer_shell_v1::Layer::Top, "bar".into(), &qh, ());
+    layer.set_size(0, height);
+    layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+    layer.set_exclusive_zone(height as i32);
+    surface.commit();
+    queue.roundtrip(&mut app).unwrap();
+    let (w, h) = app.layer_size.take().unwrap_or((800, height));
+    let (w, h) = (w as i32, h as i32);
+    let (r, g, b) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for _ in 0..h {
+        for x in 0..w {
+            // A few "workspace buttons" on the left.
+            let button = x < 200 && (x % 40) < 30;
+            let k = if button { 60 } else { 0 };
+            px.extend_from_slice(&[b.saturating_add(k), g.saturating_add(k), r.saturating_add(k), 255]);
+        }
+    }
+    let mut f = tempfile_in_runtime();
+    f.write_all(&px).unwrap();
+    let pool = shm.create_pool(f.as_fd(), w * h * 4, &qh, ());
+    let buf = pool.create_buffer(0, w, h, w * 4, wl_shm::Format::Argb8888, &qh, ());
+    surface.attach(Some(&buf), 0, 0);
+    surface.commit();
+    while !app.quit {
+        queue.blocking_dispatch(&mut app).unwrap();
+    }
+}
+
+fn tempfile_in_runtime() -> std::fs::File {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let p = dir.join(format!("uwc-paint-{}", std::process::id()));
+    let f = std::fs::File::options().read(true).write(true).create(true).truncate(true).open(&p).unwrap();
+    let _ = std::fs::remove_file(&p);
+    f
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for App {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<xdg_wm_base::XdgWmBase, ()> for App {
+    fn event(
+        _: &mut Self,
+        wm: &xdg_wm_base::XdgWmBase,
+        e: xdg_wm_base::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = e {
+            wm.pong(serial);
+        }
+    }
+}
+impl Dispatch<xdg_surface::XdgSurface, ()> for App {
+    fn event(
+        _: &mut Self,
+        xdg: &xdg_surface::XdgSurface,
+        e: xdg_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = e {
+            xdg.ack_configure(serial);
+        }
+    }
+}
+impl Dispatch<xdg_toplevel::XdgToplevel, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &xdg_toplevel::XdgToplevel,
+        e: xdg_toplevel::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Close = e {
+            app.quit = true;
+        }
+    }
+}
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        l: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        e: zwlr_layer_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+                l.ack_configure(serial);
+                app.layer_size = Some((width, height));
+            }
+            zwlr_layer_surface_v1::Event::Closed => app.quit = true,
+            _ => {}
+        }
+    }
+}
+macro_rules! noop {
+    ($($t:ty),*) => {$(
+        impl Dispatch<$t, ()> for App {
+            fn event(_: &mut Self, _: &$t, _: <$t as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+        }
+    )*};
+}
+noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
+noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer, wl_surface::WlSurface);
