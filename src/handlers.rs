@@ -118,7 +118,7 @@ impl Uwc {
                 saved.apply(&mut open);
             }
         }
-        let screen = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
+        let screen = self.monitors.get(self.cur).map(|m| m.size).unwrap_or((1280, 720).into());
         let c = &mut self.clients[i];
         if let Some(t) = c.window.toplevel() {
             t.with_pending_state(|s| {
@@ -133,6 +133,7 @@ impl Uwc {
         }
         if open.fullscreen {
             c.fullscreen = true;
+            c.fs_mon = open.fs_mon.min(self.monitors.len().saturating_sub(1));
             c.prev_size = open.size.map(Into::into);
         }
         c.open = open;
@@ -152,10 +153,11 @@ impl Uwc {
         let c = &mut self.clients[i];
         c.mapped = true;
         c.scale = open.scale.unwrap_or(1.0);
-        c.tags = open.tags.unwrap_or(self.mon.as_ref().map(|m| m.tagset).unwrap_or(1));
+        c.tags = open.tags.unwrap_or(self.tagset);
         if open.pinned && !c.fullscreen {
-            // A pinned window's position is a screen position.
+            // A pinned window's position is a screen position, on the monitor it opens on.
             let at = open.position.unwrap_or(vp.canvas_to_screen(centred));
+            c.pin_mon = open.pin_mon.min(self.monitors.len().saturating_sub(1));
             c.pin = Some(at.into());
             c.canvas = vp.screen_to_canvas(at).into();
             c.tags = ALLTAGS;
@@ -179,7 +181,7 @@ impl Uwc {
             self.minimize_stamp += 1;
             self.clients[i].minimized = self.minimize_stamp;
         }
-        if let Some(m) = &self.mon {
+        for m in &self.monitors {
             let rect = Rectangle::from_size(m.size);
             output_update(&m.output, Some(rect), self.clients[i].surface());
         }
@@ -219,7 +221,9 @@ impl XdgShellHandler for Uwc {
             mapped: false,
             urgent: false,
             pin: None,
+            pin_mon: 0,
             fullscreen: false,
+            fs_mon: 0,
             prev_size: None,
             minimized: 0,
             open: Default::default(),

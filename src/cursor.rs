@@ -16,7 +16,7 @@ use smithay::{
         },
     },
     input::pointer::{CursorImageStatus, CursorImageSurfaceData},
-    utils::{IsAlive, Physical, Point, Scale, Transform},
+    utils::{IsAlive, Logical, Physical, Point, Scale, Transform},
     wayland::compositor::with_states,
 };
 
@@ -127,8 +127,13 @@ fn arrow(px: u32) -> CursorImage {
 
 impl Uwc {
     /// The pointer as render elements at output scale `scale` (empty when hidden).
-    pub fn cursor_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
-        let pos: Point<f64, Physical> = (self.cursor.x * scale, self.cursor.y * scale).into();
+    pub fn cursor_elements_at(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        scale: f64,
+        pos: Point<f64, Logical>,
+    ) -> Vec<UwcElement> {
+        let pos: Point<f64, Physical> = (pos.x * scale, pos.y * scale).into();
         match &self.cursor_status {
             CursorImageStatus::Hidden => vec![],
             CursorImageStatus::Surface(surface) if surface.alive() => {

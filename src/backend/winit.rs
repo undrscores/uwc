@@ -52,9 +52,10 @@ pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>) -> anyhow::Resul
                 if let Backend::Winit(w) = &state.backend {
                     w.output.change_current_state(Some(Mode { size, refresh: 60_000 }), None, None, None);
                 }
-                if let Some(m) = state.mon.as_mut() {
+                if let Some(m) = state.monitors.first_mut() {
                     m.size = (size.w, size.h).into();
                     smithay::desktop::layer_map_for_output(&m.output).arrange();
+                    state.layout();
                 }
                 state.damage();
             }
@@ -78,7 +79,7 @@ impl Uwc {
             let age = w.backend.buffer_age().unwrap_or(0);
             let damage = match w.backend.bind() {
                 Ok((renderer, mut fb)) => {
-                    let elements = self.frame_elements(renderer, 1.0);
+                    let elements = self.frame_elements(renderer, 0);
                     match w.tracker.render_output(renderer, &mut fb, age, &elements, self.config.root_color) {
                         Ok(r) => {
                             if r.damage.is_some_and(|d| !d.is_empty()) {

@@ -59,15 +59,15 @@ impl Uwc {
             }
             InputEvent::PointerMotion { event } => {
                 let t = Event::time_msec(&event);
-                let (sw, sh) = self.screen_size();
+                let (sw, sh) = self.global_size();
                 let p: Point<f64, Logical> = (self.cursor.x + event.delta_x(), self.cursor.y + event.delta_y()).into();
                 self.cursor = (p.x.clamp(0.0, sw - 1.0), p.y.clamp(0.0, sh - 1.0)).into();
                 self.real_motion(t);
             }
             InputEvent::PointerMotionAbsolute { event } => {
                 let t = Event::time_msec(&event);
-                let size = self.mon.as_ref().map(|m| m.size).unwrap_or((1280, 720).into());
-                self.cursor = event.position_transformed(size);
+                let (w, h) = self.global_size();
+                self.cursor = event.position_transformed((w as i32, h as i32).into());
                 self.real_motion(t);
             }
             InputEvent::PointerButton { event } => {
@@ -126,6 +126,8 @@ impl Uwc {
     fn real_motion(&mut self, time: u32) {
         // The pointer is drawn by uwc, so moving it is a new frame.
         self.redraw = true;
+        // The monitor the pointer is on is where view actions apply.
+        self.cur = self.mon_at(self.cursor);
         self.pointer_motion_to(self.cursor, time);
         // A popup grab keeps the focus where it is while the pointer moves over others.
         if self.drag.is_none() && self.config.sloppy_focus && !self.pointer().is_grabbed() {
@@ -149,10 +151,12 @@ impl Uwc {
         // Canvas windows live in canvas px; pinned and fullscreen windows and layer surfaces in screen
         // px. The location handed to the seat is in the space of whatever is under the pointer, so
         // surface-local coordinates come out right whatever the zoom.
+        let m = self.mon_at(pos);
+        let local = pos - self.monitors.get(m).map(|x| x.origin).unwrap_or((0.0, 0.0).into());
         let (location, focus) = match self.under(pos) {
             Some(Under::Window { surface, origin, location, .. }) => (location, Some((surface, origin))),
-            Some(Under::Layer { surface, origin, .. }) => (pos, Some((surface, origin))),
-            None => (pos, None),
+            Some(Under::Layer { surface, origin, .. }) => (local, Some((surface, origin))),
+            None => (local, None),
         };
         let ptr = self.pointer();
         ptr.motion(self, focus, &MotionEvent { location, serial: SERIAL_COUNTER.next_serial(), time });

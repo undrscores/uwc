@@ -25,6 +25,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Tags: view / toggle / send-to, per-tag viewport, previous | done |
 | xdg-shell toplevels and popups (with grabs: a click outside a menu closes it, and is not also a focus change or a drag), xdg-decoration (server side), shm, linux-dmabuf, seat, data device, output | done |
 | xdg-activation (apps ask for focus: a fresh token focuses the window and reveals it, an unseen one goes `urgent`, answered by focusing), ext-idle-notify + zwp-idle-inhibit (idle daemons; video players keep the screen on; real input resets the timers) | done |
+| Multiple monitors: all outputs tiled left to right, one shared canvas and tagset, a viewport and bookmarks per monitor per tag; the pointer's monitor is where view actions, new windows and pins land; a window is drawn on every monitor whose view shows it, fullscreen covers the monitor it is on | done |
 | Focus: sloppy focus, click to focus, directional and cyclic keys, pan-to-reveal for keyboard focus only | done |
 | Mouse: Mod+drag move / resize / pan, empty-canvas drag pans, Mod+scroll zooms | done |
 | Pointer drawn by uwc: xcursor theme (`cursor-theme`, `cursor-size`), client cursor surfaces, built-in fallback arrow | done |
@@ -49,20 +50,20 @@ types and was reviewed against smithay's source, but the machine it was written 
 run on a real TTY to turn up something. What it does: libseat session (VT switching with Ctrl+Alt+F1..F12, pause and
 resume), the primary GPU via udev, KMS through smithay's `DrmOutputManager` (hardware cursor plane when available),
 connector hotplug, libinput with the config's touchpad/mouse settings, linux-dmabuf with feedback for GL clients.
-Limits: one GPU, and one output at a time (the first connected one not marked `off`) until multi-monitor.
+Limits: one GPU. Multiple outputs are scanned out per connector (each gets its own view of the shared
+canvas), but the machine this was written on has no GPU or seat, so the udev path is untested on hardware.
 
 Not yet (roughly in the order to do them):
 
-1. Multiple monitors (the state has one `Monitor`; on hold).
-2. Gestures (`swipe`, `pinch`, touchpad pan/zoom); `theme` and `palette` come with the ricing below.
-3. The rest of the animations (momentum; open, move, tag fade, the close fade and eased pan and zoom are done), driven
+1. Gestures (`swipe`, `pinch`, touchpad pan/zoom); `theme` and `palette` come with the ricing below.
+2. The rest of the animations (momentum; open, move, tag fade, the close fade and eased pan and zoom are done), driven
    from the frame callback, never timers.
-4. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
+3. The rest of the ricing: blur (and ext-background-effect for bars), the canvas grid, wallpaper, per-tag looks, window
    rules for decoration, `focus-ms` fades, theme switching and the `themes/` directory. Until the grid exists, uwm's
    themes (which set `grid`) are rejected as a whole.
-5. Session-lock, pointer constraints, Xwayland, input-method/text-input, output-management (popup grabs,
+4. Session-lock, pointer constraints, Xwayland, input-method/text-input, output-management (popup grabs,
    xdg-activation and idle-inhibit/idle-notify are done).
-6. Multi-GPU, animated cursors, DPMS.
+5. Multi-GPU, animated cursors, DPMS.
 
 ## Build and run
 

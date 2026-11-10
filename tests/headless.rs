@@ -56,11 +56,21 @@ impl Uwc {
 
     /// With the session file under `state` (it outlives this compositor).
     fn start_with_state(name: &str, config: Option<&str>, state: &std::path::Path) -> Uwc {
+        Uwc::start_full(name, config, state, "1000x600")
+    }
+
+    /// Several virtual outputs: `screens` is a `--headless` size list.
+    fn start_screens(name: &str, screens: &str) -> Uwc {
+        let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
+        Uwc::start_full(name, None, &dir.join("state"), screens)
+    }
+
+    fn start_full(name: &str, config: Option<&str>, state: &std::path::Path, screens: &str) -> Uwc {
         let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uwc"));
         cmd.arg("--headless")
-            .arg("1000x600")
+            .arg(screens)
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
             .stdout(Stdio::null())
@@ -1882,4 +1892,27 @@ fn popup_grabs_are_taken_and_end_cleanly() {
     c.sync();
     let s = uwc.wait("the window gone", |s| s["windows"].as_array().unwrap().is_empty());
     assert_eq!(s["monitors"][0]["animating"], false);
+}
+
+#[test]
+fn multiple_monitors_share_the_canvas() {
+    let mut uwc = Uwc::start_screens("multi", "1000x600,1000x600");
+    let mut c = uwc.connect();
+    let _a = c.window("A", 300, 200);
+    let s = uwc.wait("A", |s| !s["windows"].as_array().unwrap().is_empty());
+
+    // Two outputs tiled left to right; the pointer's monitor is the focused one.
+    let ms = s["monitors"].as_array().unwrap();
+    assert_eq!(ms.len(), 2);
+    assert_eq!((num(&ms[0]["width"]), num(&ms[1]["x"])), (1000.0, 1000.0));
+    assert_eq!(ms[0]["focused"], true);
+    assert_eq!(ms[1]["focused"], false);
+
+    // A pan moves only the pointer's monitor's view; the window follows the monitor that
+    // shows it.
+    uwc.ok("pan 700 0");
+    let s = uwc.wait("monitor 1 panned", |s| s["monitors"][0]["viewport"]["x"] == 700.0);
+    assert_eq!(s["monitors"][1]["viewport"]["x"], 0.0, "the other monitor keeps its view");
+    uwc.wait("the pan to settle", |s| s["monitors"][0]["view_moving"] == false);
+    assert_eq!(win(&uwc.state(), "A")["monitor"], "HEADLESS-2");
 }

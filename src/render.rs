@@ -52,16 +52,16 @@ struct Look {
 }
 
 impl Uwc {
-    /// Everything on one output for one frame, front to back: the pointer, overlay and top layer
+    /// Everything on one monitor for one frame, front to back: the pointer, overlay and top layer
     /// surfaces, the canvas, then bottom and background layer surfaces.
-    /// `scale` is the output scale (physical px per logical px).
-    pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, scale: f64) -> Vec<UwcElement> {
-        self.scene_elements(renderer, scale, true)
+    pub fn frame_elements(&mut self, renderer: &mut GlesRenderer, m: usize) -> Vec<UwcElement> {
+        self.scene_elements(renderer, m, true)
     }
 
-    /// The whole picture of the output; `with_cursor` false leaves the pointer out (screencopy).
-    pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, scale: f64, with_cursor: bool) -> Vec<UwcElement> {
+    /// The whole picture of monitor `m`; `with_cursor` false leaves the pointer out (screencopy).
+    pub fn scene_elements(&mut self, renderer: &mut GlesRenderer, m: usize, with_cursor: bool) -> Vec<UwcElement> {
         use smithay::wayland::shell::wlr_layer::Layer;
+        let scale = self.output_scale_of(m);
         if self.step_animations() {
             self.animating = true;
         }
@@ -76,9 +76,11 @@ impl Uwc {
         let wanted: Vec<String> = self
             .clients
             .iter()
-            .filter(|c| self.visible(c) && !c.fullscreen)
+            .filter(|c| self.visible_on(m, c) && !c.fullscreen)
             .map(|c| self.deco_for(c).border_shader)
-            .chain(self.ghosts.iter().filter(|g| !g.fullscreen).map(|g| g.deco.border_shader.clone()))
+            .chain(
+                self.ghosts.iter().filter(|g| !g.fullscreen && g.visible_on(m)).map(|g| g.deco.border_shader.clone()),
+            )
             .filter(|s| !s.is_empty())
             .collect();
         let mut animated = false;
@@ -95,11 +97,16 @@ impl Uwc {
             self.deco_commit.increment();
             self.animating = true;
         }
-        let mut out = if with_cursor { self.cursor_elements(renderer, scale) } else { Vec::new() };
-        out.extend(self.layer_elements(renderer, scale, &[Layer::Overlay]));
+        // The pointer is drawn by the monitor it is on, in that monitor's coordinates.
+        let mut out = if with_cursor && self.mon_at(self.cursor) == m {
+            self.cursor_elements_at(renderer, scale, self.cursor - self.origin_of(m))
+        } else {
+            Vec::new()
+        };
+        out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Overlay]));
         // Fullscreen windows cover the top layer (bars), over the fullscreen-bg color.
-        let mut fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, true);
-        fullscreen.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, true));
+        let mut fullscreen = self.render_elements(renderer, shaders.as_ref(), &user, scale, m, true);
+        fullscreen.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, m, true));
         if !fullscreen.is_empty() {
             out.extend(fullscreen);
             let (w, h) = self.screen_size();
@@ -112,13 +119,13 @@ impl Uwc {
                 Kind::Unspecified,
             )));
         }
-        out.extend(self.layer_elements(renderer, scale, &[Layer::Top]));
-        out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, false));
-        out.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, false));
-        out.extend(self.layer_elements(renderer, scale, &[Layer::Bottom, Layer::Background]));
+        out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Top]));
+        out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, m, false));
+        out.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, m, false));
+        out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Bottom, Layer::Background]));
         if let Some((program, _)) = background {
             let (w, h) = self.screen_size();
-            let vp = self.viewport();
+            let vp = self.viewport_of(m);
             out.push(UwcElement::from(ShaderElement::user_background(
                 &program,
                 &self.background_id,
@@ -222,25 +229,26 @@ impl Uwc {
         }
     }
 
-    /// The visible windows that are fullscreen (or the ones that are not), with their popups and
-    /// decoration, topmost first.
+    /// The windows visible on monitor `m` that are fullscreen (or the ones that are not), with their
+    /// popups and decoration, topmost first.
     pub fn render_elements(
         &self,
         renderer: &mut GlesRenderer,
         shaders: Option<&Shaders>,
         user: &HashMap<String, GlesPixelProgram>,
         scale: f64,
+        m: usize,
         fullscreen: bool,
     ) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
         let commit = self.deco_commit;
 
-        for c in self.clients.iter().rev().filter(|c| self.visible(c) && c.fullscreen == fullscreen) {
+        for c in self.clients.iter().rev().filter(|c| self.visible_on(m, c) && c.fullscreen == fullscreen) {
             // The options with this window's rules applied.
             let deco = self.deco_for(c);
             let o = &deco;
             let look = self.look(c, o);
-            let pl = self.place(c);
+            let pl = self.place_on(m, c, &c.fx);
             // Window px to physical output px.
             let z = pl.zoom;
             let k = z * scale;
@@ -311,7 +319,7 @@ impl Uwc {
                 continue;
             }
             let Some(s) = shaders else {
-                out.extend(self.solid_border(c, o, &look, scale));
+                out.extend(self.solid_border(m, c, o, &look, scale));
                 continue;
             };
             if o.backdrop_color[3] > 0.0 && c.fx.alpha > 0.0 {
@@ -379,13 +387,14 @@ impl Uwc {
         shaders: Option<&Shaders>,
         user: &HashMap<String, GlesPixelProgram>,
         scale: f64,
+        m: usize,
         fullscreen: bool,
     ) -> Vec<UwcElement> {
         let mut out: Vec<UwcElement> = Vec::new();
         let commit = self.deco_commit;
-        let vp = self.viewport();
+        let vp = self.viewport_of(m);
 
-        for g in self.ghosts.iter().filter(|g| g.fullscreen == fullscreen) {
+        for g in self.ghosts.iter().filter(|g| g.fullscreen == fullscreen && g.visible_on(m)) {
             let o = &g.deco;
             let look = self.look_of(g.focused, g.alpha, o);
             let pl = g.place(vp);
@@ -500,12 +509,12 @@ impl Uwc {
     }
 
     /// Square solid borders, for when the shaders are not available.
-    fn solid_border(&self, c: &Client, o: &Deco, look: &Look, scale: f64) -> Vec<UwcElement> {
+    fn solid_border(&self, m: usize, c: &Client, o: &Deco, look: &Look, scale: f64) -> Vec<UwcElement> {
         let bw = o.border_width;
         if bw <= 0 {
             return vec![];
         }
-        let pl = self.place(c);
+        let pl = self.place_on(m, c, &c.fx);
         // Window px (relative to the geometry's top-left) to physical px.
         let phys = |x: f64, y: f64| -> Point<i32, Physical> {
             (((pl.origin.x + x * pl.zoom) * scale).round() as i32, ((pl.origin.y + y * pl.zoom) * scale).round() as i32)

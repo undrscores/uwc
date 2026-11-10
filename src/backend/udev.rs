@@ -97,10 +97,10 @@ struct Gpu {
     manager: OutputManager,
     renderer: GlesRenderer,
     notifier: RegistrationToken,
-    out: Option<Out>,
+    outs: Vec<Out>,
 }
 
-/// The output in use.
+/// One scan-out output in use.
 struct Out {
     crtc: crtc::Handle,
     connector: connector::Handle,
@@ -409,7 +409,7 @@ impl Uwc {
         }
 
         let Backend::Udev(u) = &mut self.backend else { unreachable!() };
-        u.gpu = Some(Gpu { node, path: path.into(), manager, renderer, notifier, out: None });
+        u.gpu = Some(Gpu { node, path: path.into(), manager, renderer, notifier, outs: Vec::new() });
         Ok(())
     }
 
@@ -428,7 +428,7 @@ impl Uwc {
         let gpu = u.gpu.take().unwrap();
         tracing::warn!("primary GPU {} removed", gpu.path.display());
         self.loop_handle.remove(gpu.notifier);
-        if let Some(out) = gpu.out {
+        for out in gpu.outs {
             self.display_handle.remove_global::<Uwc>(out.global);
         }
     }
@@ -460,16 +460,21 @@ impl Uwc {
             .filter(|i| i.state() == connector::State::Connected && !i.modes().is_empty())
             .collect();
 
-        if let Some(out) = &gpu.out {
+        // Drop outputs that are gone, turned off by config, or when a full reinit is wanted.
+        let (kept, dropped): (Vec<Out>, Vec<Out>) = gpu.outs.drain(..).partition(|out: &Out| {
             let still = connected.iter().any(|i| i.handle() == out.connector);
             let off = monitors.iter().any(|m| m.name == out.output.name() && m.off);
-            if still && !off && !reinit {
-                return Ok(());
+            let keep = still && !off && !reinit;
+            if !keep {
+                tracing::info!("output {} {}", out.output.name(), if still && !off { "reconfigured" } else { "gone" });
             }
-            tracing::info!("output {} {}", out.output.name(), if still && !off { "reconfigured" } else { "gone" });
-            let out = gpu.out.take().unwrap();
+            keep
+        });
+        gpu.outs = kept;
+        for out in dropped {
             self.display_handle.remove_global::<Uwc>(out.global);
             drop(out.drm_output);
+            self.remove_monitor(out.output.name().as_str());
         }
 
         for info in &connected {
@@ -478,13 +483,16 @@ impl Uwc {
             if cfg.is_some_and(|c| c.off) {
                 continue;
             }
+            if gpu.outs.iter().any(|o| o.connector == info.handle()) {
+                continue;
+            }
             let device = gpu.manager.device();
             let crtc = info
                 .encoders()
                 .iter()
                 .filter_map(|e| device.get_encoder(*e).ok())
                 .flat_map(|e| res.filter_crtcs(e.possible_crtcs()))
-                .next();
+                .find(|c| !gpu.outs.iter().any(|o| o.crtc == *c));
             let (Some(crtc), Some(mode)) = (crtc, pick_mode(info.modes(), cfg)) else { continue };
 
             let (mm_w, mm_h) = info.size().unwrap_or((0, 0));
@@ -543,10 +551,9 @@ impl Uwc {
                     c.surface(),
                 );
             }
-            gpu.out = Some(Out { crtc, connector: info.handle(), output, global, drm_output, pending: false });
-            return Ok(());
+            gpu.outs.push(Out { crtc, connector: info.handle(), output, global, drm_output, pending: false });
         }
-        if gpu.out.is_none() {
+        if gpu.outs.is_empty() {
             tracing::warn!("no usable output connected");
         }
         Ok(())
@@ -554,7 +561,7 @@ impl Uwc {
 
     fn udev_vblank(&mut self, crtc: crtc::Handle) {
         let Some(u) = self.udev() else { return };
-        let Some(out) = u.gpu.as_mut().and_then(|g| g.out.as_mut()).filter(|o| o.crtc == crtc) else { return };
+        let Some(out) = u.gpu.as_mut().and_then(|g| g.outs.iter_mut().find(|o| o.crtc == crtc)) else { return };
         if let Err(e) = out.drm_output.frame_submitted() {
             tracing::warn!("frame submitted: {e}");
         }
@@ -580,10 +587,14 @@ impl Uwc {
             FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
         };
         if let (true, Some(gpu)) = (active, u.gpu.as_mut()) {
-            if let Some(out) = gpu.out.as_mut().filter(|o| !o.pending) {
-                self.redraw = false;
-                let scale = out.output.current_scale().fractional_scale();
-                let elements = self.frame_elements(&mut gpu.renderer, scale);
+            let mut pending_left = false;
+            for out in gpu.outs.iter_mut() {
+                if out.pending {
+                    pending_left = true;
+                    continue;
+                }
+                let m = self.mon_by_output(&out.output).unwrap_or(0);
+                let elements = self.frame_elements(&mut gpu.renderer, m);
                 let queued = match out.drm_output.render_frame(
                     &mut gpu.renderer,
                     &elements,
@@ -607,10 +618,6 @@ impl Uwc {
                         false
                     }
                 };
-                if std::mem::take(&mut self.animating) {
-                    // Drawn again once this frame is on screen.
-                    self.redraw = true;
-                }
                 let output = out.output.clone();
                 if queued {
                     super::send_frame_callbacks(self, &output);
@@ -624,6 +631,11 @@ impl Uwc {
                     });
                 }
             }
+            self.redraw = pending_left;
+            if std::mem::take(&mut self.animating) {
+                // Drawn again once this frame is on screen.
+                self.redraw = true;
+            }
         }
         self.popups.cleanup();
         self.backend = Backend::Udev(u);
@@ -636,7 +648,7 @@ impl Uwc {
         u.libinput.suspend();
         if let Some(gpu) = u.gpu.as_mut() {
             gpu.manager.pause();
-            if let Some(out) = gpu.out.as_mut() {
+            for out in gpu.outs.iter_mut() {
                 out.pending = false;
             }
         }
@@ -653,7 +665,7 @@ impl Uwc {
             if let Err(e) = gpu.manager.activate(false) {
                 tracing::error!("DRM activate: {e}");
             }
-            if let Some(out) = gpu.out.as_mut() {
+            for out in gpu.outs.iter_mut() {
                 out.pending = false;
             }
         }

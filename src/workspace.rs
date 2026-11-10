@@ -100,8 +100,8 @@ pub fn apply_batch(tagset: u32, batch: &[(usize, bool)]) -> Option<u32> {
 }
 
 impl Uwc {
-    fn workspace_output(&self) -> Option<Output> {
-        self.mon.as_ref().map(|m| m.output.clone())
+    fn workspace_outputs(&self) -> Vec<Output> {
+        self.monitors.iter().map(|m| m.output.clone()).collect()
     }
 
     /// Send what changed since last time (tag states, outputs) with one `done` per manager.
@@ -109,7 +109,7 @@ impl Uwc {
         let states = tag_states(self);
         let changed = self.workspaces.sent != Some(states);
         self.workspaces.sent = Some(states);
-        let output = self.workspace_output();
+        let outputs = self.workspace_outputs();
         let dh = self.display_handle.clone();
         for m in &mut self.workspaces.managers {
             let mut any = changed;
@@ -121,7 +121,7 @@ impl Uwc {
             // Announce the group on outputs the client bound since (or that replaced the old one).
             if let Ok(client) = dh.get_client(m.manager.id()) {
                 let now: Vec<WlOutput> =
-                    output.as_ref().map(|o| o.client_outputs(&client).collect()).unwrap_or_default();
+                    outputs.iter().flat_map(|o| o.client_outputs(&client).collect::<Vec<_>>()).collect();
                 for old in m.outputs.iter().filter(|o| !now.contains(o)) {
                     if old.is_alive() {
                         m.group.output_leave(old);
@@ -165,7 +165,7 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, ()> for Uwc {
         // Workspaces cannot be created from a bar: they are the fixed tags.
         group.capabilities(GroupCapabilities::empty());
         let outputs: Vec<WlOutput> =
-            state.workspace_output().map(|o| o.client_outputs(client).collect()).unwrap_or_default();
+            state.workspace_outputs().iter().flat_map(|o| o.client_outputs(client).collect::<Vec<_>>()).collect();
         for o in &outputs {
             group.output_enter(o);
         }

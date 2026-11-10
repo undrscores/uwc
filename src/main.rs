@@ -49,14 +49,14 @@ const USAGE: &str = "usage: uwc [-c FILE] [-s CMD] [-t] [--backend udev|winit] [
   -t, --check-config  validate the config and exit
       --backend NAME  udev: a real session (run from a TTY); winit: a window in the current session.
                       Default: winit if WAYLAND_DISPLAY or DISPLAY is set, else udev
-      --headless [WxH]  no display: a virtual output of WxH (default 1280x720), for tests
+      --headless [WxH,WxH,...]  no display: virtual outputs (default one 1280x720), for tests
   -h, --help";
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum BackendKind {
     Udev,
     Winit,
-    Headless(i32, i32),
+    Headless(Vec<(i32, i32)>),
 }
 
 struct Args {
@@ -75,25 +75,30 @@ fn parse_args() -> Result<Args> {
             "-s" => a.startup = Some(it.next().context("-s needs a command")?),
             "-t" | "--check-config" => a.check = true,
             "--headless" => {
-                let size = match it.peek().filter(|n| !n.starts_with('-')) {
+                let sizes = match it.peek().filter(|n| !n.starts_with('-')) {
                     Some(s) => {
-                        let (w, h) = s.split_once('x').context("--headless size must look like 1280x720")?;
-                        let size = (w.parse()?, h.parse()?);
+                        let sizes: Vec<(i32, i32)> = s
+                            .split(',')
+                            .map(|p| {
+                                let (w, h) = p.split_once('x').context("--headless size must look like 1280x720")?;
+                                Ok((w.parse::<i32>()?, h.parse::<i32>()?))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
                         it.next();
-                        size
+                        sizes
                     }
-                    None => (1280, 720),
+                    None => vec![(1280, 720)],
                 };
-                if size.0 < 1 || size.1 < 1 || size.0 > 16384 || size.1 > 16384 {
+                if sizes.is_empty() || sizes.iter().any(|&(w, h)| w < 1 || h < 1 || w > 16384 || h > 16384) {
                     bail!("--headless size out of range");
                 }
-                a.backend = Some(BackendKind::Headless(size.0, size.1));
+                a.backend = Some(BackendKind::Headless(sizes));
             }
             "--backend" => {
                 a.backend = Some(match it.next().as_deref() {
                     Some("udev") => BackendKind::Udev,
                     Some("winit") => BackendKind::Winit,
-                    Some("headless") => BackendKind::Headless(1280, 720),
+                    Some("headless") => BackendKind::Headless(vec![(1280, 720)]),
                     _ => bail!("--backend needs udev, winit or headless"),
                 })
             }
@@ -159,7 +164,7 @@ fn run() -> Result<()> {
     let nested = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
     let kind = args.backend.unwrap_or(if nested { BackendKind::Winit } else { BackendKind::Udev });
     match kind {
-        BackendKind::Headless(w, h) => backend::headless::init(&mut state, &handle, (w, h))?,
+        BackendKind::Headless(sizes) => backend::headless::init(&mut state, &handle, &sizes)?,
         BackendKind::Winit => backend::winit::init(&mut state, &handle)?,
         BackendKind::Udev => backend::udev::init(&mut state, &handle)?,
     }

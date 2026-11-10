@@ -95,7 +95,8 @@ impl Uwc {
         }
         let deco = self.deco_for(c);
         let focused = self.focus == Some(c.id);
-        let (canvas, pin, scale, fullscreen) = (c.canvas, c.pin, c.scale, c.fullscreen);
+        let (canvas, pin, pin_mon, scale, fullscreen, fs_mon) =
+            (c.canvas, c.pin, c.pin_mon, c.scale, c.fullscreen, c.fs_mon);
         let px = Size::from(((size.w as f64 * k).round() as i32, (size.h as f64 * k).round() as i32));
         let buffer = self
             .with_renderer(|state, r| {
@@ -114,8 +115,10 @@ impl Uwc {
             size,
             canvas,
             pin,
+            pin_mon,
             scale,
             fullscreen,
+            fs_mon,
             deco,
             focused,
             alpha: 1.0,
