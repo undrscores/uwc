@@ -7,6 +7,24 @@ use serde_json::{Map, Value};
 
 use crate::canvas::TAGCOUNT;
 
+/// `frame ...`: labelled regions of the canvas (frames.rs).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameCmd {
+    Add {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        label: String,
+    },
+    Label(u32, String),
+    /// Moves the windows inside with it.
+    Move(u32, f64, f64),
+    Resize(u32, f64, f64),
+    Remove(u32),
+    Fit(u32),
+}
+
 /// A command, as understood by the compositor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
@@ -21,6 +39,7 @@ pub enum Request {
     GetWindow(u32),
     Pan(f64, f64),
     PanTo(f64, f64),
+    Frame(FrameCmd),
     /// Panic inside the compositor, to test that it survives (only with UWC_DEBUG_PANIC=1).
     Crash,
     /// The window whose app-id and title best match this text (`#12` = window 12), brought into view.
@@ -62,6 +81,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("rules", "how many rules are in effect"),
     ("get-window ID", "a window's decoration with its rules applied"),
     ("pan DX DY", "move the view by canvas px"),
+    (
+        "frame add|label|move|resize|remove|fit ...",
+        "labelled regions of the canvas: add X Y W H [LABEL], label ID TEXT, move ID X Y (its windows go too), resize ID W H, remove ID, fit ID",
+    ),
     ("crash", "panic on purpose to test recovery (only when UWC_DEBUG_PANIC=1 is set in uwc's environment)"),
     (
         "jump QUERY",
@@ -133,6 +156,19 @@ impl Request {
             "panto" => Request::PanTo(num(0)?, num(1)?),
             "fling" => Request::Fling(num(0)?, num(1)?),
             "crash" => none(Request::Crash)?,
+            "frame" => {
+                let sub = args.first().copied().unwrap_or("");
+                let text = |from: usize| args.get(from..).unwrap_or(&[]).join(" ");
+                Request::Frame(match sub {
+                    "add" => FrameCmd::Add { x: num(1)?, y: num(2)?, w: num(3)?, h: num(4)?, label: text(5) },
+                    "label" => FrameCmd::Label(id(1)?, text(2)),
+                    "move" => FrameCmd::Move(id(1)?, num(2)?, num(3)?),
+                    "resize" => FrameCmd::Resize(id(1)?, num(2)?, num(3)?),
+                    "remove" => FrameCmd::Remove(id(1)?),
+                    "fit" => FrameCmd::Fit(id(1)?),
+                    _ => return Err("frame needs add X Y W H [LABEL], label ID TEXT, move ID X Y, resize ID W H, remove ID or fit ID".into()),
+                })
+            }
             "jump" => {
                 if args.is_empty() {
                     return Err("jump needs some text to match, e.g. jump firefox (or #12 for a window id)".into());
@@ -267,6 +303,18 @@ pub struct Monitor {
 }
 
 #[derive(Serialize)]
+pub struct Frame {
+    pub id: u32,
+    pub label: String,
+    pub tags: u32,
+    /// Canvas px.
+    #[serde(flatten)]
+    pub rect: Rect,
+    /// The windows whose centre is inside it (what moves with it).
+    pub windows: Vec<u32>,
+}
+
+#[derive(Serialize)]
 pub struct Window {
     pub id: u32,
     pub title: String,
@@ -318,6 +366,7 @@ pub enum Event {
         monitors: Vec<Monitor>,
         cursor: Cursor,
         windows: Vec<Window>,
+        frames: Vec<Frame>,
     },
     Options {
         options: Map<String, Value>,
@@ -393,6 +442,7 @@ mod tests {
             "fling",
             "jump",
             "crash",
+            "frame",
             "zoom",
             "view",
             "toggleview",

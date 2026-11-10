@@ -253,6 +253,23 @@ impl Uwc {
             monitors,
             cursor: P::Cursor { x: self.cursor.x.round() as i64, y: self.cursor.y.round() as i64, hidden: false },
             windows,
+            frames: self
+                .frames
+                .list
+                .iter()
+                .map(|f| P::Frame {
+                    id: f.id,
+                    label: f.label.clone(),
+                    tags: f.tags,
+                    rect: P::Rect {
+                        x: f.rect.loc.x.round() as i64,
+                        y: f.rect.loc.y.round() as i64,
+                        width: f.rect.size.w.round() as i64,
+                        height: f.rect.size.h.round() as i64,
+                    },
+                    windows: self.frame_members(f.id),
+                })
+                .collect(),
         }
     }
 
@@ -350,6 +367,38 @@ impl Uwc {
                 }
             }
             R::Pan(dx, dy) => self.pan_canvas(dx, dy),
+            R::Frame(cmd) => {
+                use P::FrameCmd as F;
+                let known = |s: &Self, id: u32| -> Result<(), String> {
+                    s.frames.list.iter().any(|f| f.id == id).then_some(()).ok_or_else(|| format!("no frame {id}"))
+                };
+                match cmd {
+                    F::Add { x, y, w, h, label } => {
+                        let tags = self.tagset;
+                        self.frame_add(smithay::utils::Rectangle::new((x, y).into(), (w, h).into()), &label, tags);
+                    }
+                    F::Label(id, text) => {
+                        known(self, id)?;
+                        self.frame_set_label(id, &text);
+                    }
+                    F::Move(id, x, y) => {
+                        known(self, id)?;
+                        self.frame_move(id, x, y);
+                    }
+                    F::Resize(id, w, h) => {
+                        known(self, id)?;
+                        self.frame_resize(id, w, h);
+                    }
+                    F::Remove(id) => {
+                        known(self, id)?;
+                        self.frame_remove(id);
+                    }
+                    F::Fit(id) => {
+                        known(self, id)?;
+                        self.frame_fit(id);
+                    }
+                }
+            }
             R::Crash => {
                 if std::env::var_os("UWC_DEBUG_PANIC").is_none() {
                     return Err("crash is only available with UWC_DEBUG_PANIC=1 in uwc's environment".into());

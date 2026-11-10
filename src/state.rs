@@ -300,6 +300,17 @@ pub enum Drag {
         orig: Size<i32, Logical>,
     },
     Pan,
+    /// Dragging a frame by its title strip; the windows it carries are in `frames.carrying`.
+    FrameMove {
+        id: u32,
+        start: Point<f64, Logical>,
+        orig: Point<f64, Logical>,
+    },
+    FrameResize {
+        id: u32,
+        start: Point<f64, Logical>,
+        orig: Size<f64, Logical>,
+    },
 }
 
 /// Where a window is drawn: its geometry's top-left on the screen (logical px), and screen px per
@@ -490,6 +501,8 @@ pub struct Uwc {
     /// The touchpad gesture in progress, when it is ours.
     pub gesture: Option<Gesture>,
     pub fling: Option<Fling>,
+    /// Labelled regions of the canvas (frames.rs).
+    pub frames: crate::frames::Frames,
     /// Hint mode (`jump-hints`) while it is up.
     pub hints: Option<crate::hints::Hints>,
     /// `drag_motion` is running (see `pointer_motion_to`).
@@ -643,6 +656,7 @@ impl Uwc {
             drag: None,
             gesture: None,
             fling: None,
+            frames: Default::default(),
             hints: None,
             in_drag_motion: false,
             pan_vel: (0.0, 0.0),
@@ -1832,6 +1846,23 @@ impl Uwc {
             Action::ToggleOverview => self.toggle_overview(),
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::JumpHints => self.hints_toggle(),
+            Action::FrameNew => {
+                if let Some(id) = self.focus {
+                    self.frame_around(id);
+                }
+            }
+            Action::FrameRemove => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_remove(f);
+                }
+            }
+            Action::FrameFit => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_fit(f);
+                }
+            }
+            Action::FrameNext => self.frame_cycle(true),
+            Action::FramePrevious => self.frame_cycle(false),
             Action::Hint(k) => self.hint_key(k.clone()),
             Action::ToggleFullscreen => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {

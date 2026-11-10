@@ -86,6 +86,13 @@ pub enum Action {
     ToggleShortcutsInhibit,
     /// Label every window and jump to the one you type (see hints.rs).
     JumpHints,
+    /// A frame around the focused window / remove the focused window's frame / fit the view to it
+    /// / fit the next or previous frame (frames.rs).
+    FrameNew,
+    FrameRemove,
+    FrameFit,
+    FrameNext,
+    FramePrevious,
     /// A key typed while hint mode is up; never in a config.
     Hint(crate::hints::HintKey),
     ToggleFullscreen,
@@ -220,6 +227,10 @@ pub struct Config {
     pub pan_momentum_ms: f64,
     pub edge_pan_size: f64,
     pub hint_keys: String,
+    pub frame_color: Color,
+    pub frame_opacity: f64,
+    pub frame_label_scale: f64,
+    pub frame_border_width: f64,
     pub hint_scale: f64,
     pub edge_pan_speed: f64,
     /// A new window fades in and grows from `open_scale` over this long (0 = appears at once).
@@ -345,6 +356,10 @@ impl Config {
             pan_momentum_ms: 600.0,
             edge_pan_size: 12.0,
             hint_keys: "asdfghjkl".into(),
+            frame_color: [0.478, 0.635, 0.969, 1.0],
+            frame_opacity: 0.08,
+            frame_label_scale: 2.0,
+            frame_border_width: 2.0,
             hint_scale: 3.0,
             edge_pan_speed: 900.0,
             open_ms: 160.0,
@@ -767,6 +782,11 @@ fn parse_action(n: &Node) -> Result<Action> {
         "toggle-overview" => Action::ToggleOverview,
         "toggle-shortcuts-inhibit" => Action::ToggleShortcutsInhibit,
         "jump-hints" => Action::JumpHints,
+        "frame-new" => Action::FrameNew,
+        "frame-remove" => Action::FrameRemove,
+        "frame-fit" => Action::FrameFit,
+        "frame-next" => Action::FrameNext,
+        "frame-previous" => Action::FramePrevious,
         "toggle-fullscreen" => Action::ToggleFullscreen,
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,

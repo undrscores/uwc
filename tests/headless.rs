@@ -1554,6 +1554,98 @@ fn doctor_reports_problems_and_exits_nonzero() {
 }
 
 #[test]
+fn frames_are_regions_that_carry_their_windows() {
+    let mut uwc = Uwc::start("frames", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
+    let mut c = uwc.connect();
+    let _a = c.window("Inside", 200, 150);
+    let _b = c.window("Outside", 200, 150);
+    let s = uwc.state();
+    let (a, b) = (win(&s, "Inside")["id"].as_u64().unwrap(), win(&s, "Outside")["id"].as_u64().unwrap());
+    uwc.ok(&format!("move {a} 1000 1000"));
+    uwc.ok(&format!("move {b} 3000 3000"));
+    // A frame around where A is: it holds A (its centre is inside) and not B.
+    uwc.ok("frame add 900 900 500 400 mail and notes");
+    let s = uwc.state();
+    let f = &s["frames"][0];
+    assert_eq!((f["label"].as_str().unwrap(), num(&f["x"]), num(&f["width"])), ("mail and notes", 900.0, 500.0));
+    assert_eq!(f["windows"], serde_json::json!([a]));
+    let id = f["id"].as_u64().unwrap();
+    // Moving the frame moves its windows, and only them.
+    uwc.ok(&format!("frame move {id} 1900 1500"));
+    let s = uwc.state();
+    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (1900.0, 1500.0));
+    assert_eq!((num(&win(&s, "Inside")["x"]), num(&win(&s, "Inside")["y"])), (2000.0, 1600.0));
+    assert_eq!((num(&win(&s, "Outside")["x"]), num(&win(&s, "Outside")["y"])), (3000.0, 3000.0));
+    // Relabel, resize (never below a minimum), fit the view to it.
+    uwc.ok(&format!("frame label {id} build"));
+    uwc.ok(&format!("frame resize {id} 10 10"));
+    let s = uwc.state();
+    assert_eq!(s["frames"][0]["label"], "build");
+    assert!(num(&s["frames"][0]["width"]) >= 80.0);
+    uwc.ok(&format!("frame resize {id} 600 400"));
+    uwc.ok(&format!("frame fit {id}"));
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let (vx, vy, z) = (num(&vp["x"]), num(&vp["y"]), num(&vp["zoom"]));
+    assert!(vx < 1900.0 + 300.0 && vx + 1000.0 / z > 1900.0 + 300.0, "the frame's centre is in view: {vp}");
+    assert!(vy < 1500.0 + 200.0 && vy + 600.0 / z > 1500.0 + 200.0, "{vp}");
+    // Errors name the problem; a frame is on its tags only.
+    assert!(uwc.cmd("frame move 99 0 0").get("error").is_some());
+    assert!(uwc.cmd("frame").get("error").is_some());
+    uwc.ok("view 2");
+    assert_eq!(uwc.state()["frames"].as_array().unwrap().len(), 1, "still listed, but drawn on its tag only");
+    uwc.ok(&format!("frame remove {id}"));
+    assert!(uwc.state()["frames"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_frame_is_dragged_by_its_title_strip_and_resized_by_its_corner() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("framedrag", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let _w = c.window("Held", 150, 100);
+    let id = win(&uwc.state(), "Held")["id"].as_u64().unwrap();
+    uwc.ok(&format!("move {id} 200 200"));
+    uwc.ok("frame add 150 150 400 300 zone");
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let s = uwc.state();
+    let vp = &s["monitors"][0]["viewport"];
+    let (vx, vy) = (num(&vp["x"]), num(&vp["y"]));
+    let pos = |x: f64, y: f64| ((x - vx) as u32, (y - vy) as u32);
+    // The strip is the top 22 px of the frame (label scale 2 x 11): press at (160, 160), drag by +100, +50.
+    let (sx, sy) = pos(160.0, 160.0);
+    p.motion_absolute(0, sx, sy, 1000, 600);
+    p.frame();
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.motion(2, 100.0, 50.0);
+    p.frame();
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (250.0, 200.0), "{}", s["frames"]);
+    assert_eq!((num(&win(&s, "Held")["x"]), num(&win(&s, "Held")["y"])), (300.0, 250.0), "its window went along");
+    // The bottom-right corner resizes: press 4 px inside it, drag by +60, +40.
+    let (cx, cy) = pos(250.0 + 400.0 - 4.0, 200.0 + 300.0 - 4.0);
+    p.motion_absolute(4, cx, cy, 1000, 600);
+    p.frame();
+    p.button(5, 0x110, ButtonState::Pressed);
+    p.motion(6, 60.0, 40.0);
+    p.frame();
+    p.button(7, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    let s = uwc.state();
+    assert_eq!((num(&s["frames"][0]["width"]), num(&s["frames"][0]["height"])), (460.0, 340.0), "{}", s["frames"]);
+    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (250.0, 200.0));
+}
+
+#[test]
 fn windows_animate_in_moves_and_tag_switches() {
     let mut uwc = Uwc::start("fx", Some("options { open-ms 300\nmove-ms 300\ntag-ms 300 }"));
     let mut c = uwc.connect();
@@ -2327,6 +2419,7 @@ fn the_canvas_comes_back_after_a_restart() {
         uwc.ok("bookmark save 2");
         uwc.ok("view 3");
         uwc.ok("panto 500 -200");
+        uwc.ok("frame add 100 100 600 400 notes");
         uwc.ok("session save");
         assert!(file.exists());
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -2345,6 +2438,7 @@ fn the_canvas_comes_back_after_a_restart() {
     assert_eq!(m["tags"][2]["active"], true, "the tags in view come back");
     assert_eq!((num(&m["viewport"]["x"]), num(&m["viewport"]["y"])), (500.0, -200.0), "and their views");
     assert_eq!(m["tags"][0]["bookmarks"][0]["n"], 2, "and the bookmarks");
+    assert_eq!(s["frames"][0]["label"], "notes", "and the frames");
 
     let mut c = uwc.connect();
     let _a = c.window("A", 640, 480);

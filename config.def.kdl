@@ -63,6 +63,12 @@ options {
     tag-ms 140                  // windows that come into view with a tag switch fade in over this long; 0 = at once
     close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
     pan-momentum-ms 600         // let go of a touchpad swipe or a touch drag while moving and the view glides on, losing most of its speed in about this long; 0 = stops dead. Not uwm's option
+    // Frames: labelled regions of the canvas behind the windows (frame-new draws one around the focused window).
+    // Drag a frame by its title strip and its windows go with it; drag the bottom-right corner to resize.
+    frame-color "#7aa2f7"       // border, title strip and label badge
+    frame-opacity 0.08          // how much the inside is tinted
+    frame-label-scale 2         // size of the label, in screen px per font pixel (the strip is 11 of them tall)
+    frame-border-width 2        // px; 0 = none
     hint-keys "asdfghjkl"       // jump-hints labels windows with these keys (letters and digits; pairs when there are more windows than keys). Not uwm's option
     hint-scale 3                // size of a hint label, in screen px per font pixel
     edge-pan-size 12            // dragging a window (Mod+drag) with the pointer this many px from a screen edge pans the view that way, the window with it; 0 = off. Not uwm's option
@@ -184,6 +190,13 @@ binds {
     // Zoom out, label every window, type a label to glide to that window at the zoom you came from
     // (Escape cancels). From a script: `uwc msg jump QUERY` fuzzy-finds a window by app-id and title.
     Mod+Slash { jump-hints; }
+    // Frames: label a region of the canvas and move it, or jump the view to it, as a unit. Name one from a
+    // script: `uwc msg frame label ID mail`. Windows belong to a frame while their centre is inside it.
+    Mod+B { frame-new; }                // a frame around the focused window
+    Mod+Shift+B { frame-remove; }       // remove the focused window's frame
+    Mod+Ctrl+B { frame-fit; }           // fit the view to the focused window's frame
+    Mod+bracketright { frame-next; }    // fit the next frame, in reading order
+    Mod+bracketleft { frame-previous; }
     // A VM or remote desktop can ask for every key (keyboard-shortcuts-inhibit); this takes them back, and
     // is the one bind that still works while they are held.
     Mod+Shift+Escape { toggle-shortcuts-inhibit; }

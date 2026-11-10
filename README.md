@@ -18,6 +18,8 @@ IPC, improved where uwm was awkward.
   re-render at the zoomed size instead of being stretched. Panning never resizes or refocuses a window.
 - **Tags, not just workspaces.** Nine tags, each with its own canvas, viewport and zoom; view, toggle and send windows
   to any combination.
+- **Frames.** Label a region of the canvas (`Mod+B`), drag it by its title strip and its windows go with it, and
+  jump the view from frame to frame with `Mod+]` and `Mod+[`: lay a canvas out into places.
 - **Find any window.** `Mod+/` labels every window and jumps to the one you type; `uwc msg jump firefox` fuzzy-finds by
   app-id and title on any tag, and `examples/uwc-jump` does it from a launcher.
 - **Everything floats.** Windows can also have their own scale on the canvas, be pinned to the screen, minimized to a
@@ -63,6 +65,7 @@ session: uwc opens as a window.
 | `Mod+Alt+H/J/K/L` | pan the view |
 | `Mod+O` | overview: fit every window on the screen |
 | `Mod+/` | jump: label every window, type a label to go there |
+| `Mod+B`, `Mod+Shift+B` | frame around the focused window, remove it; `Mod+]` / `Mod+[` fit the next / previous frame |
 | `Mod+minus`, `Mod+equal`, `Mod+Shift+0` | zoom out, zoom in, reset zoom |
 | `Mod+1..9` | view tag; `Mod+Shift+1..9` send the window to a tag; `Mod+Ctrl+1..9` toggle a tag |
 | `Mod+E`, `Mod+Shift+Space` | fullscreen, pin to the screen |
