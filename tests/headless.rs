@@ -26,6 +26,7 @@ use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
     pointer_constraints::zv1::client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
+    text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::{
@@ -231,6 +232,9 @@ struct App {
     /// zwp-pointer-constraints: the events so far ("confined", "locked", "unconfined",
     /// "unlocked").
     constraint_events: Vec<String>,
+    /// zwp-text-input-v3: enter / leave.
+    ti_enter: bool,
+    ti_leave: bool,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -305,6 +309,8 @@ impl Client {
             lock_events: vec![],
             lock_serial: None,
             constraint_events: vec![],
+            ti_enter: false,
+            ti_leave: false,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -478,6 +484,16 @@ impl Client {
         surface.commit();
         self.sync();
         lock
+    }
+
+    /// Roundtrips until the text input got a leave event.
+    fn wait_ti_leave(&mut self) {
+        let start = Instant::now();
+        while !self.app.ti_leave {
+            self.sync();
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for text input leave");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Roundtrips until a pointer-constraint event named `what` arrives.
@@ -729,6 +745,22 @@ impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for App {
         }
     }
 }
+impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &zwp_text_input_v3::ZwpTextInputV3,
+        e: zwp_text_input_v3::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            zwp_text_input_v3::Event::Enter { .. } => app.ti_enter = true,
+            zwp_text_input_v3::Event::Leave { .. } => app.ti_leave = true,
+            _ => {}
+        }
+    }
+}
 impl Dispatch<xdg_popup::XdgPopup, ()> for App {
     fn event(
         app: &mut Self,
@@ -757,6 +789,7 @@ noop!(
     wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
 );
 noop!(zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1);
+noop!(zwp_text_input_manager_v3::ZwpTextInputManagerV3);
 noop!(zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
 noop!(xdg_positioner::XdgPositioner);
 
@@ -2102,4 +2135,29 @@ fn pointer_constraints_activate_over_the_window() {
     // A lock takes over: the cursor is held still and the client reads the deltas.
     let _locked = manager.lock_pointer(&w.surface, &pointer, None, Lifetime::Oneshot, &qh, ());
     c.wait_constraint("locked");
+}
+
+#[test]
+fn text_input_follows_the_keyboard_focus() {
+    let mut uwc = Uwc::start("textinput", None);
+    let mut c = uwc.connect();
+    let seat = c.bind_seat();
+    let qh = c.queue.handle();
+    let manager = c
+        .globals
+        .bind::<zwp_text_input_manager_v3::ZwpTextInputManagerV3, _, _>(&qh, 1..=1, ())
+        .expect("zwp_text_input_manager_v3");
+
+    // Like a toolkit: the text input exists before the window takes the keyboard, and the
+    // compositor enters it when the focus arrives.
+    let _ti = manager.get_text_input(&seat, &qh, ());
+    let _w = c.window("A", 300, 200);
+    uwc.wait("ti enter", |s| !s["windows"].as_array().unwrap().is_empty());
+    c.sync();
+    assert!(c.app.ti_enter, "text input entered the focused window");
+
+    // Closing the window takes the keyboard, and the text input leaves with it.
+    uwc.ok("close 1");
+    c.wait_ti_leave();
+    assert!(c.app.ti_leave, "text input left with the focus");
 }

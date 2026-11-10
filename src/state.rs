@@ -384,6 +384,14 @@ pub struct Uwc {
     pub xwayland: Option<smithay::reexports::calloop::RegistrationToken>,
     /// Override-redirect X11 windows (menus, tooltips): drawn on top, not managed.
     pub or_windows: Vec<smithay::xwayland::X11Surface>,
+    /// zwp-text-input-v3 (clients that accept IME input); held so the global stays alive.
+    #[allow(dead_code)]
+    pub text_input: smithay::wayland::text_input::TextInputManagerState,
+    /// zwp-input-method-v2 (the IME itself); held so the global stays alive.
+    #[allow(dead_code)]
+    pub input_method: smithay::wayland::input_method::InputMethodManagerState,
+    /// The IME's popups (candidate lists), drawn on top.
+    pub ime_popups: Vec<smithay::wayland::input_method::PopupSurface>,
     #[allow(dead_code)] // held so the global stays alive
     pub idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
     /// Live zwp-idle-inhibitor-v1 objects; any one pauses the idle notifications.
@@ -519,6 +527,9 @@ impl Uwc {
             xwm: None,
             xwayland: None,
             or_windows: Vec::new(),
+            text_input: smithay::wayland::text_input::TextInputManagerState::new::<Uwc>(&dh),
+            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |_| true),
+            ime_popups: Vec::new(),
             idle_inhibit: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Uwc>(&dh),
             idle_inhibitors: 0,
             frames_drawn: 0,

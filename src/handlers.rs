@@ -4,8 +4,9 @@ use smithay::{
     backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
-    delegate_output, delegate_pointer_constraints, delegate_relative_pointer, delegate_seat, delegate_session_lock,
-    delegate_shm, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell, delegate_xwayland_shell,
+    delegate_input_method_manager, delegate_output, delegate_pointer_constraints, delegate_relative_pointer,
+    delegate_seat, delegate_session_lock, delegate_shm, delegate_text_input_manager, delegate_xdg_activation,
+    delegate_xdg_decoration, delegate_xdg_shell, delegate_xwayland_shell,
     desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
     input::{
         pointer::{CursorImageStatus, Focus},
@@ -39,6 +40,7 @@ use smithay::{
             XdgShellState, XdgToplevelSurfaceData,
         },
         shm::{ShmHandler, ShmState},
+        text_input::TextInputSeat,
     },
 };
 
@@ -380,6 +382,13 @@ impl SeatHandler for Uwc {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client);
+        // Text input follows the keyboard focus, so the IME knows where its text goes.
+        let ti = seat.text_input();
+        ti.leave();
+        ti.set_focus(focused.cloned());
+        if focused.is_some() {
+            ti.enter();
+        }
         self.ipc.dirty = true;
     }
 
@@ -431,5 +440,7 @@ delegate_session_lock!(Uwc);
 delegate_pointer_constraints!(Uwc);
 delegate_relative_pointer!(Uwc);
 delegate_xwayland_shell!(Uwc);
+delegate_text_input_manager!(Uwc);
+delegate_input_method_manager!(Uwc);
 delegate_idle_notify!(Uwc);
 delegate_idle_inhibit!(Uwc);

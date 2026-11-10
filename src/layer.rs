@@ -129,6 +129,9 @@ impl Uwc {
                 }
             }
         }
+        if let Some(u) = self.ime_popup_under(p_global) {
+            return Some(u);
+        }
         if let Some(u) = o.as_ref().and_then(|o| self.layer_under(o, WlrLayer::Overlay, p)) {
             return Some(u);
         }

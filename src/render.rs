@@ -201,6 +201,7 @@ impl Uwc {
                 .map(UwcElement::Layer),
             );
         }
+        out.extend(self.ime_popup_elements(renderer, m, scale));
         out
     }
 

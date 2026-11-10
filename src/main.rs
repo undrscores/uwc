@@ -12,6 +12,7 @@ mod deco;
 mod export;
 mod handlers;
 mod idle;
+mod ime;
 mod input;
 mod ipc;
 mod kdl;
