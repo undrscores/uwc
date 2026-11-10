@@ -1,0 +1,14 @@
+// Catppuccin Mocha. Use it with:   include "THEMES_DIR/catppuccin-mocha.kdl"
+// (THEMES_DIR is share/uwc/themes where uwc is installed; or copy this file next to your config).
+// Put the include before your own options so they win, and tweak from there: everything here is an
+// ordinary option, documented in config.def.kdl.
+options {
+    root-color "#1e1e2e"
+    border-color "#45475a"
+    focus-gradient "#89b4fa" "#cba6f7"
+    urgent-color "#f38ba8"
+    shadow-color "#00000088"
+    frame-color "#89b4fa"
+    snap-color "#cba6f7"
+    fullscreen-bg "#000000"
+}

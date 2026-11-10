@@ -1,0 +1,14 @@
+// Nord. Use it with:   include "THEMES_DIR/nord.kdl"
+// (THEMES_DIR is share/uwc/themes where uwc is installed; or copy this file next to your config).
+// Put the include before your own options so they win, and tweak from there: everything here is an
+// ordinary option, documented in config.def.kdl.
+options {
+    root-color "#2e3440"
+    border-color "#4c566a"
+    focus-gradient "#88c0d0" "#81a1c1"
+    urgent-color "#bf616a"
+    shadow-color "#00000088"
+    frame-color "#88c0d0"
+    snap-color "#81a1c1"
+    fullscreen-bg "#000000"
+}

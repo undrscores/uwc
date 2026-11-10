@@ -1,0 +1,14 @@
+// Gruvbox dark. Use it with:   include "THEMES_DIR/gruvbox-dark.kdl"
+// (THEMES_DIR is share/uwc/themes where uwc is installed; or copy this file next to your config).
+// Put the include before your own options so they win, and tweak from there: everything here is an
+// ordinary option, documented in config.def.kdl.
+options {
+    root-color "#282828"
+    border-color "#504945"
+    focus-gradient "#d79921" "#fe8019"
+    urgent-color "#fb4934"
+    shadow-color "#00000088"
+    frame-color "#d79921"
+    snap-color "#fe8019"
+    fullscreen-bg "#000000"
+}

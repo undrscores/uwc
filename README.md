@@ -95,7 +95,7 @@ rule {
 }
 ```
 
-Start your bar, notification daemon and wallpaper from an executable `~/.config/uwc/startup`. Check a config with
+Themes ship in [`themes/`](themes) (`include "/usr/share/uwc/themes/nord.kdl"` before your own options). Start your bar, notification daemon and wallpaper from an executable `~/.config/uwc/startup`. Check a config with
 `uwc -t`. Use `uwc msg --help` for the control socket, for example `uwc msg state`, `uwc msg set focus-color "#ff8800"`
 or `uwc msg subscribe`. Your own shaders are documented in `config.def.kdl`, with examples in [`shaders/`](shaders).
 

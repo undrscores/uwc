@@ -21,7 +21,7 @@ install:
 	chmod 644 $(DESTDIR)$(DATADIR)/wayland-sessions/uwc.desktop
 	install -m 644 uwc-portals.conf $(DESTDIR)$(DATADIR)/xdg-desktop-portal/uwc-portals.conf
 	install -m 644 config.def.kdl $(DESTDIR)$(DATADIR)/uwc/config.def.kdl
-	cp -r shaders $(DESTDIR)$(DATADIR)/uwc/
+	cp -r shaders themes $(DESTDIR)$(DATADIR)/uwc/
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/uwc $(DESTDIR)$(PREFIX)/bin/uwc-session \

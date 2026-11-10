@@ -907,6 +907,28 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_themes_are_valid_configs() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let mut n = 0;
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            let text = std::fs::read_to_string(&p).unwrap();
+            let c = Config::parse(&text, Some(&p)).unwrap_or_else(|e| panic!("{}: {e:#}", p.display()));
+            assert!(c.deco.focus_gradient.is_some(), "{} sets a focus gradient", p.display());
+            n += 1;
+        }
+        assert!(n >= 4, "themes are shipped");
+        // And they work through `include`, under the user's own options.
+        let tmp = std::env::temp_dir().join(format!("uwc-theme-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let inc = format!("include \"{}/nord.kdl\"\noptions {{ corner-radius 3 }}", dir.display());
+        let c = Config::parse(&inc, Some(&tmp.join("c.kdl"))).unwrap();
+        assert_eq!(c.deco.corner_radius, 3.0);
+        assert!(c.deco.focus_gradient.is_some());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn tags_can_have_their_own_look() {
         let p = Some(Path::new("/x/c.kdl"));
         let c = Config::parse(
