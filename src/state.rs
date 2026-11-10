@@ -77,6 +77,53 @@ impl Fx {
     }
 }
 
+/// A window that closed, kept while it fades out (`close-ms`): its content captured at close (a
+/// memory buffer, `k` px per window px), drawn where the window would be now with the decoration it
+/// closed with. Visual only: never hit-tested, focused, saved or reported over IPC.
+pub struct Ghost {
+    pub buffer: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    /// The buffer's pixel density: buffer px per window px.
+    pub k: f64,
+    /// The window's geometry size (window px) and place on the canvas (or its pinned screen spot).
+    pub size: Size<i32, Logical>,
+    pub canvas: Point<f64, Logical>,
+    pub pin: Option<Point<f64, Logical>>,
+    /// The window's own scale on the canvas.
+    pub scale: f64,
+    pub fullscreen: bool,
+    /// The options with its rules applied, and whether it had focus, when it closed.
+    pub deco: crate::rules::Deco,
+    pub focused: bool,
+    /// Fade-out state: opacity heads to 0, size to `open_scale` (the open animation reversed).
+    pub alpha: f64,
+    pub scale_fx: f64,
+    pub fade_ms: f64,
+    /// Ids for the dim, backdrop, border and shadow shader elements.
+    pub deco_ids: [Id; 4],
+}
+
+impl Ghost {
+    /// Where it is drawn now, like `Uwc::place` for a window: canvas windows follow the viewport
+    /// and the view's zoom; pinned and fullscreen ones are fixed to the screen. The fade shrinks
+    /// it about the centre, as the open animation's grow does.
+    pub fn place(&self, vp: Viewport) -> Place {
+        if self.fullscreen {
+            return Place { origin: (0.0, 0.0).into(), zoom: 1.0, on_canvas: false };
+        }
+        let (mut origin, mut zoom) = match self.pin {
+            Some(p) => (p, self.scale),
+            None => (vp.canvas_to_screen((self.canvas.x, self.canvas.y)).into(), vp.zoom * self.scale),
+        };
+        origin = (
+            origin.x + self.size.w as f64 * zoom * (1.0 - self.scale_fx) / 2.0,
+            origin.y + self.size.h as f64 * zoom * (1.0 - self.scale_fx) / 2.0,
+        )
+            .into();
+        zoom *= self.scale_fx;
+        Place { origin, zoom, on_canvas: self.pin.is_none() }
+    }
+}
+
 /// A toplevel window and where it sits on the canvas.
 pub struct Client {
     pub id: u32,
@@ -275,6 +322,11 @@ pub struct Uwc {
 
     /// Bottom to top.
     pub clients: Vec<Client>,
+    /// Windows that closed, fading out (`close-ms`).
+    pub ghosts: Vec<Ghost>,
+    /// Last frames captured when a close was asked for (the client may destroy its surface before
+    /// its toplevel, leaving nothing to capture then), used when the window goes.
+    pub pending_ghosts: std::collections::HashMap<u32, Ghost>,
     pub focus: Option<u32>,
     pub next_id: u32,
     pub mon: Option<Monitor>,
@@ -392,6 +444,8 @@ impl Uwc {
             config_error: None,
             config_rev: 1,
             clients: Vec::new(),
+            ghosts: Vec::new(),
+            pending_ghosts: Default::default(),
             focus: None,
             next_id: 1,
             mon: None,
@@ -637,9 +691,11 @@ impl Uwc {
         moving
     }
 
-    /// Something is easing (the view or a window).
+    /// Something is easing (the view, a window, or a closing window fading out).
     pub fn anim_running(&self) -> bool {
-        self.mon.as_ref().is_some_and(|m| m.target.is_some()) || self.clients.iter().any(|c| !c.fx.at_rest())
+        self.mon.as_ref().is_some_and(|m| m.target.is_some())
+            || self.clients.iter().any(|c| !c.fx.at_rest())
+            || !self.ghosts.is_empty()
     }
 
     /// Call before starting an animation when none was running: time counts from now, not from the
@@ -655,7 +711,8 @@ impl Uwc {
         self.anim_stepped = now;
         let view = self.step_view(dt);
         let fx = self.step_fx(dt);
-        view || fx
+        let ghosts = self.step_ghosts(dt);
+        view || fx || ghosts
     }
 
     /// Windows' open, move and tag fades close in on rest, each by the same fraction per time.
@@ -692,6 +749,34 @@ impl Uwc {
             self.redraw = true;
         }
         if finished && !moving {
+            self.ipc.dirty = true;
+        }
+        moving
+    }
+
+    /// Closing windows fade out, each by the same fraction per time as the other eases, towards
+    /// `open_scale` (the open animation reversed). Gone once fully transparent.
+    fn step_ghosts(&mut self, dt: f64) -> bool {
+        if self.ghosts.is_empty() {
+            return false;
+        }
+        let target = self.config.open_scale;
+        let mut moving = false;
+        for g in &mut self.ghosts {
+            let k = 1.0 - (-dt / (g.fade_ms / 1000.0 / 4.0).max(1e-4)).exp();
+            g.alpha -= g.alpha * k;
+            g.scale_fx += (target - g.scale_fx) * k;
+            if g.alpha < 0.01 {
+                g.alpha = 0.0;
+            } else {
+                moving = true;
+            }
+        }
+        self.ghosts.retain(|g| g.alpha > 0.0);
+        // The fade changes how the shader elements look without changing their geometry.
+        self.deco_commit.increment();
+        self.redraw = true;
+        if !moving {
             self.ipc.dirty = true;
         }
         moving
@@ -851,6 +936,11 @@ impl Uwc {
 
     pub fn close_client(&mut self, id: u32) {
         if let Some(i) = self.client_index(id) {
+            // The last frame for the fade-out: the client may destroy its surface before its
+            // toplevel, leaving nothing to capture when the destroy arrives.
+            if let Some(g) = self.closing_ghost(i) {
+                self.pending_ghosts.insert(id, g);
+            }
             if let Some(t) = self.clients[i].window.toplevel() {
                 t.send_close();
             }
@@ -1292,5 +1382,68 @@ impl Uwc {
                 Err(msg)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ghost with a 1x1 frame at canvas position (0, 0), its own scale 1.
+    fn ghost(scale_fx: f64) -> Ghost {
+        Ghost {
+            buffer: smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+                &[0u8; 4],
+                smithay::backend::allocator::Fourcc::Abgr8888,
+                (1, 1),
+                1,
+                smithay::utils::Transform::Normal,
+                None,
+            ),
+            k: 1.0,
+            size: (100, 50).into(),
+            canvas: (0.0, 0.0).into(),
+            pin: None,
+            scale: 1.0,
+            fullscreen: false,
+            deco: Default::default(),
+            focused: false,
+            alpha: 1.0,
+            scale_fx,
+            fade_ms: 160.0,
+            deco_ids: std::array::from_fn(|_| Id::new()),
+        }
+    }
+
+    #[test]
+    fn a_ghost_follows_the_view_and_shrinks_about_its_centre() {
+        // The view looks at canvas (5, 10) zoomed 2x, so canvas (0, 0) is at screen (-10, -20).
+        let vp = Viewport { x: 5.0, y: 10.0, zoom: 2.0 };
+        let pl = ghost(1.0).place(vp);
+        assert_eq!((pl.origin.x, pl.origin.y), (-10.0, -20.0));
+        assert_eq!(pl.zoom, 2.0);
+        assert!(pl.on_canvas);
+
+        // Shrunk to half: half the size, about the centre, so the centre stays put.
+        let pl = ghost(0.5).place(vp);
+        assert_eq!((pl.origin.x, pl.origin.y), (40.0, 5.0));
+        assert_eq!(pl.zoom, 1.0);
+
+        // Pinned: a screen position, unzoomed but for its own scale, like a pinned window.
+        let mut g = ghost(1.0);
+        g.pin = Some((30.0, 40.0).into());
+        g.scale = 2.0;
+        let pl = g.place(vp);
+        assert_eq!((pl.origin.x, pl.origin.y), (30.0, 40.0));
+        assert_eq!(pl.zoom, 2.0);
+        assert!(!pl.on_canvas);
+
+        // Fullscreen: the screen, whatever the view.
+        let mut g = ghost(1.0);
+        g.fullscreen = true;
+        let pl = g.place(vp);
+        assert_eq!((pl.origin.x, pl.origin.y), (0.0, 0.0));
+        assert_eq!(pl.zoom, 1.0);
+        assert!(!pl.on_canvas);
     }
 }

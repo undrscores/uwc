@@ -8,17 +8,24 @@ use smithay::{
         allocator::Fourcc,
         renderer::{
             damage::OutputDamageTracker,
+            element::memory::MemoryRenderBuffer,
             element::{surface::WaylandSurfaceRenderElement, AsRenderElements, RenderElement},
             gles::{GlesRenderer, GlesTexture},
             Bind, ExportMem, Offscreen,
         },
     },
-    reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_shm},
+    reexports::wayland_server::{
+        protocol::{wl_buffer::WlBuffer, wl_shm},
+        Resource,
+    },
     utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform},
     wayland::shm::with_buffer_contents_mut,
 };
 
-use crate::{backend::Backend, state::Uwc};
+use crate::{
+    backend::Backend,
+    state::{Ghost, Uwc},
+};
 
 /// The shm format captures are offered in (ARGB8888, which every client supports).
 pub const FORMAT: wl_shm::Format = wl_shm::Format::Argb8888;
@@ -71,6 +78,53 @@ impl Uwc {
         (c.mapped && s.w > 0 && s.h > 0).then_some(s)
     }
 
+    /// A closing window's last frame, to fade out over `close-ms` (`crate::state::Ghost`). None
+    /// when the option is off, the window was not visible or had nothing to show, or this backend
+    /// cannot render (headless), so closing there stays instant.
+    pub fn closing_ghost(&mut self, i: usize) -> Option<Ghost> {
+        let c = &self.clients[i];
+        if self.config.close_ms <= 0.0 || !self.visible(c) || !c.surface().is_alive() {
+            return None;
+        }
+        let pl = self.place(c);
+        // What the window is drawn at now: its own scale on the view's zoom, at the output scale.
+        let k = (pl.zoom * self.output_scale()).clamp(1.0, 8.0);
+        let size = c.size();
+        if size.w <= 0 || size.h <= 0 {
+            return None;
+        }
+        let deco = self.deco_for(c);
+        let focused = self.focus == Some(c.id);
+        let (canvas, pin, scale, fullscreen) = (c.canvas, c.pin, c.scale, c.fullscreen);
+        let px = Size::from(((size.w as f64 * k).round() as i32, (size.h as f64 * k).round() as i32));
+        let buffer = self
+            .with_renderer(|state, r| {
+                let c = &state.clients[i];
+                let g = c.window.geometry().loc.to_f64();
+                let at: Point<i32, Physical> = Point::<f64, Physical>::from((-g.x * k, -g.y * k)).to_i32_round();
+                let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    AsRenderElements::<GlesRenderer>::render_elements(&c.window, r, at, Scale::from(k), 1.0);
+                render_to_memory(r, &elements, px, k)
+            })
+            .unwrap_or_else(|| Err("this backend cannot render (headless)".into()))
+            .ok()?;
+        Some(Ghost {
+            buffer,
+            k,
+            size,
+            canvas,
+            pin,
+            scale,
+            fullscreen,
+            deco,
+            focused,
+            alpha: 1.0,
+            scale_fx: 1.0,
+            fade_ms: self.config.close_ms,
+            deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+        })
+    }
+
     /// Draw window `id` alone (its surfaces, no decoration, unzoomed, at the output scale) into `buffer`.
     pub fn capture_window(&mut self, id: u32, buffer: &WlBuffer) -> Result<(), String> {
         let size = self.window_capture_size(id).ok_or("the window is gone or has no size")?;
@@ -88,6 +142,29 @@ impl Uwc {
         });
         res.unwrap_or_else(|| Err("this backend cannot render (headless)".into()))
     }
+}
+
+/// Render `elements` (front to back) at `size` into a memory buffer (a closing window's last
+/// frame): transparent around them, like `render_to_shm` without the shm copy.
+pub fn render_to_memory<E: RenderElement<GlesRenderer>>(
+    r: &mut GlesRenderer,
+    elements: &[E],
+    size: Size<i32, Physical>,
+    scale: f64,
+) -> Result<MemoryRenderBuffer, String> {
+    let bsize: Size<i32, Buffer> = (size.w, size.h).into();
+    let mut tex: GlesTexture =
+        r.create_buffer(Fourcc::Abgr8888, bsize).map_err(|e| format!("offscreen buffer: {e}"))?;
+    let pixels = {
+        let mut fb = r.bind(&mut tex).map_err(|e| format!("bind: {e}"))?;
+        let mut tracker = OutputDamageTracker::new(size, scale, Transform::Normal);
+        tracker.render_output(r, &mut fb, 0, elements, [0.0; 4]).map_err(|e| format!("render: {e:?}"))?;
+        let area = Rectangle::<i32, Buffer>::from_size(bsize);
+        let mapping = r.copy_framebuffer(&fb, area, Fourcc::Argb8888).map_err(|e| format!("read back: {e}"))?;
+        r.map_texture(&mapping).map_err(|e| format!("map: {e}"))?.to_vec()
+    };
+    // The read-back is in Argb8888 (GL_BGRA) byte order, like the shm captures, not Abgr8888.
+    Ok(MemoryRenderBuffer::from_slice(&pixels, Fourcc::Argb8888, (size.w, size.h), 1, Transform::Normal, None))
 }
 
 /// Render `elements` (front to back) at `size` into the shm `buffer` (already checked).

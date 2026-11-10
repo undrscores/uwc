@@ -198,6 +198,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "open-scale" => open_scale (0.1, 1),
     "move-ms" => move_ms (0, 5000),
     "tag-ms" => tag_ms (0, 5000),
+    "close-ms" => close_ms (0, 5000),
     "move-step" => move_step (1, 10000),
     "zoom-scroll" => zoom_scroll (1.01, 3),
     "zoom-settle-ms" => zoom_settle_ms (0, 10000),

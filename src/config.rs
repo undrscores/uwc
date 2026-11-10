@@ -218,6 +218,8 @@ pub struct Config {
     pub move_ms: f64,
     /// Windows that come into view with a tag switch fade in over this long; 0 = appear at once.
     pub tag_ms: f64,
+    /// A closing window fades out (towards `open_scale`) over this long; 0 = vanishes at once.
+    pub close_ms: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
     /// Zoom is told to clients only after it stayed put this long.
@@ -331,6 +333,7 @@ impl Config {
             open_scale: 0.92,
             move_ms: 140.0,
             tag_ms: 140.0,
+            close_ms: 160.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
             zoom_settle_ms: 200.0,

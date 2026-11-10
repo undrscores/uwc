@@ -171,6 +171,17 @@ check("a new window is still fading in", (st["monitors"][0]["animating"], mid !=
 time.sleep(6)
 check("fade finished: animating off", cmd("state")["monitors"][0]["animating"], False)
 check("and the window is fully its colour", px(fx_, fy_), (0xd0,0xd0,0x30))
+# The close animation: the window goes at once but its last frame stays, fading out over close-ms
+# (slow here so a screenshot can catch it), shrunk about its centre, until the canvas is empty.
+cmd("set close-ms 3000")
+cmd(f"close {F}")
+time.sleep(0.7)
+st=cmd("state")
+check("a closing window is gone from the state at once", any(w["id"]==F for w in st["windows"]), False)
+check("but its last frame is still fading", (st["monitors"][0]["animating"], px(fx_, fy_) != (32,32,32)), (True, True))
+time.sleep(6)
+check("close fade finished: animating off", cmd("state")["monitors"][0]["animating"], False)
+check("and the canvas is empty where it was", px(fx_, fy_), (32,32,32))
 for p in reversed(pids): p.kill()
 print("ALL OK" if ok else "SOME FAILED")
 sys.exit(0 if ok else 1)

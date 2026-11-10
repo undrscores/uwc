@@ -587,20 +587,26 @@ impl RenderElement<GlesRenderer> for ShaderElement {
 
 type Surface = RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>;
 
-/// A window surface clipped to the rounded content box.
-pub struct RoundedElement {
-    inner: Surface,
+/// A window surface clipped to the rounded content box. Generic over the content element: a
+/// window's surface tree, or a closing window's captured last frame.
+pub struct RoundedElement<E: Element = Surface> {
+    inner: E,
     program: GlesTexProgram,
     /// The content box on the output, physical px.
     rect: Rectangle<f64, Physical>,
     radius: f64,
 }
 
-impl RoundedElement {
+impl<E> RoundedElement<E>
+where
+    E: Element,
+    UwcElement: From<E>,
+    UwcElement: From<RoundedElement<E>>,
+{
     /// `inner` as an element, clipped by the shader if it reaches into a rounded corner of `rect` (or
     /// past its edges); a surface well inside the content box is drawn as it is.
     pub fn wrap(
-        inner: Surface,
+        inner: E,
         shaders: Option<&Shaders>,
         rect: Rectangle<f64, Physical>,
         radius: f64,
@@ -623,7 +629,7 @@ impl RoundedElement {
     }
 }
 
-impl Element for RoundedElement {
+impl<E: Element> Element for RoundedElement<E> {
     fn id(&self) -> &Id {
         self.inner.id()
     }
@@ -662,7 +668,7 @@ impl Element for RoundedElement {
     }
 }
 
-impl RenderElement<GlesRenderer> for RoundedElement {
+impl<E: RenderElement<GlesRenderer>> RenderElement<GlesRenderer> for RoundedElement<E> {
     fn draw(
         &self,
         frame: &mut GlesFrame<'_, '_>,
