@@ -280,6 +280,33 @@ cmd('rule { match title="K"; blur-radius 0 }'); time.sleep(0.6)
 check("blur-radius 0 turns it off again", around(), (l0, r0, t0, b0))
 for t_ in ("W","K"): cmd(f"close {win(t_)['id']}")
 cmd("view 1"); time.sleep(0.4)
+# Dragging with real pointer input. A client that asks to be moved (what a CSD title bar does) is moved
+# while the button is held and let go on release; dragging bare canvas, with a wallpaper layer covering
+# it, pans the view. Both on tag 5, which is empty.
+cmd("view 5"); time.sleep(0.4)
+spawn(["./target/debug/examples/paint","--wallpaper","202040"], env=wenv); time.sleep(0.8)
+spawn(["./target/debug/examples/paint","--mover","M","300","200","50d050"], env=wenv); time.sleep(0.8)
+vp = cmd("state")["monitors"][0]["viewport"]
+cmd(f"move {win('M')['id']} {vp['x']+400} {vp['y']+200}"); time.sleep(0.4)
+m0 = win("M")
+def drag(x0, y0, x1, y1):
+    subprocess.run(["xdotool","mousemove",str(x0),str(y0),"mousedown","1"], env=env); time.sleep(0.3)
+    for k in range(1, 5):
+        subprocess.run(["xdotool","mousemove",str(x0+(x1-x0)*k//4),str(y0+(y1-y0)*k//4)], env=env); time.sleep(0.15)
+    subprocess.run(["xdotool","mouseup","1"], env=env); time.sleep(0.4)
+drag(550, 300, 630, 340)
+m1 = win("M")
+check("a client-requested move follows the pointer", (m1["x"]-m0["x"], m1["y"]-m0["y"]), (80, 40))
+subprocess.run(["xdotool","mousemove","800","500"], env=env); time.sleep(0.4)
+m2 = win("M")
+check("and ends on release: the window stays put", (m2["x"], m2["y"]), (m1["x"], m1["y"]))
+st = cmd("state"); vp0 = st["monitors"][0]["viewport"]
+subprocess.run(["xdotool","mousemove","200","600"], env=env); time.sleep(0.3)
+check("the wallpaper is under the pointer on empty canvas", cmd("state")["cursor"].get("under"), "layer:wallpaper")
+drag(200, 600, 300, 600)
+vp1 = cmd("state")["monitors"][0]["viewport"]
+check("dragging empty canvas over a wallpaper pans the view", round(vp0["x"] - vp1["x"]), 100)
+cmd("view 1"); time.sleep(0.4)
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,
