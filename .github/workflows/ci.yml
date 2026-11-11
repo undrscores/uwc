@@ -34,11 +34,3 @@ jobs:
         run: cargo test
       - name: Nested rendering and input tests (Xvfb, software GL)
         run: python3 tests/nested.py
-
-  nix:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v27
-      - name: Build the package
-        run: nix build .#uwc -L

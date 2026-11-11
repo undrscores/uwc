@@ -46,8 +46,8 @@ IPC, improved where uwm was awkward.
 
 ## Installation
 
-**[INSTALL.md](INSTALL.md)** has instructions for NixOS (flake and module), Gentoo (ebuild), and building from source on
-any other distro. In short, from a checkout:
+uwc is only available by building from source; there are no distro packages yet. **[INSTALL.md](INSTALL.md)** has the
+dependencies for each distro, first-start steps and troubleshooting. In short, from a checkout:
 
 ```sh
 make && sudo make install PREFIX=/usr

@@ -54,7 +54,6 @@ src/sync.rs        explicit sync and dmabuf readiness (commits wait for the GPU)
 src/cursor.rs      the pointer image (xcursor theme, animated cursors, client surfaces, fallback arrow)
 src/output_management.rs  zwlr-output-management-v1: heads and apply
 src/output_power.rs       zwlr-output-power-management-v1: DPMS blanking
-packaging/        nix (package, NixOS module) and gentoo (live ebuild); flake.nix at the root
 src/extras.rs      small protocols: cursor-shape, data-control, virtual keyboard, shortcuts inhibit, xdg-foreign, ...
 src/touch.rs       touchscreen input and its pan/pinch gesture maths
 src/virtual_pointer.rs  wlr-virtual-pointer

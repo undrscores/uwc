@@ -1,11 +1,8 @@
 # Installing uwc
 
 uwc is a Wayland compositor: you start it from a display manager or a TTY. Run inside another Wayland or X11
-session it opens as a window, which is for trying it out. Pick your distro:
-
-- [NixOS](#nixos) (flake and module)
-- [Gentoo](#gentoo) (live ebuild in a local overlay)
-- [Any other distro: build from source](#any-other-distro-build-from-source)
+session it opens as a window, which is for trying it out. For now uwc is only available by
+[building from source](#build-from-source); there are no distro packages yet.
 
 Afterwards: [first start](#first-start), [config and startup](#config-and-startup),
 [screen sharing](#screen-sharing), [troubleshooting](#troubleshooting).
@@ -14,92 +11,7 @@ Afterwards: [first start](#first-start), [config and startup](#config-and-startu
 > author, but on little else. Expect rough edges on other setups, and keep another way to log in (a second TTY, or your
 > current session) until you have seen it work. "Troubleshooting" says what to send when it fails.
 
-## NixOS
-
-The repository is a flake. Add it as an input and enable the module:
-
-```nix
-# flake.nix
-{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.uwc.url = "github:undrscores/uwc";
-  inputs.uwc.inputs.nixpkgs.follows = "nixpkgs";
-
-  outputs = { nixpkgs, uwc, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        uwc.nixosModules.default
-        { programs.uwc.enable = true; }
-        ./configuration.nix
-      ];
-    };
-  };
-}
-```
-
-`programs.uwc.enable` installs the package, adds the "uwc" session to your display manager (it also runs as
-`uwc-session` from a TTY), turns on `hardware.graphics`, and sets up xdg-desktop-portal so screen sharing works
-(`programs.uwc.portals = false` leaves portals alone). Seat access comes from logind, which NixOS enables by default.
-
-Without the module, or just to try it:
-
-```sh
-nix run github:undrscores/uwc        # nested in your current Wayland/X11 session
-nix build github:undrscores/uwc      # ./result/bin/uwc, ./result/share/wayland-sessions/uwc.desktop
-nix develop github:undrscores/uwc    # a shell with the Rust toolchain, the libraries and the test tools
-```
-
-An overlay is available too: `nixpkgs.overlays = [ uwc.overlays.default ];` gives you `pkgs.uwc`.
-
-NVIDIA on NixOS needs `hardware.nvidia.modesetting.enable = true;` (it sets `nvidia_drm.modeset=1`); docs/NVIDIA.md has
-the rest.
-
-**What was tested:** the package builds from `packaging/nix/package.nix` against current nixpkgs and starts headless;
-the NixOS module evaluates inside a full system configuration and produces the session, the graphics setting and the
-portal config. **What was not:** `flake.nix` itself was only parsed, not evaluated (flake inputs could not be fetched
-where I wrote it), so the `nix run` / `nix develop` lines above are untested, and no `flake.lock` exists yet. Nix
-creates it on first use; commit it.
-
-## Gentoo
-
-There is a live (`-9999`) ebuild in `packaging/gentoo`, which is a small overlay by itself. Point Portage at a checkout:
-
-```sh
-git clone https://github.com/undrscores/uwc ~/src/uwc
-
-# /etc/portage/repos.conf/uwc.conf
-[uwc]
-location = /home/YOU/src/uwc/packaging/gentoo
-auto-sync = no
-```
-
-Live ebuilds are unkeyworded, and cargo downloads the crates while the package unpacks, so the build needs the
-network. As root:
-
-```sh
-mkdir -p /etc/portage/env /etc/portage/package.accept_keywords /etc/portage/package.env
-echo 'gui-wm/uwc **' >> /etc/portage/package.accept_keywords/uwc
-echo 'FEATURES="-network-sandbox"' > /etc/portage/env/no-network-sandbox.conf
-echo 'gui-wm/uwc no-network-sandbox.conf' >> /etc/portage/package.env/uwc
-emerge --ask gui-wm/uwc
-```
-
-To update: `git -C ~/src/uwc pull`, then `emerge -1 gui-wm/uwc` (or `emerge @live-rebuild`).
-
-USE flags: `portals` (default on) pulls xdg-desktop-portal with the wlr and GTK backends for screen sharing and
-installs `uwc-portals.conf`; `xwayland` pulls Xwayland for X11 apps (the config enables it by default).
-
-Seat access: with **elogind** or **systemd**, build `sys-auth/seatd` with `USE=elogind` or `USE=systemd` so libseat
-talks to logind, and log in on a TTY or from a display manager that starts a logind session. With plain **seatd**,
-enable the `seatd` service and add your user to the `seat` group. The compiler must be Rust 1.88 or newer
-(`dev-lang/rust` or `dev-lang/rust-bin`).
-
-**This ebuild has not been built on a Gentoo system or run through `pkgcheck`.** If `emerge` complains about a
-dependency atom or a USE flag, the dependency block in `packaging/gentoo/gui-wm/uwc/uwc-9999.ebuild` is the place to fix
-it; a report of what needed changing would be welcome.
-
-## Any other distro: build from source
+## Build from source
 
 You need:
 
