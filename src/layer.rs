@@ -40,7 +40,7 @@ pub enum Under {
     /// A window's surface; `origin` and `location` are in the window's space (see `WindowHit`).
     Window { idx: usize, surface: WlSurface, origin: Point<f64, Logical>, location: Point<f64, Logical> },
     /// A layer surface (or one of its popups / subsurfaces); `origin` is in screen px.
-    Layer { root: WlSurface, surface: WlSurface, origin: Point<f64, Logical>, interactive: bool },
+    Layer { root: WlSurface, surface: WlSurface, origin: Point<f64, Logical>, interactive: bool, background: bool },
 }
 
 impl Under {
@@ -97,7 +97,13 @@ impl Uwc {
         let geo = map.layer_geometry(l)?;
         let (surface, loc) = l.surface_under(p - geo.loc.to_f64(), WindowSurfaceType::ALL)?;
         let interactive = l.cached_state().keyboard_interactivity != KeyboardInteractivity::None;
-        Some(Under::Layer { root: l.wl_surface().clone(), surface, origin: (geo.loc + loc).to_f64(), interactive })
+        Some(Under::Layer {
+            root: l.wl_surface().clone(),
+            surface,
+            origin: (geo.loc + loc).to_f64(),
+            interactive,
+            background: matches!(layer, WlrLayer::Background | WlrLayer::Bottom),
+        })
     }
 
     /// Topmost thing under global point `p` (the monitors side by side), in drawing order: overlay
@@ -124,6 +130,7 @@ impl Uwc {
                             surface,
                             origin: r.loc,
                             interactive: false,
+                            background: false,
                         });
                     }
                 }

@@ -33,6 +33,9 @@ IPC, improved where uwm was awkward.
 - **Plays well with the rest of the desktop.** layer-shell bars and launchers, foreign-toplevel and ext-workspace for
   taskbars, Quickshell window previews, screen capture and portal screen sharing, session lock, idle notify and
   inhibit, clipboard managers, virtual keyboard and pointer, Xwayland.
+- **ushell.** The Quickshell desktop shell made for uwc (bar, launcher, notifications, lock, display settings, canvas
+  map): it reads uwc's IPC, follows its views and tiling, drives its display commands (`mode`, `scale`, `dpms`) and
+  paints uwc's window colours from its own theme. Start it from `examples/startup-ushell`.
 - **Hot corners.** Any action when the pointer rests in a screen corner or edge.
 - **Scriptable.** `hooks { }` runs a command on window open, close, focus, tag change or urgency. A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
   move and focus windows, pan and zoom.

@@ -546,6 +546,11 @@ pub struct Uwc {
     pub drag_last: Point<f64, Logical>,
     /// A mouse bind took the press, so the matching release is swallowed too.
     pub consumed_press: bool,
+    /// The running drag was asked for by a client (xdg move/resize request): its press already reached
+    /// the client, so the release must too, or the client's implicit grab never ends.
+    pub drag_from_client: bool,
+    /// Pointer buttons currently held (as the compositor saw them).
+    pub buttons_down: Vec<u32>,
     /// Bumped on anything that changes how decorations look, so the damage tracker redraws them.
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
@@ -728,6 +733,8 @@ impl Uwc {
             selection_owner: [SelectionOwner::None; 2],
             drag_last: (0.0, 0.0).into(),
             consumed_press: false,
+            drag_from_client: false,
+            buttons_down: Vec::new(),
             deco_commit: Default::default(),
             redraw: true,
             minimize_stamp: 0,
@@ -1672,6 +1679,7 @@ impl Uwc {
         self.fling = None;
         self.in_drag_motion = false;
         self.consumed_press = false;
+        self.drag_from_client = false;
         self.hints_cancel();
         self.touch_cancel();
         self.damage();

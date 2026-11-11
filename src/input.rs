@@ -454,6 +454,10 @@ impl Uwc {
 
     pub fn pointer_button(&mut self, button: u32, state: ButtonState, time: u32) {
         let serial = SERIAL_COUNTER.next_serial();
+        self.buttons_down.retain(|b| *b != button);
+        if state == ButtonState::Pressed {
+            self.buttons_down.push(button);
+        }
         // A session lock takes the button: it goes to the lock surface, and nothing else happens.
         if self.is_locked() {
             let ptr = self.pointer();
@@ -463,7 +467,10 @@ impl Uwc {
         }
         // A grab (a popup menu, a drag-and-drop) takes the button: a press outside a grabbed popup
         // dismisses it, and is not also a focus change, a drag or a pan on top of that.
-        if self.pointer().is_grabbed() {
+        // The exception is the release that ends a drag: a client-requested move or resize runs under the
+        // client's own implicit grab (its press), and it must still end the drag below.
+        let ends_drag = state == ButtonState::Released && self.drag.is_some();
+        if self.pointer().is_grabbed() && !ends_drag {
             let ptr = self.pointer();
             ptr.button(self, &ButtonEvent { button, state, serial, time });
             ptr.frame(self);
@@ -510,6 +517,12 @@ impl Uwc {
                 None => {}
             }
             match (&hit, under) {
+                // Dragging empty canvas pans it; a wallpaper (background layer) is empty canvas too.
+                (None | Some(Under::Layer { background: true, .. }), None) if button == BTN_LEFT => {
+                    self.drag = Some(Drag::Pan);
+                    self.drag_last = self.cursor;
+                    return;
+                }
                 // A click on a layer surface that takes keyboard input gives it the keyboard.
                 (Some(Under::Layer { root, interactive: true, .. }), _) => self.set_layer_focus(Some(root.clone())),
                 (Some(Under::Layer { .. }), _) => {}
@@ -520,12 +533,6 @@ impl Uwc {
                         self.layer_focus = None;
                     }
                     self.focus_client(Some(self.clients[i].id));
-                }
-                // Dragging empty canvas pans it.
-                (None, None) if button == BTN_LEFT => {
-                    self.drag = Some(Drag::Pan);
-                    self.drag_last = self.cursor;
-                    return;
                 }
                 _ => {}
             }
@@ -539,9 +546,12 @@ impl Uwc {
                 self.deco_commit.increment();
                 self.damage();
             }
-            // The press that started the drag never reached a client, so neither does its release.
+            // The press that started a bind drag never reached a client, so neither does its release.
+            // A client-requested drag did get its press, so it gets the release as well.
             self.refresh_pointer();
-            return;
+            if !std::mem::take(&mut self.drag_from_client) {
+                return;
+            }
         } else if std::mem::take(&mut self.consumed_press) {
             // The press went to a bind, so its release does not reach the client either.
             return;

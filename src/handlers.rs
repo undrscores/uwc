@@ -416,8 +416,13 @@ impl XdgShellHandler for Uwc {
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        // A request with no button held (a late or stale one) would start a drag nothing can end.
+        if self.buttons_down.is_empty() {
+            return;
+        }
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
             self.begin_move(i);
+            self.drag_from_client = self.drag.is_some();
         }
     }
 
@@ -428,8 +433,12 @@ impl XdgShellHandler for Uwc {
         _serial: Serial,
         _edges: xdg_toplevel::ResizeEdge,
     ) {
+        if self.buttons_down.is_empty() {
+            return;
+        }
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
             self.begin_resize(i);
+            self.drag_from_client = self.drag.is_some();
         }
     }
 

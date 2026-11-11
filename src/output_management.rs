@@ -154,6 +154,37 @@ pub fn refresh(state: &mut Uwc) {
 }
 
 impl Uwc {
+    /// IPC `mode` / `scale`: change one output's video mode (w, h and a refresh rate in Hz, else the fastest
+    /// of that size) and/or scale, through the same path a client's output-management apply takes.
+    pub fn output_set(
+        &mut self,
+        name: &str,
+        mode: Option<(i32, i32, Option<f64>)>,
+        scale: Option<f64>,
+    ) -> Result<(), String> {
+        let Some(mon) = self.monitors.iter().find(|m| m.output.name() == name) else {
+            return Err(format!("no output `{name}`"));
+        };
+        let mode = match mode {
+            None => None,
+            Some((w, h, hz)) => {
+                let of_size = mon.output.modes().into_iter().filter(|m| m.size.w == w && m.size.h == h);
+                let best = match hz {
+                    Some(hz) => of_size.min_by_key(|m| (m.refresh as f64 - hz * 1000.0).abs() as i64),
+                    None => of_size.max_by_key(|m| m.refresh),
+                };
+                Some(best.map(|m| (w, h, m.refresh)).ok_or_else(|| format!("`{name}` has no {w}x{h} mode"))?)
+            }
+        };
+        let head = HeadConfig { monitor: name.to_string(), enabled: true, mode, transform: None, scale };
+        if self.output_management_apply(vec![head], true) {
+            Ok(())
+        } else {
+            Err("this backend cannot change modes (only a real session can; a nested or headless one only scale)"
+                .into())
+        }
+    }
+
     /// Apply (or test) a configuration a client built over zwlr-output-management. On udev the
     /// entries become the live monitor config and the connectors are rescanned (the same path a
     /// config reload takes); on winit and headless only scale and transform exist to change, and

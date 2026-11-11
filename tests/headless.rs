@@ -1244,6 +1244,24 @@ fn state_shape_and_defaults() {
 }
 
 #[test]
+fn display_commands_for_shells() {
+    let mut uwc = Uwc::start("display", None);
+    let m = uwc.state()["monitors"][0].clone();
+    assert_eq!(m["powered"], true);
+    assert!(m["modes"].is_array());
+    let name = m["name"].as_str().unwrap().to_string();
+    uwc.ok(&format!("dpms off {name}"));
+    assert_eq!(uwc.state()["monitors"][0]["powered"], false);
+    uwc.ok("dpms on");
+    assert_eq!(uwc.state()["monitors"][0]["powered"], true);
+    assert!(uwc.cmd("dpms off nowhere").get("error").is_some());
+    uwc.ok(&format!("scale {name} 2"));
+    assert_eq!(uwc.state()["monitors"][0]["scale"], 2.0);
+    assert!(uwc.cmd("scale nowhere 2").get("error").is_some());
+    assert!(uwc.cmd(&format!("mode {name} 1 1")).get("error").is_some());
+}
+
+#[test]
 fn the_everyday_protocols_are_advertised() {
     let uwc = Uwc::start("globals", None);
     let c = uwc.connect();
@@ -3822,4 +3840,80 @@ fn output_captures_offer_dmabufs_only_when_asked_for() {
         assert!(c.app.export_done);
         let _ = list;
     }
+}
+
+#[test]
+fn dragging_over_a_wallpaper_pans_the_canvas() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("wallpan", Some("options { view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    // A full-screen background layer, as a wallpaper is, covers all the empty canvas.
+    let _wall = c.layer(
+        "wall",
+        zwlr_layer_shell_v1::Layer::Background,
+        zwlr_layer_surface_v1::Anchor::Top
+            | zwlr_layer_surface_v1::Anchor::Bottom
+            | zwlr_layer_surface_v1::Anchor::Left
+            | zwlr_layer_surface_v1::Anchor::Right,
+        (0, 0),
+        -1,
+        zwlr_layer_surface_v1::KeyboardInteractivity::None,
+    );
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let vx = |s: &Value| num(&s["monitors"][0]["viewport"]["x"]);
+    let x0 = vx(&uwc.state());
+    p.motion_absolute(0, 500, 300, 1000, 600);
+    p.frame();
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.motion(2, 100.0, 0.0);
+    p.frame();
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    assert!(vx(&uwc.state()) < x0 - 50.0, "the view panned: {x0} -> {}", vx(&uwc.state()));
+}
+
+#[test]
+fn a_client_requested_move_ends_when_the_button_is_released() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("clientmove", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let seat = c.bind_seat();
+    let w = c.window("M", 200, 150);
+    let id = win(&uwc.state(), "M")["id"].as_u64().unwrap();
+    uwc.cmd(&format!("move {id} 100 100"));
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let s = uwc.state();
+    let (vx, vy) = (num(&s["monitors"][0]["viewport"]["x"]), num(&s["monitors"][0]["viewport"]["y"]));
+    p.motion_absolute(0, (100.0 - vx + 50.0) as u32, (100.0 - vy + 50.0) as u32, 1000, 600);
+    p.frame();
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.frame();
+    c.sync();
+    // What a CSD title bar does on a press.
+    w.toplevel._move(&seat, 1);
+    c.sync();
+    p.motion(2, 30.0, 0.0);
+    p.frame();
+    c.sync();
+    let x = |uwc: &mut Uwc| num(&win(&uwc.state(), "M")["x"]);
+    assert_eq!(x(&mut uwc), 130.0);
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    // The drag is over: further motion leaves the window where it was.
+    p.motion(4, 50.0, 0.0);
+    p.frame();
+    c.sync();
+    assert_eq!(x(&mut uwc), 130.0, "the window kept following the pointer after the release");
 }

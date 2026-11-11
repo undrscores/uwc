@@ -276,6 +276,21 @@ impl Uwc {
                         height: m.size.h as i64,
                     },
                     scale: m.output.current_scale().fractional_scale(),
+                    powered: m.powered,
+                    modes: {
+                        let (cur, pref) = (m.output.current_mode(), m.output.preferred_mode());
+                        m.output
+                            .modes()
+                            .into_iter()
+                            .map(|o| P::Mode {
+                                width: o.size.w as i64,
+                                height: o.size.h as i64,
+                                refresh: o.refresh as f64 / 1000.0,
+                                current: Some(o) == cur,
+                                preferred: Some(o) == pref,
+                            })
+                            .collect()
+                    },
                     viewport: view(&m.target_viewport(ts)),
                     view_moving: m.target.is_some() || self.fling.is_some_and(|f| f.mon == mi),
                     animating: self.anim_running(),
@@ -410,6 +425,19 @@ impl Uwc {
         match req {
             R::State => return Ok(Some(self.ipc_state())),
             R::Minimap => return Ok(Some(self.ipc_minimap())),
+            R::Dpms(name, on) => {
+                if let Some(n) = &name {
+                    if !self.monitors.iter().any(|m| m.output.name() == *n) {
+                        return Err(format!("no output `{n}`"));
+                    }
+                }
+                for m in self.monitors.iter_mut().filter(|m| name.as_ref().is_none_or(|n| m.output.name() == *n)) {
+                    m.powered = on;
+                }
+                self.damage();
+            }
+            R::Mode(name, w, h, hz) => self.output_set(&name, Some((w, h, hz)), None)?,
+            R::Scale(name, s) => self.output_set(&name, None, Some(s))?,
             R::Subscribe => {
                 if let Some(c) = self.ipc.conns.iter_mut().find(|c| c.id == id) {
                     c.subscribed = true;

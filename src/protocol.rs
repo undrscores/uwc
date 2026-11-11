@@ -66,6 +66,12 @@ pub enum Request {
     },
     Overview,
     Home,
+    /// `dpms on|off [OUTPUT]`: blank or wake an output (all of them without a name).
+    Dpms(Option<String>, bool),
+    /// `mode OUTPUT W H [HZ]`: a video mode (the fastest of that size without HZ).
+    Mode(String, i32, i32, Option<f64>),
+    /// `scale OUTPUT S`: an output's scale.
+    Scale(String, f64),
     /// Per-tag canvas bounds and windows (ids for previews, rects, icons) plus each monitor's view
     /// per tag: everything an overview strip / minimap needs, in canvas px.
     Minimap,
@@ -107,6 +113,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("bookmark save N | bookmark goto N", "remember / return to a view of the tag in use (1-9)"),
     ("session save | session forget", "write the remembered canvas now / forget it"),
     ("overview | home", "fit all windows / back to the origin at zoom 1"),
+    ("dpms on|off [OUTPUT]", "blank or wake an output (all of them without a name)"),
+    ("mode OUTPUT W H [HZ]", "change an output's video mode (the fastest refresh rate of that size without HZ; real session only)"),
+    ("scale OUTPUT S", "change an output's scale (0.1-10)"),
     ("minimap", "per-tag canvas bounds and windows (ids, rects, icons) and each monitor's view per tag, for an overview strip"),
     ("reload | quit", ""),
 ];
@@ -253,6 +262,38 @@ impl Request {
             "overview" => none(Request::Overview)?,
             "home" => none(Request::Home)?,
             "minimap" => none(Request::Minimap)?,
+            "dpms" => {
+                let on = match args.first().copied() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("dpms on|off [OUTPUT]".into()),
+                };
+                Request::Dpms(args.get(1).map(|s| s.to_string()), on)
+            }
+            "mode" => {
+                let name = args.first().ok_or("mode OUTPUT W H [HZ]")?.to_string();
+                let (w, h) = (num(1)?, num(2)?);
+                if w.fract() != 0.0
+                    || h.fract() != 0.0
+                    || !(1.0..=16384.0).contains(&w)
+                    || !(1.0..=16384.0).contains(&h)
+                {
+                    return Err("a mode is a whole width and height of 1 to 16384".into());
+                }
+                let hz = if args.len() > 3 { Some(num(3)?) } else { None };
+                if hz.is_some_and(|r| !(1.0..=1000.0).contains(&r)) {
+                    return Err("a refresh rate is 1 to 1000 Hz".into());
+                }
+                Request::Mode(name, w as i32, h as i32, hz)
+            }
+            "scale" => {
+                let name = args.first().ok_or("scale OUTPUT S")?.to_string();
+                let s = num(1)?;
+                if !(0.1..=10.0).contains(&s) {
+                    return Err("a scale is 0.1 to 10".into());
+                }
+                Request::Scale(name, s)
+            }
             "reload" => none(Request::Reload)?,
             "quit" => none(Request::Quit)?,
             other => return Err(format!("unknown command `{other}` (`uwc msg --help` lists them)")),
@@ -325,6 +366,16 @@ pub struct Layer {
     pub keyboard: bool,
 }
 
+/// A video mode of a monitor; `refresh` is in Hz.
+#[derive(Serialize)]
+pub struct Mode {
+    pub width: i64,
+    pub height: i64,
+    pub refresh: f64,
+    pub current: bool,
+    pub preferred: bool,
+}
+
 #[derive(Serialize)]
 pub struct Monitor {
     pub name: String,
@@ -333,6 +384,9 @@ pub struct Monitor {
     #[serde(flatten)]
     pub rect: Rect,
     pub scale: f64,
+    /// Whether the output is lit (`dpms`).
+    pub powered: bool,
+    pub modes: Vec<Mode>,
     pub viewport: View,
     pub work_area: Rect,
     /// An eased view move is still under way (`viewport` already shows where it ends).
@@ -435,6 +489,14 @@ mod tests {
         assert_eq!(Request::parse("minimap"), Ok(Request::Minimap));
         assert_eq!(Request::parse("  pan 10 -2.5 "), Ok(Request::Pan(10.0, -2.5)));
         assert_eq!(Request::parse("zoom 2"), Ok(Request::Zoom(2.0, None)));
+        assert_eq!(Request::parse("dpms off"), Ok(Request::Dpms(None, false)));
+        assert_eq!(Request::parse("dpms on DP-1"), Ok(Request::Dpms(Some("DP-1".into()), true)));
+        assert_eq!(Request::parse("mode DP-1 1920 1080"), Ok(Request::Mode("DP-1".into(), 1920, 1080, None)));
+        assert_eq!(
+            Request::parse("mode DP-1 1920 1080 144"),
+            Ok(Request::Mode("DP-1".into(), 1920, 1080, Some(144.0)))
+        );
+        assert_eq!(Request::parse("scale DP-1 1.5"), Ok(Request::Scale("DP-1".into(), 1.5)));
         assert_eq!(Request::parse("zoom 2 10 20"), Ok(Request::Zoom(2.0, Some((10.0, 20.0)))));
         assert_eq!(Request::parse("view 3"), Ok(Request::View(2)));
         assert_eq!(Request::parse("unpin 4"), Ok(Request::Pin(4, false)));
@@ -462,6 +524,11 @@ mod tests {
             "state now",
             "set",
             "set opacity",
+            "dpms",
+            "dpms maybe",
+            "mode DP-1 1920",
+            "mode DP-1 0 1080",
+            "scale DP-1 0",
         ] {
             assert!(Request::parse(bad).is_err(), "should reject: {bad:?}");
         }
@@ -505,6 +572,10 @@ mod tests {
             "session",
             "overview",
             "home",
+            "dpms",
+            "mode",
+            "scale",
+            "minimap",
             "reload",
             "quit",
         ] {
