@@ -8,8 +8,8 @@ config file, not in code.
 It is the Rust rewrite of [uwm](https://github.com/undrscores/uwm) (C, wlroots), with the same ideas, config syntax and
 IPC, improved where uwm was awkward.
 
-> **Early software.** Everything is tested against headless and nested runs, but the real-hardware backend (DRM/KMS,
-> libinput, VT switching) **has not been run on a GPU yet**, and neither has NVIDIA. Keep another way to log in.
+> **Early software.** Tested with headless and nested runs and on real NVIDIA hardware by its author, not yet widely.
+> Dmabuf screen capture (`capture-dmabuf`, off by default) and tablet pressure are untried; keep another way to log in.
 > See [docs/STATUS.md](docs/STATUS.md).
 
 ## Features

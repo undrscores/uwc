@@ -22,7 +22,8 @@
 //! it announces, or one it shows by drawing bigger than it was told) gets the room it needs and the
 //! others share the rest.
 //!
-//! Nothing is saved with the session: a restart brings the windows back where they were, floating.
+//! The session keeps each tag's layout, split and tile area (not the window order, and not which
+//! windows were floated): a restart brings the layout back and windows tile into it as their apps open.
 
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
