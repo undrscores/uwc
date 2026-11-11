@@ -5,11 +5,11 @@ use std::os::unix::io::OwnedFd;
 use smithay::{
     backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
-    delegate_input_method_manager, delegate_output, delegate_pointer_constraints, delegate_pointer_gestures,
-    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_session_lock, delegate_shm,
-    delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
-    delegate_xwayland_shell,
+    delegate_alpha_modifier, delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit,
+    delegate_idle_notify, delegate_input_method_manager, delegate_output, delegate_pointer_constraints,
+    delegate_pointer_gestures, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
+    delegate_session_lock, delegate_shm, delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_xdg_shell, delegate_xdg_toplevel_icon, delegate_xwayland_shell,
     desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
     input::{
         pointer::{CursorImageStatus, Focus},
@@ -118,6 +118,7 @@ impl CompositorHandler for Uwc {
             self.ipc.dirty = true;
             let id = self.clients[i].id;
             self.export_on_commit(id);
+            self.note_icon(i);
         }
 
         self.layer_commit(&root);
@@ -344,6 +345,9 @@ impl XdgShellHandler for Uwc {
             commits: 0,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            icon_name: None,
+            icon_path: None,
+            icon_hash: 0,
         });
     }
 
@@ -558,6 +562,10 @@ impl DmabufHandler for Uwc {
     }
 }
 
+impl smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler for Uwc {}
+
+delegate_alpha_modifier!(Uwc);
+delegate_xdg_toplevel_icon!(Uwc);
 delegate_compositor!(Uwc);
 delegate_shm!(Uwc);
 delegate_xdg_shell!(Uwc);

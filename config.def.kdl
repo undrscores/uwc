@@ -37,11 +37,18 @@ options {
     inactive-dim 0              // 0-1: how much windows without focus are darkened
     // Background blur: what is behind a window is blurred and shown through its translucent parts (a
     // terminal at opacity 0.8). The number is how far the blur reaches, in px of canvas (it scales with
-    // zoom); 0 = none. Costs a little GPU per blurred window on every frame that is drawn. Best set
-    // per window with a rule (match app-id="foot"; opacity 0.85; blur-radius 12). The window's
-    // corner-radius clips it. Windows stacked on each other blur through each other; a closing window
-    // fades without it.
+    // zoom); 0 = none. Best set per window with a rule (match app-id="foot"; opacity 0.85; blur-radius 12).
+    // The window's corner-radius clips it. Windows stacked on each other blur through each other, and a
+    // closing window's ghost is blurred too while it fades. Layer surfaces (bars) can ask for the same
+    // blur over ext-background-effect, with the global blur-radius. The result is cached while nothing
+    // behind changes.
     blur-radius 0
+    blur-brightness 1           // what the blur does to the light behind: brightness multiplier (0-2)
+    blur-saturation 1           // saturation multiplier (0-2)
+    blur-noise 0                // speckle added to the blurred backdrop, 0-1; 0 = none
+    // uwm's `grid` (a grid drawn on the canvas) is accepted so uwm themes load, and ignored: draw the
+    // canvas grid with background-shader (see shaders/) and snap windows to it with snap-grid.
+    // grid 32 "#1a1b26"
     // Border gradients replace the border / focus color: 2 to 6 colors, angle in CSS degrees
     // (0 = first color at the bottom, last at the top; 90 = first at the left; the default).
     // No colors turns it off. Needs border-width > 0.
@@ -69,6 +76,7 @@ options {
     move-ms 140                 // windows moved by key or IPC glide for about this long; 0 = jump. Dragging is always instant
     tag-ms 140                  // windows that come into view with a tag switch fade in over this long; 0 = at once
     close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
+    focus-ms 0                  // the focus look (border, shadow, dim) crossfades between the old and the new window over this long; 0 = jumps at once
     pan-momentum-ms 600         // let go of a touchpad swipe or a touch drag while moving and the view glides on, losing most of its speed in about this long; 0 = stops dead. Not uwm's option
     // Dragging a window snaps its edges and centre lines to other windows and frames within this many screen px
     // (so it feels the same at any zoom), drawing a guide line; hold Ctrl to drag freely. 0 = off. Not uwm's option.

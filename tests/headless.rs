@@ -16,6 +16,9 @@ use wayland_client::{
     protocol::{wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1, ext_background_effect_surface_v1,
+};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1 as ext_tl_handle, ext_foreign_toplevel_list_v1 as ext_tl_list,
 };
@@ -285,6 +288,8 @@ struct App {
     frames_done: u32,
     /// wlr-screencopy's linux_dmabuf offers: (fourcc, width, height).
     linux_dmabuf: Vec<(u32, u32, u32)>,
+    /// ext-background-effect: the capabilities flags the manager advertised.
+    bg_caps: Option<u32>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -366,6 +371,7 @@ impl Client {
             presentation: Vec::new(),
             frames_done: 0,
             linux_dmabuf: Vec::new(),
+            bg_caps: None,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -692,6 +698,23 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for App {
         }
     }
 }
+impl Dispatch<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+        e: ext_background_effect_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_background_effect_manager_v1::Event::Capabilities { flags } = e {
+            app.bg_caps = Some(match flags {
+                wayland_client::WEnum::Value(v) => v.bits(),
+                wayland_client::WEnum::Unknown(v) => v,
+            });
+        }
+    }
+}
 macro_rules! noop {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for App {
@@ -836,6 +859,7 @@ impl Dispatch<xdg_popup::XdgPopup, ()> for App {
         }
     }
 }
+noop!(ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1);
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(
     wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
@@ -1236,9 +1260,87 @@ fn the_everyday_protocols_are_advertised() {
         "zwp_keyboard_shortcuts_inhibit_manager_v1",
         "xdg_system_bell_v1",
         "wp_content_type_manager_v1",
+        "wp_alpha_modifier_v1",
+        "xdg_toplevel_icon_manager_v1",
+        "ext_background_effect_manager_v1",
     ] {
         assert!(have.iter().any(|h| h == want), "missing global {want}; have {have:?}");
     }
+}
+
+#[test]
+fn minimap_reports_tag_bounds_and_windows() {
+    let mut uwc = Uwc::start("minimap", None);
+    let mut c = uwc.connect();
+    let _a = c.window("alpha", 400, 300);
+    let _b = c.window("beta", 200, 100);
+    let s = uwc.wait("two windows", |s| s["windows"].as_array().map(|w| w.len()) == Some(2));
+    let id = win(&s, "alpha")["id"].as_u64().unwrap();
+    uwc.ok(&format!("move {id} 500 400"));
+    uwc.wait("alpha moved", |s| num(&win(s, "alpha")["x"]) == 500.0);
+    let m = uwc.cmd("minimap");
+    let tags = m["tags"].as_array().unwrap();
+    assert_eq!(tags.len(), 9);
+    let t1 = &tags[0];
+    assert_eq!(t1["n"], 1);
+    assert_eq!(t1["active"], true);
+    assert_eq!(t1["occupied"], true);
+    let wins = t1["windows"].as_array().unwrap();
+    assert_eq!(wins.len(), 2);
+    let b = &t1["bounds"];
+    for w in wins {
+        let r = &w["rect"];
+        assert!(num(&b["x"]) <= num(&r["x"]) && num(&b["y"]) <= num(&r["y"]), "{b} {r}");
+        assert!(num(&b["x"]) + num(&b["width"]) >= num(&r["x"]) + num(&r["width"]), "{b} {r}");
+        assert!(num(&b["y"]) + num(&b["height"]) >= num(&r["y"]) + num(&r["height"]), "{b} {r}");
+        assert!(w.get("icon").is_some() && w.get("icon_name").is_some());
+    }
+    assert_eq!(m["monitors"][0]["views"].as_array().unwrap().len(), 9);
+    // An empty tag has no bounds.
+    assert_eq!(tags[1]["occupied"], false);
+    assert_eq!(tags[1]["bounds"], Value::Null);
+}
+
+#[test]
+fn layer_surfaces_can_ask_for_a_background_effect() {
+    let mut uwc = Uwc::start("bgfx", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let mgr: ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let bar = c.layer(
+        "bar",
+        zwlr_layer_shell_v1::Layer::Top,
+        zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right,
+        (1000, 24),
+        24,
+        zwlr_layer_surface_v1::KeyboardInteractivity::None,
+    );
+    let fx = mgr.get_background_effect(&bar.surface, &qh, ());
+    fx.set_blur_region(None);
+    c.sync();
+    c.sync();
+    // The blur capability is advertised, and the compositor carries on with the layer up.
+    assert_eq!(c.app.bg_caps, Some(1), "capability blur");
+    let s = uwc.state();
+    assert!(s["monitors"][0]["layers"].as_array().unwrap().iter().any(|l| l["namespace"] == "bar"));
+}
+
+#[test]
+fn focus_ms_is_an_option_and_focus_still_works() {
+    let mut uwc = Uwc::start("focusfade", Some("options { focus-ms 120 }"));
+    assert_eq!(uwc.cmd("get focus-ms")["value"], 120.0);
+    let mut c = uwc.connect();
+    let _a = c.window("fa", 100, 100);
+    let _b = c.window("fb", 100, 100);
+    let s = uwc.wait("two windows", |s| s["windows"].as_array().map(|w| w.len()) == Some(2));
+    let (a, b) = (win(&s, "fa")["id"].as_u64().unwrap(), win(&s, "fb")["id"].as_u64().unwrap());
+    uwc.ok(&format!("focus {a}"));
+    let s = uwc.state();
+    assert_eq!(win(&s, "fa")["focused"], true);
+    assert_eq!(win(&s, "fb")["focused"], false);
+    uwc.ok(&format!("focus {b}"));
+    let s = uwc.state();
+    assert_eq!(win(&s, "fb")["focused"], true);
 }
 
 #[test]

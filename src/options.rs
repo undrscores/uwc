@@ -183,6 +183,9 @@ pub static DECO: &[Opt<Deco>] = option_table!(Deco;
     "inactive-opacity" => inactive_opacity (0, 1),
     "inactive-dim" => inactive_dim (0, 1),
     "blur-radius" => blur_radius (0, 128),
+    "blur-brightness" => blur_brightness (0, 2),
+    "blur-saturation" => blur_saturation (0, 2),
+    "blur-noise" => blur_noise (0, 1),
     "border-shader" => border_shader,
 );
 
@@ -219,6 +222,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "move-ms" => move_ms (0, 5000),
     "tag-ms" => tag_ms (0, 5000),
     "close-ms" => close_ms (0, 5000),
+    "focus-ms" => focus_ms (0, 5000),
     "move-step" => move_step (1, 10000),
     "zoom-scroll" => zoom_scroll (1.01, 3),
     "zoom-settle-ms" => zoom_settle_ms (0, 10000),

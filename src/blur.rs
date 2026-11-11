@@ -17,16 +17,20 @@
 //! 4. The last pass writes just the window's box into its own texture, which the element draws, clipped to the
 //!    rounded corners, in the window's place under its content.
 //!
-//! Costs: one pass over the elements behind each blurred window (only those that overlap it) and the filter, every
-//! frame that is drawn. A blur element always counts as damaged, because what is behind it may have changed in a way
-//! the damage tracker cannot see from here. Textures are kept between frames (`BlurCache`) so nothing is allocated
-//! in a steady state.
+//! Costs: one pass over the elements behind each blurred window (only those that overlap it) and the filter, but
+//! only when something the blurred picture depends on changed: each element remembers a key of its own box, its
+//! options and the ids, commits and geometry of everything behind it, and skips the passes while the key holds
+//! (so a steady scene costs nothing). Textures are kept between frames (`BlurCache`) so nothing is allocated in a
+//! steady state either.
 //!
-//! Limits: a closing window's ghost has no blur (it fades without it); there is no ext-background-effect, so layer
-//! surfaces (bars) cannot ask for it; the blur is of the output's scene as drawn, so it does not include the
-//! window's own shadow inside its box (the shadow shader cuts that out) but does include it in the margin.
+//! Layer surfaces that ask through ext-background-effect-v1 get the same blur (background_effect.rs), and a
+//! closing window's ghost is blurred while it fades. The blur is of the output's scene as drawn, so it does not
+//! include the window's own shadow inside its box (the shadow shader cuts that out) but does include it in the
+//! margin.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use smithay::{
     backend::{
@@ -56,10 +60,20 @@ const MAX_MARGIN: i32 = 256;
 /// The most a blur texture may cover (one side, physical px).
 const MAX_SIDE: i32 = 8192;
 
-/// Textures kept from frame to frame, per window and filter level, and the ids of the elements.
+/// What one surface's blur looked like last frame: the texture, what it was made from, and the
+/// commit it was drawn at, so an unchanged backdrop is not recomputed or even redrawn.
+struct BlurState {
+    key: u64,
+    blurred: GlesTexture,
+    commit: CommitCounter,
+}
+
+/// Textures kept from frame to frame, per surface and filter level, plus the ids of the elements
+/// and each surface's last blurred picture.
 #[derive(Default)]
 pub struct BlurCache {
     textures: HashMap<(u32, u8), GlesTexture>,
+    state: HashMap<u32, BlurState>,
     ids: HashMap<u32, Id>,
     commit: CommitCounter,
 }
@@ -94,9 +108,10 @@ impl BlurCache {
         self.ids.get(&window).cloned().unwrap_or_else(Id::new)
     }
 
-    /// Forget the windows that are not blurred (any more).
-    fn keep(&mut self, windows: &[u32]) {
+    /// Forget the surfaces that are not blurred (any more).
+    pub fn keep(&mut self, windows: &[u32]) {
         self.textures.retain(|(w, _), _| windows.contains(w));
+        self.state.retain(|w, _| windows.contains(w));
         self.ids.retain(|w, _| windows.contains(w));
     }
 }
@@ -115,7 +130,36 @@ fn margin(radius: f64) -> i32 {
     (radius.ceil() as i32 * 2 + 2).clamp(2, MAX_MARGIN * 2)
 }
 
-/// The blurred backdrop of one window: a placeholder until `fill` has drawn what is behind it.
+/// How a blurred backdrop is made: the reach, the corner clip, the fade, and the light tweaks.
+#[derive(Clone, Copy)]
+pub struct BlurParams {
+    pub radius: f64,
+    pub corner: f64,
+    pub alpha: f32,
+    pub brightness: f32,
+    pub saturation: f32,
+    pub noise: f32,
+}
+
+impl BlurParams {
+    pub fn from_deco(o: &crate::rules::Deco, radius: f64, corner: f64, alpha: f32) -> BlurParams {
+        BlurParams {
+            radius,
+            corner,
+            alpha,
+            brightness: o.blur_brightness as f32,
+            saturation: o.blur_saturation as f32,
+            noise: o.blur_noise as f32,
+        }
+    }
+
+    fn tweaked(&self) -> bool {
+        self.brightness != 1.0 || self.saturation != 1.0 || self.noise != 0.0
+    }
+}
+
+/// The blurred backdrop of one window (or layer surface, or closing ghost): a placeholder until
+/// `fill` has drawn what is behind it.
 pub struct BlurElement {
     id: Id,
     commit: CommitCounter,
@@ -124,43 +168,61 @@ pub struct BlurElement {
     geo: Rectangle<i32, Physical>,
     /// The box plus the margin: what is drawn behind it and blurred.
     region: Rectangle<i32, Physical>,
-    radius: f64,
-    corner: f64,
-    alpha: f32,
+    p: BlurParams,
     round: GlesTexProgram,
     blurred: Option<GlesTexture>,
+    /// What the current `blurred` was made from; while it holds, `fill` does nothing.
+    key: Option<u64>,
 }
 
 impl BlurElement {
-    /// A placeholder for a window whose content box is `geo`, blurred over `radius` physical px.
-    #[allow(clippy::too_many_arguments)]
+    /// A placeholder for a window whose content box is `geo`, blurred per `p`.
     pub fn new(
         cache: &BlurCache,
         shaders: &Shaders,
         window: u32,
         geo: Rectangle<i32, Physical>,
-        radius: f64,
-        corner: f64,
-        alpha: f32,
+        p: BlurParams,
     ) -> BlurElement {
-        let m = margin(radius);
+        let m = margin(p.radius);
         let region =
             Rectangle::new((geo.loc.x - m, geo.loc.y - m).into(), (geo.size.w + 2 * m, geo.size.h + 2 * m).into());
-        BlurElement {
-            id: cache.id(window),
-            commit: cache.commit,
-            window,
-            geo,
-            region,
-            radius,
-            corner,
-            alpha,
-            round: shaders.round.clone(),
-            blurred: None,
-        }
+        // Adopt last frame's picture: while its key still holds, `fill` does not touch it and the
+        // damage tracker sees no new commit, so a steady scene costs no blur work at all.
+        let (blurred, key, commit) = match cache.state.get(&window) {
+            Some(s) => (Some(s.blurred.clone()), Some(s.key), s.commit),
+            None => (None, None, cache.commit),
+        };
+        BlurElement { id: cache.id(window), commit, window, geo, region, p, round: shaders.round.clone(), blurred, key }
     }
 
-    /// Draw what is behind (`behind`, front to back, in output px) and blur it.
+    /// Everything the blurred picture depends on, hashed: this element's box and options, and the
+    /// id, commit and geometry of every element behind it that overlaps the region.
+    fn key(&self, behind: &[UwcElement], scale: f64, clear: [f32; 4]) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.window.hash(&mut h);
+        (self.geo.loc.x, self.geo.loc.y, self.geo.size.w, self.geo.size.h).hash(&mut h);
+        self.p.radius.to_bits().hash(&mut h);
+        self.p.corner.to_bits().hash(&mut h);
+        self.p.alpha.to_bits().hash(&mut h);
+        self.p.brightness.to_bits().hash(&mut h);
+        self.p.saturation.to_bits().hash(&mut h);
+        self.p.noise.to_bits().hash(&mut h);
+        scale.to_bits().hash(&mut h);
+        for c in clear {
+            c.to_bits().hash(&mut h);
+        }
+        for e in behind.iter().filter(|e| e.geometry(Scale::from(scale)).overlaps(self.region)) {
+            e.id().hash(&mut h);
+            format!("{:?}", e.current_commit()).hash(&mut h);
+            let g = e.geometry(Scale::from(scale));
+            (g.loc.x, g.loc.y, g.size.w, g.size.h).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Draw what is behind (`behind`, front to back, in output px) and blur it. Does nothing while
+    /// the picture would be the same as last frame's (`key`).
     fn fill(
         &mut self,
         r: &mut GlesRenderer,
@@ -175,8 +237,12 @@ impl BlurElement {
         {
             return Ok(());
         }
+        let key = self.key(behind, scale, clear);
+        if self.key == Some(key) {
+            return Ok(());
+        }
         let size = |s: Size<i32, Physical>| Size::<i32, Buffer>::from((s.w, s.h));
-        let (passes, offset) = plan(self.radius);
+        let (passes, offset) = plan(self.p.radius);
 
         // 1. The scene behind the window, over the root color.
         let mut scene = cache.texture(r, self.window, 0, size(self.region.size))?;
@@ -203,7 +269,7 @@ impl BlurElement {
             let mut dst = cache.texture(r, self.window, level, sizes[level as usize])?;
             let src = chain[level as usize - 1].clone();
             let half = (0.5 / dst.size().w as f32, 0.5 / dst.size().h as f32);
-            pass(r, &src, full(src.size()), &mut dst, down, half, offset)?;
+            pass(r, &src, full(src.size()), &mut dst, down, &blur_uniforms(half, offset))?;
             chain.push(dst);
         }
 
@@ -212,7 +278,7 @@ impl BlurElement {
         for level in (1..passes).rev() {
             let mut dst = cache.texture(r, self.window, 16 + level, sizes[level as usize])?;
             let half = (0.5 / current.size().w as f32, 0.5 / current.size().h as f32);
-            pass(r, &current, full(current.size()), &mut dst, up, half, offset)?;
+            pass(r, &current, full(current.size()), &mut dst, up, &blur_uniforms(half, offset))?;
             current = dst;
         }
         let mut out = cache.texture(r, self.window, 32, size(self.geo.size))?;
@@ -223,13 +289,40 @@ impl BlurElement {
             (self.geo.size.w as f64 * kx, self.geo.size.h as f64 * ky).into(),
         );
         let half = (0.5 / sw as f32, 0.5 / sh as f32);
-        pass(r, &current, crop, &mut out, up, half, offset)?;
+        pass(r, &current, crop, &mut out, up, &blur_uniforms(half, offset))?;
+
+        // 4. The light tweaks (brightness / saturation / noise), one more pass over the box.
+        if self.p.tweaked() {
+            if let Some(tweak) = shaders.tweak.as_ref() {
+                let mut done = cache.texture(r, self.window, 33, size(self.geo.size))?;
+                pass(
+                    r,
+                    &out,
+                    full(out.size()),
+                    &mut done,
+                    tweak,
+                    &[
+                        u1("u_brightness", self.p.brightness),
+                        u1("u_saturation", self.p.saturation),
+                        u1("u_noise", self.p.noise),
+                        u1("u_seed", self.window as f32),
+                    ],
+                )?;
+                out = done;
+            }
+        }
 
         cache.commit.increment();
         self.commit = cache.commit;
+        self.key = Some(key);
+        cache.state.insert(self.window, BlurState { key, blurred: out.clone(), commit: self.commit });
         self.blurred = Some(out);
         Ok(())
     }
+}
+
+fn blur_uniforms(halfpixel: (f32, f32), offset: f32) -> [Uniform<'static>; 2] {
+    [Uniform::new("u_halfpixel", UniformValue::_2f(halfpixel.0, halfpixel.1)), u1("u_offset", offset)]
 }
 
 trait MaxWithOne {
@@ -246,15 +339,14 @@ fn full(s: Size<i32, Buffer>) -> Rectangle<f64, Buffer> {
     Rectangle::from_size((s.w as f64, s.h as f64).into())
 }
 
-/// One filter pass: `src` (the part `src_rect`) drawn through `program` into all of `dst`.
+/// One filter pass: `src` (the part `src_rect`) drawn through `program` with `uniforms` into all of `dst`.
 fn pass(
     r: &mut GlesRenderer,
     src: &GlesTexture,
     src_rect: Rectangle<f64, Buffer>,
     dst: &mut GlesTexture,
     program: &GlesTexProgram,
-    halfpixel: (f32, f32),
-    offset: f32,
+    uniforms: &[Uniform<'_>],
 ) -> Result<(), String> {
     let s = dst.size();
     let size = Size::<i32, Physical>::from((s.w, s.h));
@@ -263,17 +355,7 @@ fn pass(
     let mut frame = r.render(&mut fb, size, Transform::Normal).map_err(|e| format!("blur frame: {e}"))?;
     frame.clear(Color32F::TRANSPARENT, &[all]).map_err(|e| format!("blur clear: {e}"))?;
     frame
-        .render_texture_from_to(
-            src,
-            src_rect,
-            all,
-            &[all],
-            &[],
-            Transform::Normal,
-            1.0,
-            Some(program),
-            &[Uniform::new("u_halfpixel", UniformValue::_2f(halfpixel.0, halfpixel.1)), u1("u_offset", offset)],
-        )
+        .render_texture_from_to(src, src_rect, all, &[all], &[], Transform::Normal, 1.0, Some(program), uniforms)
         .map_err(|e| format!("blur pass: {e}"))?;
     // Same GL context, so the next pass is ordered after this one without waiting on the fence.
     let _sync = frame.finish().map_err(|e| format!("blur finish: {e}"))?;
@@ -281,6 +363,21 @@ fn pass(
 }
 
 impl Uwc {
+    /// The texture keys of everything that can be blurred right now (windows on any monitor, layer
+    /// surfaces that asked for a background effect, closing ghosts), so `BlurCache` can keep their
+    /// ids, textures and pictures and forget the rest — once per scene, not per monitor.
+    pub fn blur_keys(&self) -> Vec<u32> {
+        let mut keys: Vec<u32> = self
+            .clients
+            .iter()
+            .filter(|c| self.visible(c) && !c.fullscreen && self.deco_for(c).blur_radius > 0.0)
+            .map(|c| c.id)
+            .collect();
+        keys.extend(self.bg_effect.values().map(|b| b.key));
+        keys.extend(self.ghosts.iter().filter(|g| g.deco.blur_radius > 0.0).map(|g| g.key));
+        keys
+    }
+
     /// Make every `BlurElement` in `scene` (front to back) show what is behind it. Placeholders are visited
     /// from the back so a blurred window stacked on another one blurs the other one's blur too.
     pub fn fill_blurs(&mut self, r: &mut GlesRenderer, scene: &mut [UwcElement], scale: f64, clear: [f32; 4]) {
@@ -290,7 +387,6 @@ impl Uwc {
                 windows.push(b.window);
             }
         }
-        self.blur.keep(&windows);
         if windows.is_empty() {
             return;
         }
@@ -331,7 +427,7 @@ impl Element for BlurElement {
     }
 
     fn alpha(&self) -> f32 {
-        self.alpha
+        self.p.alpha
     }
 
     fn kind(&self) -> Kind {
@@ -350,7 +446,7 @@ impl RenderElement<GlesRenderer> for BlurElement {
     ) -> Result<(), GlesError> {
         let Some(tex) = &self.blurred else { return Ok(()) };
         // The same corner clip the window's content gets (see `RoundedElement`).
-        let radius = self.corner.min(dst.size.w as f64 / 2.0).min(dst.size.h as f64 / 2.0);
+        let radius = self.p.corner.min(dst.size.w as f64 / 2.0).min(dst.size.h as f64 / 2.0);
         frame.override_default_tex_program(
             self.round.clone(),
             vec![
@@ -359,7 +455,7 @@ impl RenderElement<GlesRenderer> for BlurElement {
                 u1("u_radius", radius as f32),
             ],
         );
-        let res = frame.render_texture_from_to(tex, src, dst, damage, &[], Transform::Normal, self.alpha, None, &[]);
+        let res = frame.render_texture_from_to(tex, src, dst, damage, &[], Transform::Normal, self.p.alpha, None, &[]);
         frame.clear_tex_program_override();
         res
     }

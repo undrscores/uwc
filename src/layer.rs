@@ -20,7 +20,7 @@ use smithay::{
     desktop::{layer_map_for_output, LayerSurface, PopupKind, PopupManager, WindowSurfaceType},
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
-    utils::{Logical, Point, Scale, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, Scale, SERIAL_COUNTER},
     wayland::{
         compositor::with_states,
         shell::{
@@ -33,7 +33,7 @@ use smithay::{
     },
 };
 
-use crate::{canvas::Area, render::UwcElement, state::Uwc};
+use crate::{blur::BlurParams, canvas::Area, deco::Shaders, render::UwcElement, state::Uwc};
 
 /// What is under a screen point.
 pub enum Under {
@@ -249,11 +249,31 @@ impl Uwc {
     ) -> Vec<UwcElement> {
         let Some(o) = self.output_of(m) else { return vec![] };
         let map = layer_map_for_output(&o);
+        let shaders = Shaders::get(renderer);
         let mut out = Vec::new();
         for &which in layers {
             for l in map.layers_on(which).rev() {
                 let Some(geo) = map.layer_geometry(l) else { continue };
                 let loc = geo.loc.to_f64().to_physical(scale).to_i32_round();
+                // A surface that asked for a background effect (ext-background-effect) gets the
+                // blur of what is behind it, under itself, like a blurred window (blur.rs). The
+                // region is surface-local; the layer geometry places the surface on the screen.
+                if let (Some(s), Some(be)) = (shaders.as_ref(), self.bg_effect_of(l.wl_surface())) {
+                    if s.blur.is_some() && self.config.deco.blur_radius > 0.0 {
+                        let r = be.region.unwrap_or_else(|| Rectangle::from_size(geo.size));
+                        let blur_geo = Rectangle::new(
+                            (geo.loc + r.loc).to_f64().to_physical(scale).to_i32_round(),
+                            r.size.to_f64().to_physical(scale).to_i32_round(),
+                        );
+                        out.push(UwcElement::from(crate::blur::BlurElement::new(
+                            &self.blur,
+                            s,
+                            be.key,
+                            blur_geo,
+                            BlurParams::from_deco(&self.config.deco, self.config.deco.blur_radius * scale, 0.0, 1.0),
+                        )));
+                    }
+                }
                 for (popup, offset) in PopupManager::popups_for_surface(l.wl_surface()) {
                     let at = geo.loc + offset - popup.geometry().loc;
                     out.extend(

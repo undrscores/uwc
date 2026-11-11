@@ -330,6 +330,43 @@ void main() {
 }
 "#;
 
+/// One pass over a blurred backdrop applying uwc's tweaks (blur.rs): brightness and saturation
+/// multipliers, and speckle noise seeded per window so it does not shimmer between frames.
+const TWEAK: &str = r#"
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+uniform float u_brightness;
+uniform float u_saturation;
+uniform float u_noise;
+uniform float u_seed;
+
+void main() {
+    vec4 c = texture2D(tex, v_coords) * alpha;
+    float luma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+    c.rgb = mix(vec3(luma), c.rgb, u_saturation) * u_brightness;
+    float n = fract(sin(dot(v_coords * (u_seed + 1.0), vec2(12.9898, 78.233))) * 43758.5453);
+    c.rgb += (n - 0.5) * u_noise;
+    gl_FragColor = c;
+}
+"#;
+
 #[derive(Clone)]
 pub struct Shaders {
     pub boxes: GlesPixelProgram,
@@ -337,6 +374,8 @@ pub struct Shaders {
     pub round: GlesTexProgram,
     /// (down, up) passes of the blur; `None` if they did not compile (windows then show no blur).
     pub blur: Option<(GlesTexProgram, GlesTexProgram)>,
+    /// The brightness/saturation/noise pass over a blurred backdrop; `None` if it did not compile.
+    pub tweak: Option<GlesTexProgram>,
 }
 
 /// Cached per GL context; `None` once compiling failed.
@@ -455,7 +494,17 @@ impl Shaders {
                 None
             }
         };
-        Ok(Shaders { boxes, shadow, round, blur })
+        let tweak = match r.compile_custom_texture_shader(
+            TWEAK,
+            &[f1("u_brightness"), f1("u_saturation"), f1("u_noise"), f1("u_seed")],
+        ) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::error!("the blur tweak shader failed to compile, blurs stay untweaked: {e}");
+                None
+            }
+        };
+        Ok(Shaders { boxes, shadow, round, blur, tweak })
     }
 }
 
@@ -605,6 +654,7 @@ impl ShaderElement {
 }
 
 /// What a box is painted with. The gradient's extra angle (degrees) is the border spin.
+#[derive(Clone)]
 pub enum Paint {
     Solid(Color),
     Gradient(Gradient, f64),

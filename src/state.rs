@@ -70,13 +70,18 @@ pub struct Fx {
     /// How long the fade/grow and the glide take, as configured when they started.
     pub fade_ms: f64,
     pub move_ms: f64,
+    /// Focus crossfade (`focus-ms`): 1 = settled on the current focus, 0 = just changed, with the
+    /// configured duration alongside.
+    pub focus_fade: f64,
+    pub focus_ms: f64,
 }
 
 impl Fx {
-    pub const REST: Fx = Fx { alpha: 1.0, scale: 1.0, off: (0.0, 0.0), fade_ms: 0.0, move_ms: 0.0 };
+    pub const REST: Fx =
+        Fx { alpha: 1.0, scale: 1.0, off: (0.0, 0.0), fade_ms: 0.0, move_ms: 0.0, focus_fade: 1.0, focus_ms: 0.0 };
 
     pub fn at_rest(&self) -> bool {
-        self.alpha == 1.0 && self.scale == 1.0 && self.off == (0.0, 0.0)
+        self.alpha == 1.0 && self.scale == 1.0 && self.off == (0.0, 0.0) && self.focus_fade == 1.0
     }
 }
 
@@ -105,6 +110,8 @@ pub struct Ghost {
     pub fade_ms: f64,
     /// Ids for the dim, backdrop, border and shadow shader elements.
     pub deco_ids: [Id; 4],
+    /// The closed window's id, kept as the key for its blur textures (blur.rs).
+    pub key: u32,
 }
 
 impl Ghost {
@@ -196,6 +203,11 @@ pub struct Client {
     pub border_ids: [Id; 4],
     /// Ids for the dim, backdrop, border and shadow shader elements.
     pub deco_ids: [Id; 4],
+    /// The icon the client set over xdg-toplevel-icon-v1: a stock icon name, and/or pixel data
+    /// written to a PAM file under the cache dir (path here); `icon_hash` is what was written.
+    pub icon_name: Option<String>,
+    pub icon_path: Option<std::path::PathBuf>,
+    pub icon_hash: u64,
 }
 
 impl Client {
@@ -575,6 +587,14 @@ pub struct Uwc {
     pub commit_timer_armed: bool,
     /// Textures the background blur keeps between frames (blur.rs).
     pub blur: crate::blur::BlurCache,
+    /// ext-background-effect-v1: the surfaces that asked for blur behind them (background_effect.rs).
+    pub bg_effect: std::collections::HashMap<WlSurface, crate::background_effect::BgEffect>,
+    /// Texture keys for blur.rs beyond window ids (layer surfaces, ghosts).
+    pub next_blur_key: u32,
+    #[allow(dead_code)] // held so the global stays alive
+    pub alpha_modifier: smithay::wayland::alpha_modifier::AlphaModifierState,
+    #[allow(dead_code)] // held so the global stays alive
+    pub toplevel_icon: smithay::wayland::xdg_toplevel_icon::XdgToplevelIconManager,
     pub pace_idle: bool,
     /// Counts minimize calls, so the newest minimized window comes back first.
     pub minimize_stamp: u32,
@@ -634,6 +654,7 @@ impl Uwc {
 
         let ipc = Ipc::new(&loop_handle, &socket_name)?;
         crate::virtual_pointer::create_global(&dh);
+        Uwc::bg_effect_new(&dh);
         let primary_selection = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh);
         let extras = crate::extras::Extras::new(&dh, &primary_selection);
 
@@ -739,6 +760,10 @@ impl Uwc {
             present_clock: crate::presentation::PresentClock::new(),
             commit_timer_armed: false,
             blur: Default::default(),
+            bg_effect: Default::default(),
+            next_blur_key: 0x4000_0000,
+            alpha_modifier: smithay::wayland::alpha_modifier::AlphaModifierState::new::<Uwc>(&dh),
+            toplevel_icon: smithay::wayland::xdg_toplevel_icon::XdgToplevelIconManager::new::<Uwc>(&dh),
             pace_idle: false,
             fullscreen_bg_id: Id::new(),
             user_shaders: Default::default(),
@@ -1225,6 +1250,7 @@ impl Uwc {
             f.alpha += (1.0 - f.alpha) * kf;
             f.scale += (1.0 - f.scale) * kf;
             f.off = (f.off.0 - f.off.0 * km, f.off.1 - f.off.1 * km);
+            f.focus_fade += (1.0 - f.focus_fade) * k(f.focus_ms);
             if (1.0 - f.alpha) < 0.01 {
                 f.alpha = 1.0;
             }
@@ -1233,6 +1259,9 @@ impl Uwc {
             }
             if f.off.0.abs() < 0.25 && f.off.1.abs() < 0.25 {
                 f.off = (0.0, 0.0);
+            }
+            if (1.0 - f.focus_fade) < 0.01 {
+                f.focus_fade = 1.0;
             }
             if f.at_rest() {
                 *f = Fx::REST;
@@ -1397,6 +1426,15 @@ impl Uwc {
             }
         }
         self.focus = id;
+        // The focus look crossfades between the old and the new window over `focus-ms`.
+        if changed && self.config.focus_ms > 0.0 {
+            for c in &mut self.clients {
+                if Some(c.id) == old || Some(c.id) == id {
+                    c.fx.focus_fade = 0.0;
+                    c.fx.focus_ms = self.config.focus_ms;
+                }
+            }
+        }
         if let Some(i) = id.and_then(|id| self.client_index(id)).filter(|_| raise) {
             let c = self.clients.remove(i);
             self.clients.push(c);
@@ -2216,6 +2254,7 @@ mod tests {
             scale_fx,
             fade_ms: 160.0,
             deco_ids: std::array::from_fn(|_| Id::new()),
+            key: 0,
         }
     }
 

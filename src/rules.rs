@@ -49,6 +49,11 @@ pub struct Deco {
     pub inactive_dim: f64,
     /// Physical-ish px of canvas the background blur reaches; 0 = no blur (blur.rs).
     pub blur_radius: f64,
+    /// What the blur does to the light behind: brightness and saturation multipliers, and how
+    /// much noise to add (0-1). Defaults leave the backdrop as it is.
+    pub blur_brightness: f64,
+    pub blur_saturation: f64,
+    pub blur_noise: f64,
     pub border_gradient: Option<Gradient>,
     pub focus_gradient: Option<Gradient>,
     pub urgent_gradient: Option<Gradient>,
@@ -77,6 +82,9 @@ impl Default for Deco {
             inactive_opacity: 1.0,
             inactive_dim: 0.0,
             blur_radius: 0.0,
+            blur_brightness: 1.0,
+            blur_saturation: 1.0,
+            blur_noise: 0.0,
             border_gradient: None,
             focus_gradient: None,
             urgent_gradient: None,
