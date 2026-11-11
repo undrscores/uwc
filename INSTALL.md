@@ -10,8 +10,8 @@ session it opens as a window, which is for trying it out. Pick your distro:
 Afterwards: [first start](#first-start), [config and startup](#config-and-startup),
 [screen sharing](#screen-sharing), [troubleshooting](#troubleshooting).
 
-> **Status.** The real-hardware backend (`--backend udev`, what a session uses) has not been run on a GPU yet, and
-> neither has NVIDIA. Expect rough edges on the first run, and keep another way to log in (a second TTY, or your
+> **Status.** The real-hardware backend (`--backend udev`, what a session uses) has been run on NVIDIA hardware by its
+> author, but on little else. Expect rough edges on other setups, and keep another way to log in (a second TTY, or your
 > current session) until you have seen it work. "Troubleshooting" says what to send when it fails.
 
 ## NixOS

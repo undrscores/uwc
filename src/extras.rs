@@ -50,10 +50,14 @@ impl Extras {
             _cursor_shape: CursorShapeManagerState::new::<Uwc>(dh),
             _content_type: ContentTypeState::new::<Uwc>(dh),
             _single_pixel: SinglePixelBufferState::new::<Uwc>(dh),
-            _virtual_keyboard: VirtualKeyboardManagerState::new::<Uwc, _>(dh, |_| true),
+            _virtual_keyboard: VirtualKeyboardManagerState::new::<Uwc, _>(dh, |c| !crate::sandbox::is_sandboxed(c)),
             _system_bell: XdgSystemBellState::new::<Uwc>(dh),
-            wlr_data_control: wlr_data_control::DataControlState::new::<Uwc, _>(dh, Some(primary), |_| true),
-            ext_data_control: ext_data_control::DataControlState::new::<Uwc, _>(dh, Some(primary), |_| true),
+            wlr_data_control: wlr_data_control::DataControlState::new::<Uwc, _>(dh, Some(primary), |c| {
+                !crate::sandbox::is_sandboxed(c)
+            }),
+            ext_data_control: ext_data_control::DataControlState::new::<Uwc, _>(dh, Some(primary), |c| {
+                !crate::sandbox::is_sandboxed(c)
+            }),
             foreign: XdgForeignState::new::<Uwc>(dh),
             _dialog: XdgDialogState::new::<Uwc>(dh),
             inhibit: KeyboardShortcutsInhibitState::new::<Uwc>(dh),

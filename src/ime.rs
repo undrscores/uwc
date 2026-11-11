@@ -104,7 +104,13 @@ impl Uwc {
             let rect = Rectangle::<f64, Logical>::new(r.to_f64(), size.to_f64());
             if rect.contains(p) {
                 let surface = popup.wl_surface().clone();
-                return Some(Under::Layer { root: surface.clone(), surface, origin: r.to_f64(), interactive: false });
+                return Some(Under::Layer {
+                    root: surface.clone(),
+                    surface,
+                    origin: r.to_f64(),
+                    interactive: false,
+                    background: false,
+                });
             }
         }
         None

@@ -29,15 +29,20 @@ src/options.rs     every option once: name, field, range -> parsing, set, get
 src/kdl.rs         the KDL subset parser (a port of uwm's kdl.h)
 src/state.rs       Uwc state: windows, tags, viewport, focus, actions
 src/handlers.rs    wayland protocol handlers
-src/input.rs       keyboard/pointer/drag handling, backend-independent
+src/input.rs       keyboard/pointer/drag handling and touchpad gestures (`gestures { }` in the config), backend-independent
 src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
 src/protocol.rs    the IPC protocol, typed: Request (parsed from a line), the snapshot and events (serde)
 src/ipc.rs         control socket: connections, subscriptions, running requests
 src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
+src/layout.rs      tiling layouts as pure maths (area + count + gaps -> rects; unit-tested)
+src/tiling.rs      per-tag tiling: when windows are re-placed, floating, the `tile` actions
 src/rules.rs       window rules and the per-window decoration settings (`Deco`)
 shaders/           example user shaders (border, background)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
 src/toplevels.rs   wlr-foreign-toplevel-management (the window list for taskbars and shells)
+src/blur.rs        background blur: a pre-pass draws what is behind a window, dual Kawase filter, element under the window
+src/presentation.rs  frame pacing: presentation-time, fifo, commit-timing
+src/sandbox.rs     security-context: sandboxed clients and the globals hidden from them
 src/capture.rs     drawing into a client's buffer (offscreen render, read back into shm)
 src/export.rs      hyprland-toplevel-export-v1: window previews
 src/protocols.rs   protocols no crate has, generated from protocols/*.xml

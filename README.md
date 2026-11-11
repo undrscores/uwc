@@ -8,8 +8,8 @@ config file, not in code.
 It is the Rust rewrite of [uwm](https://github.com/undrscores/uwm) (C, wlroots), with the same ideas, config syntax and
 IPC, improved where uwm was awkward.
 
-> **Early software.** Everything is tested against headless and nested runs, but the real-hardware backend (DRM/KMS,
-> libinput, VT switching) **has not been run on a GPU yet**, and neither has NVIDIA. Keep another way to log in.
+> **Early software.** Tested with headless and nested runs and on real NVIDIA hardware by its author, not yet widely.
+> Dmabuf screen capture (`capture-dmabuf`, off by default) and tablet pressure are untried; keep another way to log in.
 > See [docs/STATUS.md](docs/STATUS.md).
 
 ## Features
@@ -19,21 +19,24 @@ IPC, improved where uwm was awkward.
 - **Tags, not just workspaces.** Nine tags, each with its own canvas, viewport and zoom; view, toggle and send windows
   to any combination.
 - **Snaps.** Dragged windows snap to the edges and centres of their neighbours, with guide lines.
-- **Frames.** Label a region of the canvas (`Mod+B`), drag it by its title strip and its windows go with it, and
-  jump the view from frame to frame with `Mod+]` and `Mod+[`: lay a canvas out into places.
 - **Find any window.** `Mod+/` labels every window and jumps to the one you type; `uwc msg jump firefox` fuzzy-finds by
   app-id and title on any tag, and `examples/uwc-jump` does it from a launcher.
 - **Everything floats.** Windows can also have their own scale on the canvas, be pinned to the screen, minimized to a
-  scratchpad, or go fullscreen.
-- **Rice it.** (A tag can have its own wallpaper shader and colour.) Rounded corners, gradient borders, shadows, focus glow, opacity and dimming, animations (open, close,
+  scratchpad, or go fullscreen. Tiling is opt-in per tag (master-stack, dwindle, spiral, columns), or a one-off
+  "tidy up".
+- **Rice it.** (A tag can have its own wallpaper shader and colour.) Rounded corners, gradient borders, shadows, focus glow, background blur, opacity and dimming, animations (open, close,
   move, tag switch, eased pan and zoom, touchpad momentum), and your own GLSL for borders and the background.
   Window rules, `include`, `vars` and live reload. No client-side decorations and no built-in bar: bring your own.
-- **Input.** Keyboard, mouse (Mod+drag move, resize and pan), touchpad gestures, touchscreens, tablets, XKB layouts and
-  libinput settings; pointer constraints for games; input methods (fcitx5 and friends).
+- **Input.** Keyboard, mouse (Mod+drag move, resize and pan), touchpad gestures (configurable in `gestures { }`:
+  3-finger swipe pans with momentum, 4-finger swipe focuses a neighbour, 2-finger pinch zooms; the rest go to the app),
+  touchscreens, tablets, XKB layouts and libinput settings; pointer constraints for games; input methods (fcitx5 and friends).
 - **Multiple monitors** on one shared canvas, with a view per monitor and output management (wdisplays, kanshi).
 - **Plays well with the rest of the desktop.** layer-shell bars and launchers, foreign-toplevel and ext-workspace for
   taskbars, Quickshell window previews, screen capture and portal screen sharing, session lock, idle notify and
   inhibit, clipboard managers, virtual keyboard and pointer, Xwayland.
+- **ushell.** The Quickshell desktop shell made for uwc (bar, launcher, notifications, lock, display settings, canvas
+  map): it reads uwc's IPC, follows its views and tiling, drives its display commands (`mode`, `scale`, `dpms`) and
+  paints uwc's window colours from its own theme. Start it from `examples/startup-ushell`.
 - **Hot corners.** Any action when the pointer rests in a screen corner or edge.
 - **Scriptable.** `hooks { }` runs a command on window open, close, focus, tag change or urgency. A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
   move and focus windows, pan and zoom.
@@ -67,7 +70,6 @@ session: uwc opens as a window.
 | `Mod+Alt+H/J/K/L` | pan the view |
 | `Mod+O` | overview: fit every window on the screen |
 | `Mod+/` | jump: label every window, type a label to go there |
-| `Mod+B`, `Mod+Shift+B` | frame around the focused window, remove it; `Mod+]` / `Mod+[` fit the next / previous frame |
 | `Mod+minus`, `Mod+equal`, `Mod+Shift+0` | zoom out, zoom in, reset zoom |
 | `Mod+1..9` | view tag; `Mod+Shift+1..9` send the window to a tag; `Mod+Ctrl+1..9` toggle a tag |
 | `Mod+E`, `Mod+Shift+Space` | fullscreen, pin to the screen |

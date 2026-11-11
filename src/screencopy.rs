@@ -73,9 +73,13 @@ impl Uwc {
         let scale = self.output_scale_of(mon);
         // The root color is the real output's clear color, not an element: the picture needs it too.
         let clear = self.tag_look().0;
+        let offer = self.dmabuf_offer().cloned();
         let res = self.with_renderer(|state, r| {
             let elements = state.scene_elements(r, mon, cursor);
-            capture::render_region_to_shm(r, &elements, size, region, scale, clear, buffer)
+            match capture::check_dmabuf(buffer, region.size, offer.as_ref())? {
+                Some(dmabuf) => capture::render_region_to_dmabuf(r, &elements, region, scale, clear, dmabuf),
+                None => capture::render_region_to_shm(r, &elements, size, region, scale, clear, buffer),
+            }
         });
         res.unwrap_or_else(|| Err("this backend cannot render (headless)".into()))
     }
@@ -122,6 +126,10 @@ impl Uwc {
 }
 
 impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for Uwc {
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::sandbox::is_sandboxed(&client)
+    }
+
     fn bind(
         _: &mut Uwc,
         _: &DisplayHandle,
@@ -181,6 +189,12 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Uwc {
         let (w, h) = (region.size.w as u32, region.size.h as u32);
         frame.buffer(capture::FORMAT, w, h, w * 4);
         if frame.version() >= 3 {
+            // The formats a dmabuf may have; the device is the one linux-dmabuf's feedback names.
+            if let Some(offer) = state.dmabuf_offer() {
+                for (code, _) in &offer.formats {
+                    frame.linux_dmabuf(*code as u32, w, h);
+                }
+            }
             frame.buffer_done();
         }
     }
@@ -208,7 +222,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for Uwc {
         }
         *used = true;
         drop(used);
-        if let Err(e) = capture::check_buffer(&buffer, data.region.size) {
+        if let Err(e) = capture::check_output_buffer(&buffer, data.region.size, state.dmabuf_offer()) {
             frame.post_error(zwlr_screencopy_frame_v1::Error::InvalidBuffer, e);
             return;
         }

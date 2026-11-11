@@ -3,6 +3,8 @@
 
 mod activation;
 mod backend;
+mod background_effect;
+mod blur;
 mod canvas;
 mod capture;
 mod config;
@@ -13,24 +15,27 @@ mod doctor;
 mod export;
 mod ext_capture;
 mod extras;
-mod frames;
 mod handlers;
 mod hints;
 mod hooks;
 mod hotzones;
+mod icon;
 mod idle;
 mod ime;
 mod input;
 mod ipc;
 mod kdl;
 mod layer;
+mod layout;
 mod options;
 mod output_management;
 mod output_power;
+mod presentation;
 mod protocol;
 mod protocols;
 mod render;
 mod rules;
+mod sandbox;
 mod scale;
 mod screencopy;
 mod session;
@@ -38,6 +43,7 @@ mod sessionlock;
 mod snap;
 mod state;
 mod sync;
+mod tiling;
 mod toplevels;
 mod touch;
 mod virtual_pointer;
@@ -265,10 +271,12 @@ fn set_panic_hook() {
 
 /// Run the event loop, and survive a bug: a panic in an IPC, input, timer or drawing callback is logged,
 /// the transient state (drags, gestures, hint mode) is dropped and the loop carries on, so one bad
-/// request does not take every window with it. (A panic inside a Wayland protocol handler cannot be
-/// caught here: libwayland calls those through C, and unwinding through C aborts. The session file,
-/// saved every few seconds, is what survives that.) Three panics within ten seconds, or a backend left taken (a panic
-/// while drawing), mean the state cannot be trusted: the session is saved and uwc exits.
+/// request does not take every window with it. That includes a panic inside a Wayland protocol handler:
+/// uwc uses wayland-backend's pure Rust server (smithay without `use_system_lib`), which dispatches handlers in
+/// plain Rust, so the panic unwinds out of `dispatch_clients` to here. The client whose request it was may be
+/// left with a half-made object; it is not known which, so it is left to notice or be closed by the user.
+/// Three panics within ten seconds, or a backend left taken (a panic while drawing), mean the state cannot be
+/// trusted: the session is saved and uwc exits.
 fn serve(event_loop: &mut EventLoop<Uwc>, state: &mut Uwc) -> Result<()> {
     let mut recent: Vec<std::time::Instant> = Vec::new();
     loop {

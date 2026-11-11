@@ -5,7 +5,7 @@
 //!     match app-id="org.gnome.*"           // several `match` lines are alternatives
 //!     match title="*YouTube*" focused=true // the properties of one match must all hold
 //!     exclude app-id="org.gnome.Nautilus"  // a matching `exclude` takes the window back out
-//!     open { tag 3; size 900 600; position 3000 0; pinned; fullscreen; minimized; focus false }
+//!     open { tag 3; size 900 600; position 3000 0; pinned; fullscreen; minimized; float; focus false }
 //!     opacity 0.9                          // any decoration option, for these windows
 //!     focus-gradient "#00aaff" "#aa00ff" angle=45
 //! }
@@ -47,6 +47,13 @@ pub struct Deco {
     pub opacity: f64,
     pub inactive_opacity: f64,
     pub inactive_dim: f64,
+    /// Physical-ish px of canvas the background blur reaches; 0 = no blur (blur.rs).
+    pub blur_radius: f64,
+    /// What the blur does to the light behind: brightness and saturation multipliers, and how
+    /// much noise to add (0-1). Defaults leave the backdrop as it is.
+    pub blur_brightness: f64,
+    pub blur_saturation: f64,
+    pub blur_noise: f64,
     pub border_gradient: Option<Gradient>,
     pub focus_gradient: Option<Gradient>,
     pub urgent_gradient: Option<Gradient>,
@@ -74,6 +81,10 @@ impl Default for Deco {
             opacity: 1.0,
             inactive_opacity: 1.0,
             inactive_dim: 0.0,
+            blur_radius: 0.0,
+            blur_brightness: 1.0,
+            blur_saturation: 1.0,
+            blur_noise: 0.0,
             border_gradient: None,
             focus_gradient: None,
             urgent_gradient: None,
@@ -217,6 +228,8 @@ pub struct Open {
     pub pinned: bool,
     pub fullscreen: bool,
     pub minimized: bool,
+    /// Keep it out of the tiling layouts (tiling.rs).
+    pub float: bool,
     /// `focus false`: open without taking the keyboard.
     pub focus: Option<bool>,
     /// The window's own scale on the canvas.
@@ -235,6 +248,7 @@ impl Open {
         self.pinned |= o.pinned;
         self.fullscreen |= o.fullscreen;
         self.minimized |= o.minimized;
+        self.float |= o.float;
         self.focus = o.focus.or(self.focus);
         self.scale = o.scale.or(self.scale);
         self.pin_mon = o.pin_mon;
@@ -279,13 +293,14 @@ impl Open {
                 "pinned" => o.pinned = flag()?,
                 "fullscreen" => o.fullscreen = flag()?,
                 "minimized" => o.minimized = flag()?,
+                "float" => o.float = flag()?,
                 "focus" => o.focus = Some(flag()?),
                 "scale" => {
                     let [s] = nums()?[..] else { bail!("scale needs one number") };
                     o.scale = Some(range(s, 0.1, 4.0)?);
                 }
                 other => {
-                    bail!("unknown open setting `{other}` (tag, size, position, pinned, fullscreen, minimized, focus, scale)")
+                    bail!("unknown open setting `{other}` (tag, size, position, pinned, fullscreen, minimized, float, focus, scale)")
                 }
             }
         }

@@ -88,13 +88,17 @@ pub enum Action {
     JumpHints,
     /// Switch to the next keyboard layout.
     NextLayout,
-    /// A frame around the focused window / remove the focused window's frame / fit the view to it
-    /// / fit the next or previous frame (frames.rs).
-    FrameNew,
-    FrameRemove,
-    FrameFit,
-    FrameNext,
-    FramePrevious,
+    /// Tile the tag in use with a layout (and keep it tiled), tile it once, stop tiling it, or step to
+    /// the next layout (tiling.rs).
+    Tile(crate::layout::Layout),
+    TileOnce(crate::layout::Layout),
+    TileOff,
+    TileCycle,
+    /// Change the share the master column / first split takes, or the number of masters, by this much.
+    TileRatio(f64),
+    TileMasters(i32),
+    /// Keep the focused window out of the layouts, or put it back.
+    ToggleFloat,
     /// A key typed while hint mode is up; never in a config.
     Hint(crate::hints::HintKey),
     ToggleFullscreen,
@@ -150,6 +154,67 @@ pub struct MouseBind {
     pub mods: Mods,
     pub button: u32,
     pub action: Action,
+}
+
+/// `swipe` or `pinch` in a `gestures { }` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureKind {
+    Swipe,
+    Pinch,
+}
+
+/// What one touchpad gesture does, from `gestures { swipe 3 { pan; } ... }`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GestureBind {
+    /// Send the gesture to the client under the pointer (zwp-pointer-gestures-v1, e.g. a browser's pinch).
+    Client,
+    /// Pan the view with the fingers while they move; release while moving and it coasts on.
+    Pan,
+    /// Zoom the view with the pinch while it runs.
+    Zoom,
+    /// libinput reports a swipe as a pinch on some trackpads (the Magic Trackpad does): handle the
+    /// pinch per the `swipe N` binds for its finger count.
+    AsSwipe,
+    /// Run this action when the fingers lift.
+    Act(Action),
+}
+
+/// One `gestures { }` line: `swipe 4 left { focus-direction left; }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GestureEntry {
+    pub kind: GestureKind,
+    pub fingers: u32,
+    pub dir: Option<Dir>,
+    pub bind: GestureBind,
+}
+
+/// The gesture defaults (uwm's): a 3-finger swipe pans the view, a 4-finger swipe focuses the
+/// neighbouring window in the swipe's direction, a 2-finger pinch zooms. A pinch reported with a
+/// finger count that has swipe binds is treated as that swipe (see GestureBind::AsSwipe's note).
+pub fn default_gestures() -> Vec<GestureEntry> {
+    let mut v = vec![GestureEntry { kind: GestureKind::Swipe, fingers: 3, dir: None, bind: GestureBind::Pan }];
+    // The canvas follows the fingers, so a swipe left acts on what was to the right (uwm's rule).
+    for (d, opposite) in [(Dir::Left, Dir::Right), (Dir::Right, Dir::Left), (Dir::Up, Dir::Down), (Dir::Down, Dir::Up)]
+    {
+        v.push(GestureEntry {
+            kind: GestureKind::Swipe,
+            fingers: 4,
+            dir: Some(d),
+            bind: GestureBind::Act(Action::FocusDirection(opposite)),
+        });
+    }
+    v.push(GestureEntry { kind: GestureKind::Pinch, fingers: 2, dir: None, bind: GestureBind::Zoom });
+    v
+}
+
+/// The direction a swipe of `(dx, dy)` mostly went, if it travelled at least `threshold` that way.
+pub fn swipe_direction(dx: f64, dy: f64, threshold: f64) -> Option<Dir> {
+    let (along, dir) = if dx.abs() >= dy.abs() {
+        (dx.abs(), if dx < 0.0 { Dir::Left } else { Dir::Right })
+    } else {
+        (dy.abs(), if dy < 0.0 { Dir::Up } else { Dir::Down })
+    };
+    (along >= threshold).then_some(dir)
 }
 
 /// `input { keyboard { ... } }`. Empty strings mean "from XKB_DEFAULT_*".
@@ -252,15 +317,19 @@ pub struct Config {
     /// How long eased view moves (pan keys, centre, fit, bookmarks, home) take; 0 = jump.
     pub view_ms: f64,
     pub pan_momentum_ms: f64,
+    /// Screen px the view moves per unit of swipe-pan finger travel (the canvas follows the fingers).
+    pub swipe_gain: f64,
+    /// Finger travel (same units as the swipe deltas) before a directional swipe counts as that direction.
+    pub swipe_threshold: f64,
     pub edge_pan_size: f64,
     pub hint_keys: String,
-    pub frame_color: Color,
+    pub tile_gap: i32,
+    pub tile_inner_gap: i32,
+    pub tile_ratio: f64,
+    pub tile_masters: u32,
     pub snap_distance: f64,
     pub snap_grid: f64,
     pub snap_color: Color,
-    pub frame_opacity: f64,
-    pub frame_label_scale: f64,
-    pub frame_border_width: f64,
     pub hint_scale: f64,
     pub edge_pan_speed: f64,
     /// A new window fades in and grows from `open_scale` over this long (0 = appears at once).
@@ -272,6 +341,8 @@ pub struct Config {
     pub tag_ms: f64,
     /// A closing window fades out (towards `open_scale`) over this long; 0 = vanishes at once.
     pub close_ms: f64,
+    /// The focus look (border, shadow, dim) crossfades between windows over this long; 0 = jumps.
+    pub focus_ms: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
     /// Zoom is told to clients only after it stayed put this long.
@@ -289,6 +360,8 @@ pub struct Config {
     pub direct_scanout: bool,
     /// Real session only: offer linux-drm-syncobj-v1 when the GPU supports it.
     pub explicit_sync: bool,
+    /// Real session only: offer dmabuf buffers to output capture clients (wlr-screencopy, ext-image-copy-capture).
+    pub capture_dmabuf: bool,
     /// A GLSL file drawing the background behind everything ("" = root-color).
     pub background_shader: String,
     /// Remember the canvas (views, window layouts) across restarts.
@@ -299,6 +372,8 @@ pub struct Config {
     pub dir: PathBuf,
     pub keys: Vec<KeyBind>,
     pub mouse: Vec<MouseBind>,
+    /// `gestures { }` entries; starts as the defaults and file entries replace per key.
+    pub gestures: Vec<GestureEntry>,
     pub hooks: crate::hooks::Hooks,
     /// `hot-zones { top-left { action; } ... }`.
     pub hot_zones: Vec<(crate::hotzones::Zone, Action)>,
@@ -392,15 +467,17 @@ impl Config {
             pan_step: 200.0,
             view_ms: 180.0,
             pan_momentum_ms: 600.0,
+            swipe_gain: 2.0,
+            swipe_threshold: 60.0,
             edge_pan_size: 12.0,
             hint_keys: "asdfghjkl".into(),
-            frame_color: [0.478, 0.635, 0.969, 1.0],
+            tile_gap: 12,
+            tile_inner_gap: 12,
+            tile_ratio: 0.55,
+            tile_masters: 1,
             snap_distance: 8.0,
             snap_grid: 0.0,
             snap_color: [1.0, 0.416, 0.757, 1.0],
-            frame_opacity: 0.08,
-            frame_label_scale: 2.0,
-            frame_border_width: 2.0,
             hint_scale: 3.0,
             edge_pan_speed: 900.0,
             open_ms: 160.0,
@@ -408,6 +485,7 @@ impl Config {
             move_ms: 140.0,
             tag_ms: 140.0,
             close_ms: 160.0,
+            focus_ms: 0.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
             zoom_settle_ms: 200.0,
@@ -419,12 +497,14 @@ impl Config {
             hardware_cursor: true,
             direct_scanout: true,
             explicit_sync: true,
+            capture_dmabuf: false,
             background_shader: String::new(),
             session_restore: true,
             xwayland: true,
             dir: path.and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default(),
             keys: Vec::new(),
             mouse: Vec::new(),
+            gestures: default_gestures(),
             hooks: Default::default(),
             hot_zones: Vec::new(),
             hot_zone_size: 2.0,
@@ -442,6 +522,8 @@ impl Config {
         for n in &nodes {
             match n.name.as_str() {
                 "vars" | "include" | "binds" => {}
+                // uwm's `grid`, accepted at the top level too, ignored (see set_option).
+                "grid" => {}
                 "hot-zones" => {
                     for z in &n.kids {
                         let zone = crate::hotzones::Zone::parse(&z.name).ok_or_else(|| {
@@ -462,6 +544,11 @@ impl Config {
                 }
                 "hooks" => {
                     cfg.hooks = crate::hooks::Hooks::parse(n).with_context(|| format!("hooks (line {})", n.line))?
+                }
+                "gestures" => {
+                    for g in &n.kids {
+                        cfg.add_gesture(g).with_context(|| format!("gesture `{}` (line {})", g.name, g.line))?;
+                    }
                 }
                 "rule" => {
                     let r = crate::rules::Rule::parse(n, &vars).with_context(|| format!("rule (line {})", n.line))?;
@@ -519,6 +606,12 @@ impl Config {
         if set(DECO, &mut self.deco, n, vars)? || set(GLOBAL, self, n, vars)? {
             return Ok(());
         }
+        // uwm's `grid` (a grid drawn on the canvas): accepted so uwm themes load as a whole; uwc
+        // draws the canvas grid with a background-shader (see shaders/) and snaps with snap-grid.
+        if n.name == "grid" {
+            tracing::debug!("ignoring uwm's `grid` option (line {}); use background-shader / snap-grid", n.line);
+            return Ok(());
+        }
         bail!("unknown option `{}`", n.name)
     }
 
@@ -555,6 +648,139 @@ impl Config {
             self.keys.push(KeyBind { mods, sym: lower(sym), action });
         }
         Ok(())
+    }
+
+    /// One `gestures { }` line: `swipe 4 left { focus-direction left; }`, `pinch 2 { zoom; }`, ...
+    fn add_gesture(&mut self, n: &Node) -> Result<()> {
+        let kind = match n.name.as_str() {
+            "swipe" => GestureKind::Swipe,
+            "pinch" => GestureKind::Pinch,
+            other => bail!("unknown gesture `{other}`; known: swipe, pinch"),
+        };
+        let fingers = n
+            .args
+            .first()
+            .and_then(Val::as_num)
+            .filter(|f| f.fract() == 0.0 && (1.0..=10.0).contains(f))
+            .ok_or_else(|| anyhow!("`{}` needs a finger count from 1 to 10", n.name))? as u32;
+        let dir = match n.args.get(1).and_then(Val::as_str) {
+            None => None,
+            Some("left") => Some(Dir::Left),
+            Some("right") => Some(Dir::Right),
+            Some("up") => Some(Dir::Up),
+            Some("down") => Some(Dir::Down),
+            Some(other) => bail!("unknown direction `{other}`; known: left, right, up, down"),
+        };
+        if kind == GestureKind::Pinch && dir.is_some() {
+            bail!("a pinch has no direction");
+        }
+        if n.args.len() > 2 {
+            bail!("`{} {fingers}` takes at most a direction, nothing more", n.name);
+        }
+        if n.kids.len() > 1 {
+            bail!("`{} {fingers}` takes one handler, not {}", n.name, n.kids.len());
+        }
+        let act = n.kids.first().ok_or_else(|| anyhow!("`{} {fingers}` needs a handler in braces", n.name))?;
+        if !act.kids.is_empty() {
+            bail!("the handler of `{} {fingers}` takes no block", n.name);
+        }
+        let bind = match act.name.as_str() {
+            "client" => GestureBind::Client,
+            "pan" => {
+                if kind == GestureKind::Pinch || dir.is_some() {
+                    bail!("`pan` is a whole-swipe handler, not a pinch or direction one");
+                }
+                GestureBind::Pan
+            }
+            "zoom" => {
+                if kind == GestureKind::Swipe || dir.is_some() {
+                    bail!("`zoom` is a whole-pinch handler, not a swipe or direction one");
+                }
+                GestureBind::Zoom
+            }
+            "swipe" => {
+                if kind == GestureKind::Swipe {
+                    bail!("a swipe is already a swipe");
+                }
+                GestureBind::AsSwipe
+            }
+            _ => {
+                // In a directional entry, `focus-direction` with no argument takes the entry's direction.
+                let node = if act.name == "focus-direction" && act.args.is_empty() {
+                    match dir {
+                        Some(d) => Node {
+                            args: vec![Val::Str(
+                                match d {
+                                    Dir::Left => "left",
+                                    Dir::Right => "right",
+                                    Dir::Up => "up",
+                                    Dir::Down => "down",
+                                }
+                                .to_string(),
+                            )],
+                            ..act.clone()
+                        },
+                        None => act.clone(),
+                    }
+                } else {
+                    act.clone()
+                };
+                GestureBind::Act(parse_action(&node)?)
+            }
+        };
+        // A direction-less entry replaces every entry for the same kind and finger count, so
+        // `swipe 4 { client; }` turns off all four 4-finger directions at once.
+        match dir {
+            Some(d) => self.gestures.retain(|g| !(g.kind == kind && g.fingers == fingers && g.dir == Some(d))),
+            None => self.gestures.retain(|g| !(g.kind == kind && g.fingers == fingers)),
+        }
+        self.gestures.push(GestureEntry { kind, fingers, dir, bind });
+        Ok(())
+    }
+
+    /// The plan for a swipe with `fingers` fingers; `None` = forward it to the client under the pointer.
+    pub fn swipe_plan(&self, fingers: u32) -> Option<crate::state::Gesture> {
+        let dirs: Vec<(Dir, Action)> = self
+            .gestures
+            .iter()
+            .filter(|g| g.kind == GestureKind::Swipe && g.fingers == fingers && g.dir.is_some())
+            .filter_map(|g| match &g.bind {
+                GestureBind::Act(a) => g.dir.map(|d| (d, a.clone())),
+                _ => None,
+            })
+            .collect();
+        if !dirs.is_empty() {
+            return Some(crate::state::Gesture::Dir { dirs, dx: 0.0, dy: 0.0 });
+        }
+        match self
+            .gestures
+            .iter()
+            .find(|g| g.kind == GestureKind::Swipe && g.fingers == fingers && g.dir.is_none())
+            .map(|g| &g.bind)
+        {
+            Some(GestureBind::Pan) => Some(crate::state::Gesture::Pan),
+            Some(GestureBind::Act(a)) => Some(crate::state::Gesture::End(a.clone())),
+            _ => None,
+        }
+    }
+
+    /// The plan for a pinch with `fingers` fingers; `None` = forward it to the client. With no
+    /// `pinch N` entry a pinch falls back to the `swipe N` plan: libinput reports 3/4-finger swipes
+    /// as pinches on some trackpads (the Magic Trackpad does).
+    pub fn pinch_plan(&self, fingers: u32) -> Option<crate::state::Gesture> {
+        match self
+            .gestures
+            .iter()
+            .find(|g| g.kind == GestureKind::Pinch && g.fingers == fingers && g.dir.is_none())
+            .map(|g| &g.bind)
+        {
+            Some(GestureBind::AsSwipe) => self.swipe_plan(fingers),
+            Some(GestureBind::Zoom) => Some(crate::state::Gesture::Zoom { last: 1.0 }),
+            Some(GestureBind::Act(a)) => Some(crate::state::Gesture::End(a.clone())),
+            // Client; Pan is rejected at parse time for a pinch but means the same here.
+            Some(GestureBind::Client | GestureBind::Pan) => None,
+            None => self.swipe_plan(fingers),
+        }
     }
 }
 
@@ -852,11 +1078,28 @@ fn parse_action(n: &Node) -> Result<Action> {
         "toggle-shortcuts-inhibit" => Action::ToggleShortcutsInhibit,
         "jump-hints" => Action::JumpHints,
         "next-layout" => Action::NextLayout,
-        "frame-new" => Action::FrameNew,
-        "frame-remove" => Action::FrameRemove,
-        "frame-fit" => Action::FrameFit,
-        "frame-next" => Action::FrameNext,
-        "frame-previous" => Action::FramePrevious,
+        "tile" | "tile-once" => {
+            let name = args.first().and_then(Val::as_str).unwrap_or("");
+            let l = crate::layout::Layout::parse(name)
+                .ok_or_else(|| anyhow!("{} needs a layout: {}", n.name, crate::layout::Layout::names()))?;
+            if n.name == "tile" {
+                Action::Tile(l)
+            } else {
+                Action::TileOnce(l)
+            }
+        }
+        "tile-off" => Action::TileOff,
+        "tile-cycle" => Action::TileCycle,
+        "tile-ratio" => {
+            let d =
+                args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("tile-ratio needs a change, e.g. 0.05"))?;
+            Action::TileRatio(range(d, -0.8, 0.8)?)
+        }
+        "tile-masters" => {
+            let d = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("tile-masters needs a change, e.g. 1"))?;
+            Action::TileMasters(range(d.round(), -16.0, 16.0)? as i32)
+        }
+        "toggle-float" => Action::ToggleFloat,
         "toggle-fullscreen" => Action::ToggleFullscreen,
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,
@@ -900,6 +1143,91 @@ mod tests {
     }
 
     #[test]
+    fn gesture_defaults_match_uwm() {
+        let c = Config::default();
+        // A 3-finger swipe pans, a 4-finger swipe focuses the neighbour that way, a 2-finger pinch zooms.
+        assert_eq!(c.swipe_plan(3), Some(crate::state::Gesture::Pan));
+        assert_eq!(
+            c.swipe_plan(4),
+            Some(crate::state::Gesture::Dir {
+                // the canvas follows the fingers: a swipe left focuses what was to the right
+                dirs: vec![
+                    (Dir::Left, Action::FocusDirection(Dir::Right)),
+                    (Dir::Right, Action::FocusDirection(Dir::Left)),
+                    (Dir::Up, Action::FocusDirection(Dir::Down)),
+                    (Dir::Down, Action::FocusDirection(Dir::Up)),
+                ],
+                dx: 0.0,
+                dy: 0.0,
+            })
+        );
+        assert_eq!(c.pinch_plan(2), Some(crate::state::Gesture::Zoom { last: 1.0 }));
+        // libinput reports a 3/4-finger swipe as a pinch on some trackpads (the Magic Trackpad):
+        // with no `pinch N` entry the pinch falls back to the swipe plan.
+        assert_eq!(c.pinch_plan(3), Some(crate::state::Gesture::Pan));
+        assert!(matches!(c.pinch_plan(4), Some(crate::state::Gesture::Dir { .. })));
+        // Unbound finger counts go to the client.
+        assert_eq!(c.swipe_plan(2), None);
+        assert_eq!(c.pinch_plan(5), None);
+    }
+
+    #[test]
+    fn gestures_section_parses_and_replaces() {
+        let c = Config::parse(
+            "gestures {\n  swipe 3 { client; }\n  swipe 4 left { toggle-overview; }\n  swipe 4 up { focus-direction; }\n  pinch 2 { client; }\n  pinch 3 { zoom; }\n}",
+            None,
+        )
+        .unwrap();
+        // `swipe 3 { client; }` replaced the default pan; `pinch 3 { zoom; }` now wins over the fallback.
+        assert_eq!(c.swipe_plan(3), None);
+        assert_eq!(c.pinch_plan(3), Some(crate::state::Gesture::Zoom { last: 1.0 }));
+        // A directional entry replaces only that direction; `focus-direction` with no argument
+        // takes the entry's direction.
+        assert_eq!(
+            c.swipe_plan(4),
+            Some(crate::state::Gesture::Dir {
+                dirs: vec![
+                    (Dir::Right, Action::FocusDirection(Dir::Left)),
+                    (Dir::Down, Action::FocusDirection(Dir::Up)),
+                    (Dir::Left, Action::ToggleOverview),
+                    (Dir::Up, Action::FocusDirection(Dir::Up)),
+                ],
+                dx: 0.0,
+                dy: 0.0,
+            })
+        );
+        assert_eq!(c.pinch_plan(2), None, "pinch 2 client forwards two-finger pinches to the app");
+        // A direction-less entry replaces every entry for that kind and finger count.
+        let c = Config::parse("gestures { swipe 4 { client; } }", None).unwrap();
+        assert_eq!(c.swipe_plan(4), None, "swipe 4 client turns off all four 4-finger directions");
+        // Bad entries are errors, not panics.
+        assert!(Config::parse("gestures { swipe { pan; } }", None).is_err());
+        assert!(Config::parse("gestures { swipe 0 { pan; } }", None).is_err());
+        assert!(Config::parse("gestures { swipe 3 sideways { pan; } }", None).is_err());
+        assert!(Config::parse("gestures { pinch 3 left { zoom; } }", None).is_err());
+        assert!(Config::parse("gestures { swipe 3 { zoom; } }", None).is_err());
+        assert!(Config::parse("gestures { pinch 2 { pan; } }", None).is_err());
+        assert!(Config::parse("gestures { tap 3 { pan; } }", None).is_err());
+        // Extra arguments or handlers are errors, not silently ignored.
+        assert!(Config::parse("gestures { swipe 3 left extra { pan; } }", None).is_err());
+        assert!(Config::parse("gestures { swipe 3 { pan; zoom; } }", None).is_err());
+        assert!(Config::parse("gestures { swipe 3 { pan { deep; } } }", None).is_err());
+    }
+
+    #[test]
+    fn swipe_direction_needs_the_threshold() {
+        assert_eq!(swipe_direction(-100.0, 10.0, 60.0), Some(Dir::Left));
+        assert_eq!(swipe_direction(100.0, -10.0, 60.0), Some(Dir::Right));
+        assert_eq!(swipe_direction(5.0, -80.0, 60.0), Some(Dir::Up));
+        assert_eq!(swipe_direction(5.0, 80.0, 60.0), Some(Dir::Down));
+        assert_eq!(swipe_direction(-59.9, 0.0, 60.0), None, "not far enough: the swipe bounces back");
+        assert_eq!(swipe_direction(0.0, 0.0, 60.0), None);
+        // Diagonal: the dominant axis wins.
+        assert_eq!(swipe_direction(-70.0, 69.0, 60.0), Some(Dir::Left));
+        assert_eq!(swipe_direction(10.0, 100.0, 60.0), Some(Dir::Down));
+    }
+
+    #[test]
     fn options_and_vars() {
         let c = Config::parse(
             "vars { accent \"#ff8800\" }\noptions { focus-color \"$accent\"\n sloppy-focus false\n border-width 3 }",
@@ -926,6 +1254,12 @@ mod tests {
             "hooks",
             "input",
             "keyboard",
+            "gestures",
+            "swipe",
+            "pinch",
+            "left",
+            "pan",
+            "client",
             "monitor",
             "include",
             "vars",
@@ -1025,6 +1359,19 @@ mod tests {
         for bad in ["tag 0 { }", "tag 10 { }", "tag { }", "tag 1 { sparkle \"x\" }", "tag 1 { root-color \"red\" }"] {
             assert!(Config::parse(bad, p).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn uwm_grid_is_accepted_and_ignored() {
+        let p = Some(Path::new("/x/c.kdl"));
+        // In the options block and at the top level, with uwm's arguments: a theme that sets it
+        // loads as a whole instead of being rejected.
+        let c = Config::parse("options { grid 32 \"#1a1b26\"; border-width 2 }", p).unwrap();
+        assert_eq!(c.deco.border_width, 2);
+        let c = Config::parse("grid 32 \"#1a1b26\"\noptions { corner-radius 3 }", p).unwrap();
+        assert_eq!(c.deco.corner_radius, 3.0);
+        // A made-up option is still rejected.
+        assert!(Config::parse("options { sparkle 1 }", p).is_err());
     }
 
     #[test]

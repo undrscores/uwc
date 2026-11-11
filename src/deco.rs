@@ -273,11 +273,109 @@ void main() {
 }
 "#;
 
+/// The two passes of the dual Kawase blur (blur.rs): taps around each pixel, at `u_halfpixel * u_offset`.
+const BLUR_HEAD: &str = r#"
+//_DEFINES
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec2 u_halfpixel;
+uniform float u_offset;
+"#;
+
+const BLUR_DOWN: &str = r#"
+void main() {
+    vec2 hp = u_halfpixel * u_offset;
+    vec4 sum = texture2D(tex, v_coords) * 4.0;
+    sum += texture2D(tex, v_coords - hp);
+    sum += texture2D(tex, v_coords + hp);
+    sum += texture2D(tex, v_coords + vec2(hp.x, -hp.y));
+    sum += texture2D(tex, v_coords - vec2(hp.x, -hp.y));
+    gl_FragColor = sum / 8.0 * alpha;
+}
+"#;
+
+const BLUR_UP: &str = r#"
+void main() {
+    vec2 hp = u_halfpixel * u_offset;
+    vec4 sum = texture2D(tex, v_coords + vec2(-hp.x * 2.0, 0.0));
+    sum += texture2D(tex, v_coords + vec2(-hp.x, hp.y)) * 2.0;
+    sum += texture2D(tex, v_coords + vec2(0.0, hp.y * 2.0));
+    sum += texture2D(tex, v_coords + vec2(hp.x, hp.y)) * 2.0;
+    sum += texture2D(tex, v_coords + vec2(hp.x * 2.0, 0.0));
+    sum += texture2D(tex, v_coords + vec2(hp.x, -hp.y)) * 2.0;
+    sum += texture2D(tex, v_coords + vec2(0.0, -hp.y * 2.0));
+    sum += texture2D(tex, v_coords + vec2(-hp.x, -hp.y)) * 2.0;
+    gl_FragColor = sum / 12.0 * alpha;
+}
+"#;
+
+/// One pass over a blurred backdrop applying uwc's tweaks (blur.rs): brightness and saturation
+/// multipliers, and speckle noise seeded per window so it does not shimmer between frames.
+const TWEAK: &str = r#"
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+uniform float u_brightness;
+uniform float u_saturation;
+uniform float u_noise;
+uniform float u_seed;
+
+void main() {
+    vec4 c = texture2D(tex, v_coords) * alpha;
+    float luma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+    c.rgb = mix(vec3(luma), c.rgb, u_saturation) * u_brightness;
+    float n = fract(sin(dot(v_coords * (u_seed + 1.0), vec2(12.9898, 78.233))) * 43758.5453);
+    c.rgb += (n - 0.5) * u_noise;
+    gl_FragColor = c;
+}
+"#;
+
 #[derive(Clone)]
 pub struct Shaders {
     pub boxes: GlesPixelProgram,
     pub shadow: GlesPixelProgram,
     pub round: GlesTexProgram,
+    /// (down, up) passes of the blur; `None` if they did not compile (windows then show no blur).
+    pub blur: Option<(GlesTexProgram, GlesTexProgram)>,
+    /// The brightness/saturation/noise pass over a blurred backdrop; `None` if it did not compile.
+    pub tweak: Option<GlesTexProgram>,
 }
 
 /// Cached per GL context; `None` once compiling failed.
@@ -383,15 +481,38 @@ impl Shaders {
             &[f4("u_box"), f1("u_radius"), f1("u_sigma"), f4("u_color"), f4("u_clip"), f1("u_clip_radius")],
         )?;
         let round = r.compile_custom_texture_shader(ROUND, &[f4("u_dst"), f4("u_rect"), f1("u_radius")])?;
-        Ok(Shaders { boxes, shadow, round })
+        let f2 = |n| UniformName::new(n, UniformType::_2f);
+        let uniforms = [f2("u_halfpixel"), f1("u_offset")];
+        let blur = match (
+            r.compile_custom_texture_shader(format!("{BLUR_HEAD}{BLUR_DOWN}"), &uniforms),
+            r.compile_custom_texture_shader(format!("{BLUR_HEAD}{BLUR_UP}"), &uniforms),
+        ) {
+            (Ok(d), Ok(u)) => Some((d, u)),
+            (a, b) => {
+                let e = a.err().or(b.err()).map(|e| e.to_string()).unwrap_or_default();
+                tracing::error!("blur shaders failed to compile, windows show no blur: {e}");
+                None
+            }
+        };
+        let tweak = match r.compile_custom_texture_shader(
+            TWEAK,
+            &[f1("u_brightness"), f1("u_saturation"), f1("u_noise"), f1("u_seed")],
+        ) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::error!("the blur tweak shader failed to compile, blurs stay untweaked: {e}");
+                None
+            }
+        };
+        Ok(Shaders { boxes, shadow, round, blur, tweak })
     }
 }
 
-fn u4(name: &'static str, v: [f32; 4]) -> Uniform<'static> {
+pub fn u4(name: &'static str, v: [f32; 4]) -> Uniform<'static> {
     Uniform::new(name, UniformValue::_4f(v[0], v[1], v[2], v[3]))
 }
 
-fn u1(name: &'static str, v: f32) -> Uniform<'static> {
+pub fn u1(name: &'static str, v: f32) -> Uniform<'static> {
     Uniform::new(name, UniformValue::_1f(v))
 }
 
@@ -533,6 +654,7 @@ impl ShaderElement {
 }
 
 /// What a box is painted with. The gradient's extra angle (degrees) is the border spin.
+#[derive(Clone)]
 pub enum Paint {
     Solid(Color),
     Gradient(Gradient, f64),

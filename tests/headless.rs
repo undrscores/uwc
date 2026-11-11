@@ -13,8 +13,11 @@ use serde_json::Value;
 use wayland_client::{
     globals::GlobalList,
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
+    protocol::{wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+};
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1, ext_background_effect_surface_v1,
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1 as ext_tl_handle, ext_foreign_toplevel_list_v1 as ext_tl_list,
@@ -34,9 +37,13 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_manager_v1 as ws_manager,
 };
 use wayland_protocols::wp::{
+    commit_timing::v1::client::{wp_commit_timer_v1, wp_commit_timing_manager_v1},
+    fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
     pointer_constraints::zv1::client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    security_context::v1::client::{wp_security_context_manager_v1, wp_security_context_v1},
     text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -82,6 +89,22 @@ impl Uwc {
     }
 
     fn start_full(name: &str, config: Option<&str>, state: &std::path::Path, screens: &str) -> Uwc {
+        Uwc::start_full_env(name, config, state, screens, &[])
+    }
+
+    /// Like `start`, with extra environment variables for the compositor.
+    fn start_env(name: &str, config: Option<&str>, env: &[(&str, &str)]) -> Uwc {
+        let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
+        Uwc::start_full_env(name, config, &dir.join("state"), "1000x600", env)
+    }
+
+    fn start_full_env(
+        name: &str,
+        config: Option<&str>,
+        state: &std::path::Path,
+        screens: &str,
+        env: &[(&str, &str)],
+    ) -> Uwc {
         let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uwc"));
@@ -90,6 +113,7 @@ impl Uwc {
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
             .env("UWC_DEBUG_PANIC", "1")
+            .envs(env.iter().copied())
             .stdout(Stdio::from(std::fs::File::create(dir.join("uwc.log")).unwrap()))
             .stderr(Stdio::from(std::fs::OpenOptions::new().append(true).open(dir.join("uwc.log")).unwrap()));
         if let Some(c) = config {
@@ -259,6 +283,13 @@ struct App {
     ext_tl: Vec<(ext_tl_handle::ExtForeignToplevelHandleV1, String, String, String, bool)>,
     /// ext-image-copy-capture: what the session offered and how frames ended.
     cap_events: Vec<String>,
+    /// wp_presentation_feedback outcomes ("presented", "discarded") and finished frame callbacks.
+    presentation: Vec<String>,
+    frames_done: u32,
+    /// wlr-screencopy's linux_dmabuf offers: (fourcc, width, height).
+    linux_dmabuf: Vec<(u32, u32, u32)>,
+    /// ext-background-effect: the capabilities flags the manager advertised.
+    bg_caps: Option<u32>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -337,6 +368,10 @@ impl Client {
             ti_leave: false,
             ext_tl: Vec::new(),
             cap_events: Vec::new(),
+            presentation: Vec::new(),
+            frames_done: 0,
+            linux_dmabuf: Vec::new(),
+            bg_caps: None,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -663,6 +698,23 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for App {
         }
     }
 }
+impl Dispatch<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+        e: ext_background_effect_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_background_effect_manager_v1::Event::Capabilities { flags } = e {
+            app.bg_caps = Some(match flags {
+                wayland_client::WEnum::Value(v) => v.bits(),
+                wayland_client::WEnum::Unknown(v) => v,
+            });
+        }
+    }
+}
 macro_rules! noop {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for App {
@@ -807,6 +859,7 @@ impl Dispatch<xdg_popup::XdgPopup, ()> for App {
         }
     }
 }
+noop!(ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1);
 noop!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
 noop!(
     wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
@@ -814,6 +867,7 @@ noop!(
 );
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
+noop!(wayland_client::protocol::wl_region::WlRegion);
 noop!(wayland_client::protocol::wl_pointer::WlPointer);
 noop!(export_manager::HyprlandToplevelExportManagerV1);
 noop!(sc_manager::ZwlrScreencopyManagerV1);
@@ -842,6 +896,7 @@ impl Dispatch<sc_frame::ZwlrScreencopyFrameV1, ()> for App {
             sc_frame::Event::Buffer { format, width, height, stride } => {
                 app.export_buffer = Some((format.into(), width, height, stride))
             }
+            sc_frame::Event::LinuxDmabuf { format, width, height } => app.linux_dmabuf.push((format, width, height)),
             sc_frame::Event::BufferDone => app.export_done = true,
             sc_frame::Event::Failed => app.export_failed = true,
             sc_frame::Event::Ready { .. } => app.export_ready = true,
@@ -976,6 +1031,43 @@ impl Dispatch<ws_handle::ExtWorkspaceHandleV1, ()> for App {
 }
 noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer);
 noop!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+noop!(wp_fifo_manager_v1::WpFifoManagerV1, wp_fifo_v1::WpFifoV1);
+noop!(wp_commit_timing_manager_v1::WpCommitTimingManagerV1, wp_commit_timer_v1::WpCommitTimerV1);
+noop!(wp_presentation::WpPresentation);
+noop!(wp_security_context_manager_v1::WpSecurityContextManagerV1, wp_security_context_v1::WpSecurityContextV1);
+
+impl Dispatch<wl_callback::WlCallback, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        app.frames_done += 1;
+    }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wp_presentation_feedback::WpPresentationFeedback,
+        e: wp_presentation_feedback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            wp_presentation_feedback::Event::Presented { tv_sec_hi, tv_sec_lo, tv_nsec, refresh, .. } => {
+                let secs = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
+                app.presentation.push(format!("presented {secs}.{tv_nsec:09} refresh {refresh}"));
+            }
+            wp_presentation_feedback::Event::Discarded => app.presentation.push("discarded".into()),
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<ext_tl_list::ExtForeignToplevelListV1, ()> for App {
     fn event(
@@ -1072,6 +1164,13 @@ impl Dispatch<ext_session::ExtImageCopyCaptureSessionV1, ()> for App {
         match e {
             ext_session::Event::BufferSize { width, height } => app.cap_events.push(format!("size {width}x{height}")),
             ext_session::Event::ShmFormat { .. } => app.cap_events.push("shm".into()),
+            ext_session::Event::DmabufDevice { device } => {
+                app.cap_events.push(format!("dmabuf device {:#x}", u64::from_ne_bytes(device.try_into().unwrap())))
+            }
+            ext_session::Event::DmabufFormat { format, modifiers } => {
+                let mods: Vec<u64> = modifiers.chunks(8).map(|m| u64::from_ne_bytes(m.try_into().unwrap())).collect();
+                app.cap_events.push(format!("dmabuf {format:#x} {mods:x?}"))
+            }
             ext_session::Event::Done => app.cap_events.push("done".into()),
             ext_session::Event::Stopped => app.cap_events.push("stopped".into()),
             _ => {}
@@ -1146,6 +1245,24 @@ fn state_shape_and_defaults() {
 }
 
 #[test]
+fn display_commands_for_shells() {
+    let mut uwc = Uwc::start("display", None);
+    let m = uwc.state()["monitors"][0].clone();
+    assert_eq!(m["powered"], true);
+    assert!(m["modes"].is_array());
+    let name = m["name"].as_str().unwrap().to_string();
+    uwc.ok(&format!("dpms off {name}"));
+    assert_eq!(uwc.state()["monitors"][0]["powered"], false);
+    uwc.ok("dpms on");
+    assert_eq!(uwc.state()["monitors"][0]["powered"], true);
+    assert!(uwc.cmd("dpms off nowhere").get("error").is_some());
+    uwc.ok(&format!("scale {name} 2"));
+    assert_eq!(uwc.state()["monitors"][0]["scale"], 2.0);
+    assert!(uwc.cmd("scale nowhere 2").get("error").is_some());
+    assert!(uwc.cmd(&format!("mode {name} 1 1")).get("error").is_some());
+}
+
+#[test]
 fn the_everyday_protocols_are_advertised() {
     let uwc = Uwc::start("globals", None);
     let c = uwc.connect();
@@ -1162,9 +1279,87 @@ fn the_everyday_protocols_are_advertised() {
         "zwp_keyboard_shortcuts_inhibit_manager_v1",
         "xdg_system_bell_v1",
         "wp_content_type_manager_v1",
+        "wp_alpha_modifier_v1",
+        "xdg_toplevel_icon_manager_v1",
+        "ext_background_effect_manager_v1",
     ] {
         assert!(have.iter().any(|h| h == want), "missing global {want}; have {have:?}");
     }
+}
+
+#[test]
+fn minimap_reports_tag_bounds_and_windows() {
+    let mut uwc = Uwc::start("minimap", None);
+    let mut c = uwc.connect();
+    let _a = c.window("alpha", 400, 300);
+    let _b = c.window("beta", 200, 100);
+    let s = uwc.wait("two windows", |s| s["windows"].as_array().map(|w| w.len()) == Some(2));
+    let id = win(&s, "alpha")["id"].as_u64().unwrap();
+    uwc.ok(&format!("move {id} 500 400"));
+    uwc.wait("alpha moved", |s| num(&win(s, "alpha")["x"]) == 500.0);
+    let m = uwc.cmd("minimap");
+    let tags = m["tags"].as_array().unwrap();
+    assert_eq!(tags.len(), 9);
+    let t1 = &tags[0];
+    assert_eq!(t1["n"], 1);
+    assert_eq!(t1["active"], true);
+    assert_eq!(t1["occupied"], true);
+    let wins = t1["windows"].as_array().unwrap();
+    assert_eq!(wins.len(), 2);
+    let b = &t1["bounds"];
+    for w in wins {
+        let r = &w["rect"];
+        assert!(num(&b["x"]) <= num(&r["x"]) && num(&b["y"]) <= num(&r["y"]), "{b} {r}");
+        assert!(num(&b["x"]) + num(&b["width"]) >= num(&r["x"]) + num(&r["width"]), "{b} {r}");
+        assert!(num(&b["y"]) + num(&b["height"]) >= num(&r["y"]) + num(&r["height"]), "{b} {r}");
+        assert!(w.get("icon").is_some() && w.get("icon_name").is_some());
+    }
+    assert_eq!(m["monitors"][0]["views"].as_array().unwrap().len(), 9);
+    // An empty tag has no bounds.
+    assert_eq!(tags[1]["occupied"], false);
+    assert_eq!(tags[1]["bounds"], Value::Null);
+}
+
+#[test]
+fn layer_surfaces_can_ask_for_a_background_effect() {
+    let mut uwc = Uwc::start("bgfx", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let mgr: ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let bar = c.layer(
+        "bar",
+        zwlr_layer_shell_v1::Layer::Top,
+        zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left | zwlr_layer_surface_v1::Anchor::Right,
+        (1000, 24),
+        24,
+        zwlr_layer_surface_v1::KeyboardInteractivity::None,
+    );
+    let fx = mgr.get_background_effect(&bar.surface, &qh, ());
+    fx.set_blur_region(None);
+    c.sync();
+    c.sync();
+    // The blur capability is advertised, and the compositor carries on with the layer up.
+    assert_eq!(c.app.bg_caps, Some(1), "capability blur");
+    let s = uwc.state();
+    assert!(s["monitors"][0]["layers"].as_array().unwrap().iter().any(|l| l["namespace"] == "bar"));
+}
+
+#[test]
+fn focus_ms_is_an_option_and_focus_still_works() {
+    let mut uwc = Uwc::start("focusfade", Some("options { focus-ms 120 }"));
+    assert_eq!(uwc.cmd("get focus-ms")["value"], 120.0);
+    let mut c = uwc.connect();
+    let _a = c.window("fa", 100, 100);
+    let _b = c.window("fb", 100, 100);
+    let s = uwc.wait("two windows", |s| s["windows"].as_array().map(|w| w.len()) == Some(2));
+    let (a, b) = (win(&s, "fa")["id"].as_u64().unwrap(), win(&s, "fb")["id"].as_u64().unwrap());
+    uwc.ok(&format!("focus {a}"));
+    let s = uwc.state();
+    assert_eq!(win(&s, "fa")["focused"], true);
+    assert_eq!(win(&s, "fb")["focused"], false);
+    uwc.ok(&format!("focus {b}"));
+    let s = uwc.state();
+    assert_eq!(win(&s, "fb")["focused"], true);
 }
 
 #[test]
@@ -1374,6 +1569,62 @@ fn view_moves_ease_to_their_target() {
 }
 
 #[test]
+fn touchpad_gestures_pan_focus_and_zoom() {
+    // No backend here produces gesture events, so drive the handlers over the IPC; pan-momentum-ms 0
+    // keeps a released pan from coasting on and racing the assertions.
+    let mut uwc = Uwc::start("gestures", Some("options { view-ms 0\n open-ms 0\n move-ms 0\n pan-momentum-ms 0 }"));
+    let mut c = uwc.connect();
+    let _a = c.window("A", 200, 200);
+    let _b = c.window("B", 200, 200);
+    uwc.wait("both windows", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (a, b) = (win(&uwc.state(), "A")["id"].as_u64().unwrap(), win(&uwc.state(), "B")["id"].as_u64().unwrap());
+    uwc.ok(&format!("move {a} 0 0"));
+    uwc.ok(&format!("move {b} 600 0"));
+    uwc.ok(&format!("focus {a}"));
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], a);
+    let vp = |uwc: &mut Uwc| {
+        let v = &uwc.state()["monitors"][0]["viewport"];
+        (num(&v["x"]), num(&v["y"]), num(&v["zoom"]))
+    };
+    // A 3-finger swipe pans the view with the fingers (swipe-gain 2.0): fingers left 50, the view
+    // goes right 100 (the canvas follows the fingers).
+    let (x0, _, z0) = vp(&mut uwc);
+    uwc.ok("swipe-begin 3");
+    uwc.ok("swipe-update -50 0");
+    uwc.ok("swipe-end");
+    assert_eq!(vp(&mut uwc).0, x0 + 100.0, "3-finger swipe panned the view");
+    // A pinch reported with 3 fingers is that same swipe: libinput reports 3-finger swipes as
+    // pinches on some trackpads (the Magic Trackpad does).
+    let x1 = vp(&mut uwc).0;
+    uwc.ok("pinch-begin 3");
+    uwc.ok("pinch-update -25 0 1.0");
+    uwc.ok("pinch-end");
+    assert_eq!(vp(&mut uwc).0, x1 + 50.0, "a 3-finger 'pinch' panned like a swipe");
+    // A 2-finger pinch zooms the view.
+    uwc.ok("pinch-begin 2");
+    uwc.ok("pinch-update 0 0 2.0");
+    uwc.ok("pinch-end");
+    assert_eq!(vp(&mut uwc).2, z0 * 2.0, "2-finger pinch doubled the zoom");
+    // A 4-finger swipe left focuses the window to the right (the canvas follows the fingers).
+    uwc.ok("swipe-begin 4");
+    uwc.ok("swipe-update -100 0");
+    uwc.ok("swipe-end");
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], b, "swipe left focused the right-hand window");
+    // A swipe that did not travel swipe-threshold far enough does nothing, nor a cancelled one,
+    // nor one with an unbound finger count.
+    uwc.ok("swipe-begin 4");
+    uwc.ok("swipe-update 10 0");
+    uwc.ok("swipe-end");
+    uwc.ok("swipe-begin 4");
+    uwc.ok("swipe-update -100 0");
+    uwc.ok("swipe-end 1");
+    uwc.ok("swipe-begin 5");
+    uwc.ok("swipe-update -100 0");
+    uwc.ok("swipe-end");
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], b);
+}
+
+#[test]
 fn a_released_swipe_glides_on_and_slows_down() {
     let mut uwc = Uwc::start("fling", None);
     let x0 = uwc.state()["monitors"][0]["viewport"]["x"].as_f64().unwrap();
@@ -1520,6 +1771,16 @@ fn a_panic_in_a_handler_does_not_take_the_session_down() {
     assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), before);
     uwc.ok(&format!("focus {id}"));
     c.sync();
+    // A panic inside a Wayland protocol handler (a toplevel set_title, here) is survived too: uwc uses the pure
+    // Rust wayland backend, so it unwinds out of the dispatch instead of aborting through libwayland's C.
+    let victim = c.window("Victim", 200, 150);
+    victim.toplevel.set_title("uwc-debug-panic".into());
+    let _ = c.queue.roundtrip(&mut c.app);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc survived a panic in a protocol handler");
+    let mut c2 = uwc.connect();
+    let _w2 = c2.window("After the handler panic", 200, 150);
+    assert!(uwc.state()["windows"].as_array().unwrap().iter().any(|w| w["title"] == "After the handler panic"));
     // Three in a row mean something is badly wrong: the session is saved and uwc exits non-zero.
     let mut held = Vec::new();
     for _ in 0..3 {
@@ -1560,98 +1821,6 @@ fn doctor_reports_problems_and_exits_nonzero() {
     assert!(text.trim_end().ends_with("warnings") || text.contains(" failed, "), "{text}");
     // It changes nothing and does not need a compositor.
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn frames_are_regions_that_carry_their_windows() {
-    let mut uwc = Uwc::start("frames", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
-    let mut c = uwc.connect();
-    let _a = c.window("Inside", 200, 150);
-    let _b = c.window("Outside", 200, 150);
-    let s = uwc.state();
-    let (a, b) = (win(&s, "Inside")["id"].as_u64().unwrap(), win(&s, "Outside")["id"].as_u64().unwrap());
-    uwc.ok(&format!("move {a} 1000 1000"));
-    uwc.ok(&format!("move {b} 3000 3000"));
-    // A frame around where A is: it holds A (its centre is inside) and not B.
-    uwc.ok("frame add 900 900 500 400 mail and notes");
-    let s = uwc.state();
-    let f = &s["frames"][0];
-    assert_eq!((f["label"].as_str().unwrap(), num(&f["x"]), num(&f["width"])), ("mail and notes", 900.0, 500.0));
-    assert_eq!(f["windows"], serde_json::json!([a]));
-    let id = f["id"].as_u64().unwrap();
-    // Moving the frame moves its windows, and only them.
-    uwc.ok(&format!("frame move {id} 1900 1500"));
-    let s = uwc.state();
-    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (1900.0, 1500.0));
-    assert_eq!((num(&win(&s, "Inside")["x"]), num(&win(&s, "Inside")["y"])), (2000.0, 1600.0));
-    assert_eq!((num(&win(&s, "Outside")["x"]), num(&win(&s, "Outside")["y"])), (3000.0, 3000.0));
-    // Relabel, resize (never below a minimum), fit the view to it.
-    uwc.ok(&format!("frame label {id} build"));
-    uwc.ok(&format!("frame resize {id} 10 10"));
-    let s = uwc.state();
-    assert_eq!(s["frames"][0]["label"], "build");
-    assert!(num(&s["frames"][0]["width"]) >= 80.0);
-    uwc.ok(&format!("frame resize {id} 600 400"));
-    uwc.ok(&format!("frame fit {id}"));
-    let s = uwc.state();
-    let vp = &s["monitors"][0]["viewport"];
-    let (vx, vy, z) = (num(&vp["x"]), num(&vp["y"]), num(&vp["zoom"]));
-    assert!(vx < 1900.0 + 300.0 && vx + 1000.0 / z > 1900.0 + 300.0, "the frame's centre is in view: {vp}");
-    assert!(vy < 1500.0 + 200.0 && vy + 600.0 / z > 1500.0 + 200.0, "{vp}");
-    // Errors name the problem; a frame is on its tags only.
-    assert!(uwc.cmd("frame move 99 0 0").get("error").is_some());
-    assert!(uwc.cmd("frame").get("error").is_some());
-    uwc.ok("view 2");
-    assert_eq!(uwc.state()["frames"].as_array().unwrap().len(), 1, "still listed, but drawn on its tag only");
-    uwc.ok(&format!("frame remove {id}"));
-    assert!(uwc.state()["frames"].as_array().unwrap().is_empty());
-}
-
-#[test]
-fn a_frame_is_dragged_by_its_title_strip_and_resized_by_its_corner() {
-    use wayland_client::protocol::wl_pointer::ButtonState;
-    use wayland_protocols_wlr::virtual_pointer::v1::client::{
-        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
-    };
-    let mut uwc = Uwc::start("framedrag", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
-    let mut c = uwc.connect();
-    let qh = c.queue.handle();
-    let _w = c.window("Held", 150, 100);
-    let id = win(&uwc.state(), "Held")["id"].as_u64().unwrap();
-    uwc.ok(&format!("move {id} 200 200"));
-    uwc.ok("frame add 150 150 400 300 zone");
-    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
-    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
-    let s = uwc.state();
-    let vp = &s["monitors"][0]["viewport"];
-    let (vx, vy) = (num(&vp["x"]), num(&vp["y"]));
-    let pos = |x: f64, y: f64| ((x - vx) as u32, (y - vy) as u32);
-    // The strip is the top 22 px of the frame (label scale 2 x 11): press at (160, 160), drag by +100, +50.
-    let (sx, sy) = pos(160.0, 160.0);
-    p.motion_absolute(0, sx, sy, 1000, 600);
-    p.frame();
-    p.button(1, 0x110, ButtonState::Pressed);
-    p.motion(2, 100.0, 50.0);
-    p.frame();
-    p.button(3, 0x110, ButtonState::Released);
-    p.frame();
-    c.sync();
-    let s = uwc.state();
-    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (250.0, 200.0), "{}", s["frames"]);
-    assert_eq!((num(&win(&s, "Held")["x"]), num(&win(&s, "Held")["y"])), (300.0, 250.0), "its window went along");
-    // The bottom-right corner resizes: press 4 px inside it, drag by +60, +40.
-    let (cx, cy) = pos(250.0 + 400.0 - 4.0, 200.0 + 300.0 - 4.0);
-    p.motion_absolute(4, cx, cy, 1000, 600);
-    p.frame();
-    p.button(5, 0x110, ButtonState::Pressed);
-    p.motion(6, 60.0, 40.0);
-    p.frame();
-    p.button(7, 0x110, ButtonState::Released);
-    p.frame();
-    c.sync();
-    let s = uwc.state();
-    assert_eq!((num(&s["frames"][0]["width"]), num(&s["frames"][0]["height"])), (460.0, 340.0), "{}", s["frames"]);
-    assert_eq!((num(&s["frames"][0]["x"]), num(&s["frames"][0]["y"])), (250.0, 200.0));
 }
 
 #[test]
@@ -1906,9 +2075,6 @@ fn hostile_ipc_input_is_refused_and_the_compositor_keeps_running() {
     assert_eq!(std::fs::metadata(&sock).unwrap().permissions().mode() & 0o077, 0, "group/other have no access");
     // Numbers a script could send to overflow, go negative or become infinite are errors, not crashes.
     for bad in [
-        "frame add 0 0 -5 -5",
-        "frame add 0 0 0 100",
-        "frame add 1e308 0 100 100",
         "move 1 1e308 0",
         "move 1 nan 0",
         "zoom 1e308",
@@ -1921,11 +2087,6 @@ fn hostile_ipc_input_is_refused_and_the_compositor_keeps_running() {
         let r = uwc.cmd(bad);
         assert!(r.get("error").is_some(), "{bad} -> {r}");
     }
-    // A script cannot fill memory with frames.
-    for _ in 0..crate_max_frames() {
-        uwc.ok("frame add 0 0 100 100");
-    }
-    assert!(uwc.cmd("frame add 0 0 100 100").get("error").is_some());
     // A line that never ends is cut off, without taking the compositor with it.
     let mut s = UnixStream::connect(&sock).unwrap();
     s.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -1937,10 +2098,6 @@ fn hostile_ipc_input_is_refused_and_the_compositor_keeps_running() {
     }
     assert!(uwc.child.try_wait().unwrap().is_none(), "uwc is still running");
     assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), 1);
-}
-
-fn crate_max_frames() -> usize {
-    500
 }
 
 #[test]
@@ -2794,7 +2951,6 @@ fn the_canvas_comes_back_after_a_restart() {
         uwc.ok("bookmark save 2");
         uwc.ok("view 3");
         uwc.ok("panto 500 -200");
-        uwc.ok("frame add 100 100 600 400 notes");
         uwc.ok("session save");
         assert!(file.exists());
         {
@@ -2818,7 +2974,6 @@ fn the_canvas_comes_back_after_a_restart() {
     assert_eq!(m["tags"][2]["active"], true, "the tags in view come back");
     assert_eq!((num(&m["viewport"]["x"]), num(&m["viewport"]["y"])), (500.0, -200.0), "and their views");
     assert_eq!(m["tags"][0]["bookmarks"][0]["n"], 2, "and the bookmarks");
-    assert_eq!(s["frames"][0]["label"], "notes", "and the frames");
 
     let mut c = uwc.connect();
     let _a = c.window("A", 640, 480);
@@ -2838,6 +2993,47 @@ fn the_canvas_comes_back_after_a_restart() {
     uwc.ok("session forget");
     assert!(!file.exists());
     assert!(uwc.cmd("session").get("error").is_some());
+    drop(uwc);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn a_tags_tiling_layout_comes_back_after_a_restart() {
+    let state = std::env::temp_dir().join(format!("uwc-test-{}-tiling-state", std::process::id()));
+    {
+        let mut uwc = Uwc::start_with_state("tile-session1", None, &state);
+        uwc.ok("set tile-gap 10");
+        uwc.ok("set tile-inner-gap 10");
+        uwc.ok("tile dwindle");
+        uwc.ok("tile ratio 0.6");
+        uwc.ok("session save");
+        uwc.ok("quit");
+        let start = Instant::now();
+        while uwc.child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let mut uwc = Uwc::start_with_state("tile-session2", None, &state);
+    let s = uwc.state();
+    let t = &s["monitors"][0]["tags"][0]["tiling"];
+    assert_eq!((t["layout"].clone(), t["ratio"].clone()), ("dwindle".into(), 0.6.into()), "layout and split");
+    assert_eq!(
+        (t["x"].clone(), t["y"].clone(), t["width"].clone(), t["height"].clone()),
+        (0.into(), 0.into(), 1000.into(), 600.into()),
+        "and the area it works in"
+    );
+    assert!(s["monitors"][0]["tags"][1]["tiling"].is_null(), "untiled tags stay untiled");
+    // Windows tile into it as they open: the first fills the area, the second takes the 0.4 side.
+    uwc.ok("set tile-gap 10");
+    uwc.ok("set tile-inner-gap 10");
+    let mut apps = Apps(vec![]);
+    apps.open(&mut uwc, "A");
+    apps.open(&mut uwc, "B");
+    let s = uwc.state();
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == false));
+    assert_eq!(rect4(&s, "A").0, 10, "tiled into the restored layout");
+    drop(apps);
     drop(uwc);
     let _ = std::fs::remove_dir_all(&state);
 }
@@ -3153,4 +3349,710 @@ fn text_input_follows_the_keyboard_focus() {
     uwc.ok("close 1");
     c.wait_ti_leave();
     assert!(c.app.ti_leave, "text input left with the focus");
+}
+
+// ---- tiling --------------------------------------------------------------------------------------
+
+/// A window's (x, y, width, height) over IPC.
+fn rect4(s: &Value, title: &str) -> (i64, i64, i64, i64) {
+    let w = win(s, title);
+    let n = |k: &str| w[k].as_i64().unwrap();
+    (n("x"), n("y"), n("width"), n("height"))
+}
+
+/// One client per window, so each follows its own configure.
+struct Apps(Vec<(Client, Window, String)>);
+
+impl Apps {
+    fn open(&mut self, uwc: &mut Uwc, title: &str) {
+        let mut c = uwc.connect();
+        let w = c.window(title, 300, 200);
+        let n = self.0.len() + 1;
+        uwc.wait(title, |s| s["windows"].as_array().unwrap().len() == n);
+        self.0.push((c, w, title.to_string()));
+        self.follow();
+    }
+
+    /// Draw every window at the size it was last asked for, like a toolkit.
+    fn follow(&mut self) {
+        for (c, w, name) in &mut self.0 {
+            c.follow_configure(name, w);
+        }
+    }
+
+    /// Follow configures until `title` has `want`, since sizes arrive a round trip after the move.
+    fn wait_rect(&mut self, uwc: &mut Uwc, title: &str, want: (i64, i64, i64, i64)) -> Value {
+        let start = Instant::now();
+        loop {
+            self.follow();
+            let s = uwc.state();
+            if rect4(&s, title) == want {
+                return s;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "{title} is {:?}, wanted {want:?}", rect4(&s, title));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+fn tiling_uwc(name: &str) -> Uwc {
+    let mut uwc = Uwc::start(name, None);
+    uwc.ok("set tile-gap 10");
+    uwc.ok("set tile-inner-gap 10");
+    uwc.ok("set tile-ratio 0.5");
+    uwc
+}
+
+#[test]
+fn tiling_lays_windows_out_and_keeps_them_there() {
+    // The screen is 1000x600 at the origin: with gaps of 10 the master column is 485 wide, and the
+    // stack beside it shares 580 px of height.
+    let mut uwc = tiling_uwc("tiling");
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B", "C"] {
+        apps.open(&mut uwc, t);
+    }
+    let ids: Vec<u64> = ["A", "B", "C"].iter().map(|t| win(&uwc.state(), t)["id"].as_u64().unwrap()).collect();
+
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "A", (10, 10, 485, 580));
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 285));
+    let s = apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    let t = &s["monitors"][0]["tags"][0]["tiling"];
+    assert_eq!(
+        (t["layout"].clone(), t["ratio"].clone(), t["masters"].clone()),
+        ("master-stack".into(), 0.5.into(), 1.into())
+    );
+    assert_eq!(
+        (t["x"].clone(), t["y"].clone(), t["width"].clone(), t["height"].clone()),
+        (0.into(), 0.into(), 1000.into(), 600.into())
+    );
+    assert!(s["monitors"][0]["tags"][1]["tiling"].is_null(), "only the tag in use is tiled");
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == false));
+
+    // Panning only moves the camera: the tiles stay where they are on the canvas.
+    uwc.ok("pan 300 0");
+    let s = uwc.state();
+    assert_eq!(rect4(&s, "B"), (505, 10, 485, 285));
+    assert_eq!(s["monitors"][0]["tags"][0]["tiling"]["x"], 0);
+    uwc.ok("home");
+
+    // A new window joins the layout: the stack now has three.
+    apps.open(&mut uwc, "D");
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 187));
+    apps.wait_rect(&mut uwc, "C", (505, 207, 485, 187));
+    apps.wait_rect(&mut uwc, "D", (505, 404, 485, 186));
+    assert_eq!(rect4(&uwc.state(), "A"), (10, 10, 485, 580));
+
+    // Minimizing one closes the gap; restoring puts it back in.
+    let id_d = win(&uwc.state(), "D")["id"].as_u64().unwrap();
+    uwc.ok(&format!("minimize {id_d}"));
+    apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    uwc.ok(&format!("restore {id_d}"));
+    apps.wait_rect(&mut uwc, "D", (505, 404, 485, 186));
+
+    // Moving a tile by hand takes it out of the layout, and the others close up around the gap.
+    uwc.ok(&format!("move {} 300 250", ids[1]));
+    let s = apps.wait_rect(&mut uwc, "C", (505, 10, 485, 285));
+    assert_eq!(rect4(&s, "B").0, 300);
+    assert_eq!((win(&s, "B")["floating"].clone(), win(&s, "C")["floating"].clone()), (true.into(), false.into()));
+    apps.wait_rect(&mut uwc, "D", (505, 305, 485, 285));
+    // Floated windows can be put back.
+    uwc.ok(&format!("unfloat {}", ids[1]));
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 187));
+    uwc.ok(&format!("float {}", ids[1]));
+    apps.wait_rect(&mut uwc, "D", (505, 305, 485, 285));
+    uwc.ok(&format!("unfloat {}", ids[1]));
+
+    // Layout options re-place everything: two masters, and a wider master column.
+    uwc.ok("tile masters 2");
+    apps.wait_rect(&mut uwc, "B", (10, 305, 485, 285));
+    uwc.ok("tile masters 1");
+    uwc.ok("tile ratio 0.6");
+    let s = apps.wait_rect(&mut uwc, "A", (10, 10, 582, 580));
+    assert_eq!(s["monitors"][0]["tags"][0]["tiling"]["ratio"], 0.6);
+    assert!(uwc.cmd("tile ratio 2").get("error").is_some());
+    assert!(uwc.cmd("tile nonsense").get("error").is_some());
+    assert!(uwc.cmd("float 9999").get("error").is_some());
+
+    // Stepping through the layouts ends in off, which leaves the windows where they are.
+    uwc.ok("tile ratio 0.5");
+    let mut seen = vec![];
+    for _ in 0..5 {
+        uwc.ok("tile cycle");
+        seen.push(uwc.state()["monitors"][0]["tags"][0]["tiling"]["layout"].clone());
+    }
+    let want: Vec<Value> =
+        vec!["dwindle".into(), "spiral".into(), "columns".into(), Value::Null, "master-stack".into()];
+    assert_eq!(seen, want);
+    uwc.ok("tile off");
+    apps.follow();
+    let s = uwc.state();
+    assert!(s["monitors"][0]["tags"][0]["tiling"].is_null());
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == true));
+    let before = rect4(&s, "C");
+    apps.open(&mut uwc, "E");
+    assert_eq!(rect4(&uwc.state(), "C"), before, "nothing is tiled any more");
+}
+
+#[test]
+fn tile_once_arranges_and_leaves_the_windows_floating() {
+    let mut uwc = tiling_uwc("tileonce");
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B"] {
+        apps.open(&mut uwc, t);
+    }
+    uwc.ok("tile once columns");
+    apps.wait_rect(&mut uwc, "A", (10, 10, 485, 580));
+    let s = apps.wait_rect(&mut uwc, "B", (505, 10, 485, 580));
+    assert!(s["monitors"][0]["tags"][0]["tiling"].is_null(), "nothing stays on");
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == true));
+    // A third window is left alone, and moving one is just moving it.
+    apps.open(&mut uwc, "C");
+    assert_eq!(rect4(&uwc.state(), "A"), (10, 10, 485, 580));
+    let ia = win(&uwc.state(), "A")["id"].as_u64().unwrap();
+    uwc.ok(&format!("move {ia} 40 40"));
+    assert_eq!(rect4(&uwc.state(), "B"), (505, 10, 485, 580));
+}
+
+#[test]
+fn the_tile_area_is_what_the_view_shows_when_the_layout_is_turned_on() {
+    let mut uwc = tiling_uwc("tilearea");
+    let mut apps = Apps(vec![]);
+    apps.open(&mut uwc, "A");
+    uwc.ok("pan 500 100");
+    uwc.ok("tile columns");
+    let s = apps.wait_rect(&mut uwc, "A", (510, 110, 980, 580));
+    assert_eq!(s["monitors"][0]["tags"][0]["tiling"]["x"], 500);
+    // Zoomed out it covers more canvas; run `tile` again to re-anchor.
+    uwc.ok("zoom 0.5");
+    uwc.ok("tile columns");
+    let s = uwc.state();
+    let t = &s["monitors"][0]["tags"][0]["tiling"];
+    assert_eq!((t["width"].clone(), t["height"].clone()), (2000.into(), 1200.into()));
+}
+
+#[test]
+fn tiling_leaves_rule_floated_windows_and_dialogs_alone() {
+    let cfg = "options {\n tile-gap 10\n tile-inner-gap 10\n tile-ratio 0.5\n}\nrule {\n match title=\"Float*\"\n open { float }\n}\n";
+    let mut uwc = Uwc::start("tilefloat", Some(cfg));
+    let mut apps = Apps(vec![]);
+    apps.open(&mut uwc, "A");
+    apps.open(&mut uwc, "Float1");
+    uwc.ok("tile master-stack");
+    let s = apps.wait_rect(&mut uwc, "A", (10, 10, 980, 580));
+    assert_eq!(win(&s, "Float1")["floating"], true);
+    assert_eq!(rect4(&s, "Float1").2, 300, "the floating window keeps its own size");
+
+    // A dialog opens over its parent instead of taking a slot.
+    let (c, parent, _) = &mut apps.0[0];
+    let _dlg = c.window_with_parent("Dialog", 200, 100, Some(&*parent));
+    let s = uwc.wait("dialog", |s| s["windows"].as_array().unwrap().len() == 3);
+    assert_eq!(win(&s, "Dialog")["floating"], true);
+    assert_eq!(rect4(&s, "A"), (10, 10, 980, 580));
+}
+
+fn tiling_pointer_config() -> &'static str {
+    "options {\n tile-gap 10\n tile-inner-gap 10\n tile-ratio 0.5\n}\nbinds {\n MouseLeft { drag-move; }\n MouseRight { drag-resize; }\n}\n"
+}
+
+/// Let the open and move animations settle: hit-testing follows what is drawn.
+fn settle(uwc: &mut Uwc) {
+    for _ in 0..200 {
+        if uwc.state()["monitors"][0]["animating"] == false {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("animations did not settle");
+}
+
+/// A virtual pointer on `c`'s connection that presses `button` at `from`, moves to `to` and lets go
+/// (screen px on the 1000x600 output).
+fn pointer_drag(c: &mut Client, button: u32, from: (u32, u32), to: (u32, u32)) {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let qh = c.queue.handle();
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    p.motion_absolute(0, from.0, from.1, 1000, 600);
+    p.frame();
+    p.button(1, button, ButtonState::Pressed);
+    p.frame();
+    c.sync();
+    // In steps, like a hand.
+    for k in 1..=4u32 {
+        let at = |a: u32, b: u32| (a as i64 + (b as i64 - a as i64) * k as i64 / 4) as u32;
+        p.motion_absolute(1 + k, at(from.0, to.0), at(from.1, to.1), 1000, 600);
+        p.frame();
+        c.sync();
+    }
+    p.button(10, button, ButtonState::Released);
+    p.frame();
+    c.sync();
+}
+
+#[test]
+fn a_tile_that_will_not_shrink_gets_room_and_a_fixed_size_window_floats() {
+    let mut uwc = tiling_uwc("tilemin");
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B", "C"] {
+        apps.open(&mut uwc, t);
+    }
+    // C announces a minimum height: it gets it, and B takes the rest of the stack.
+    apps.0[2].1.toplevel.set_min_size(300, 450);
+    apps.0[2].1.surface.commit();
+    apps.0[2].0.sync();
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 120));
+    apps.wait_rect(&mut uwc, "C", (505, 140, 485, 450));
+
+    // A client that announces nothing but draws bigger than it was told is given the room too.
+    uwc.ok("tile off");
+    apps.0[2].1.toplevel.set_min_size(0, 0);
+    apps.0[2].1.surface.commit();
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    let (c, w, _) = &mut apps.0[2];
+    let big = c.buffer("C-big", 485, 400);
+    w.surface.attach(Some(&big), 0, 0);
+    w.surface.commit();
+    w._buf = big;
+    c.sync();
+    apps.wait_rect(&mut uwc, "C", (505, 190, 485, 400));
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 170));
+
+    // A window with one fixed size is not tiled.
+    apps.open(&mut uwc, "F");
+    apps.0[3].1.toplevel.set_min_size(300, 200);
+    apps.0[3].1.toplevel.set_max_size(300, 200);
+    apps.0[3].1.surface.commit();
+    apps.0[3].0.sync();
+    let s = uwc.wait("F floats", |s| win(s, "F")["floating"] == true);
+    assert_eq!(win(&s, "C")["floating"], false);
+    // The others have closed up around it: three tiles, not four.
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 170));
+}
+
+#[test]
+fn dropping_a_tile_on_another_swaps_them_and_resizing_moves_the_split() {
+    let mut uwc = Uwc::start("tiledrag", Some(tiling_pointer_config()));
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B", "C"] {
+        apps.open(&mut uwc, t);
+    }
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "A", (10, 10, 485, 580));
+    apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    settle(&mut uwc);
+
+    // Carry A (the master) onto C: the two swap places.
+    pointer_drag(&mut apps.0[0].0, 0x110, (250, 300), (750, 450));
+    let s = apps.wait_rect(&mut uwc, "A", (505, 305, 485, 285));
+    assert_eq!(rect4(&s, "C"), (10, 10, 485, 580));
+    assert_eq!(rect4(&s, "B"), (505, 10, 485, 285));
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == false));
+    settle(&mut uwc);
+
+    // Dropped in a gap or anywhere inside the area: back into its slot.
+    pointer_drag(&mut apps.0[1].0, 0x110, (750, 150), (500, 300));
+    let s = apps.wait_rect(&mut uwc, "B", (505, 10, 485, 285));
+    assert_eq!(win(&s, "B")["floating"], false);
+    settle(&mut uwc);
+
+    // Resizing a tile with the mouse moves the split with the pointer's horizontal travel.
+    pointer_drag(&mut apps.0[2].0, 0x111, (700, 400), (798, 400));
+    let s = uwc.state();
+    let ratio = s["monitors"][0]["tags"][0]["tiling"]["ratio"].as_f64().unwrap();
+    assert!((ratio - 0.601).abs() < 0.005, "ratio {ratio}");
+    apps.wait_rect(&mut uwc, "C", (10, 10, 583, 580));
+    assert_eq!(win(&uwc.state(), "A")["floating"], false);
+}
+
+/// Commit a fresh buffer on `w` asking for a frame callback, and wait (bounded) for it.
+fn commit_and_wait_for_frame(c: &mut Client, w: &Window, name: &str, size: (i32, i32)) -> bool {
+    let qh = c.queue.handle();
+    let before = c.app.frames_done;
+    w.surface.frame(&qh, ());
+    let buf = c.buffer(name, size.0, size.1);
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let start = Instant::now();
+    while c.app.frames_done == before {
+        if start.elapsed() > Duration::from_secs(2) {
+            return false;
+        }
+        c.dispatch_pending();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+#[test]
+fn presentation_feedback_is_answered_with_a_monotonic_time() {
+    let uwc = Uwc::start("presentation", None);
+    let mut c = uwc.connect();
+    let w = c.window("Video", 200, 150);
+    let qh = c.queue.handle();
+    let pres: wp_presentation::WpPresentation = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let _fb = pres.feedback(&w.surface, &qh, ());
+    assert!(commit_and_wait_for_frame(&mut c, &w, "video-a", (200, 150)), "the frame callback arrives");
+    c.sync();
+    assert_eq!(c.app.presentation.len(), 1, "one feedback, one answer: {:?}", c.app.presentation);
+    let said = c.app.presentation[0].clone();
+    assert!(said.starts_with("presented "), "{said}");
+    // The clock is CLOCK_MONOTONIC: seconds since boot, not since 1970.
+    let secs: u64 = said["presented ".len()..].split('.').next().unwrap().parse().unwrap();
+    assert!(secs < 365 * 24 * 3600 * 20, "a monotonic time, not the wall clock: {said}");
+    // Feedback for a commit that another commit replaces before it is shown is discarded, never lost.
+    let _a = pres.feedback(&w.surface, &qh, ());
+    let buf = c.buffer("video-b", 200, 150);
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let _b = pres.feedback(&w.surface, &qh, ());
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let start = Instant::now();
+    while c.app.presentation.len() < 3 && start.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+        c.sync();
+    }
+    assert_eq!(c.app.presentation.len(), 3, "every request is answered: {:?}", c.app.presentation);
+}
+
+#[test]
+fn a_client_waiting_on_fifo_barriers_keeps_running() {
+    let mut uwc = Uwc::start("fifo", None);
+    let mut c = uwc.connect();
+    let w = c.window("Fifo", 200, 150);
+    let qh = c.queue.handle();
+    let mgr: wp_fifo_manager_v1::WpFifoManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let fifo = mgr.get_fifo(&w.surface, &qh, ());
+    // Every commit waits for the previous one's barrier and sets its own, the way a vsynced game does.
+    for i in 0..12 {
+        fifo.wait_barrier();
+        fifo.set_barrier();
+        assert!(commit_and_wait_for_frame(&mut c, &w, "fifo", (200, 150)), "commit {i} was held for good");
+    }
+    // A hidden window is never drawn, and must not stall either.
+    uwc.ok("view 2");
+    for i in 0..6 {
+        fifo.wait_barrier();
+        fifo.set_barrier();
+        let buf = c.buffer("fifo-hidden", 200, 150);
+        w.surface.attach(Some(&buf), 0, 0);
+        w.surface.commit();
+        c.sync();
+        std::thread::sleep(Duration::from_millis(40));
+        let _ = i;
+    }
+    uwc.ok("view 1");
+    assert!(commit_and_wait_for_frame(&mut c, &w, "fifo-back", (200, 150)), "back on screen it still runs");
+}
+
+#[test]
+fn a_commit_with_a_timestamp_is_applied_at_that_time() {
+    let uwc = Uwc::start("commit-timing", None);
+    let mut c = uwc.connect();
+    let w = c.window("Timed", 200, 150);
+    let qh = c.queue.handle();
+    let mgr: wp_commit_timing_manager_v1::WpCommitTimingManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let timer = mgr.get_timer(&w.surface, &qh, ());
+    // CLOCK_MONOTONIC now, from the same clock the compositor uses.
+    let now = {
+        let mut ts = std::mem::MaybeUninit::<[i64; 2]>::uninit();
+        // Safety: clock_gettime fills the two words of a timespec.
+        unsafe {
+            extern "C" {
+                fn clock_gettime(clk: i32, ts: *mut [i64; 2]) -> i32;
+            }
+            assert_eq!(clock_gettime(1, ts.as_mut_ptr()), 0);
+            ts.assume_init()
+        }
+    };
+    let target = Duration::new(now[0] as u64, now[1] as u32) + Duration::from_millis(400);
+    timer.set_timestamp((target.as_secs() >> 32) as u32, target.as_secs() as u32, target.subsec_nanos());
+    let start = Instant::now();
+    assert!(commit_and_wait_for_frame(&mut c, &w, "timed", (200, 150)), "the timed commit is applied in the end");
+    let took = start.elapsed();
+    assert!(took >= Duration::from_millis(300), "not before its time ({took:?})");
+    assert!(took < Duration::from_millis(1500), "but not much after ({took:?})");
+}
+
+/// The interfaces a connection's registry offers.
+fn offered_globals(conn: &Connection) -> Vec<String> {
+    struct Probe;
+    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Probe {
+        fn event(
+            _: &mut Self,
+            _: &wl_registry::WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+    let (globals, _queue) = registry_queue_init::<Probe>(conn).unwrap();
+    globals.contents().with_list(|l| l.iter().map(|g| g.interface.clone()).collect())
+}
+
+#[test]
+fn sandboxed_clients_do_not_see_the_privileged_globals() {
+    use std::os::unix::net::UnixListener;
+    let uwc = Uwc::start("sandbox", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let mgr: wp_security_context_manager_v1::WpSecurityContextManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let path = uwc.dir.join("sandbox.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let (close, _other_end) = UnixStream::pair().unwrap();
+    let ctx = mgr.create_listener(listener.as_fd(), close.as_fd(), &qh, ());
+    ctx.set_sandbox_engine("org.flatpak".into());
+    ctx.set_app_id("org.example.App".into());
+    ctx.commit();
+    c.sync();
+    // Give the compositor a turn to start listening, then connect the way the sandboxed app would.
+    let sandboxed = {
+        let start = Instant::now();
+        loop {
+            match UnixStream::connect(&path) {
+                Ok(s) => break Connection::from_socket(s).unwrap(),
+                Err(e) => assert!(start.elapsed() < Duration::from_secs(3), "connecting to the sandbox socket: {e}"),
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let ordinary = offered_globals(&c.conn);
+    let inside = offered_globals(&sandboxed);
+    let privileged = [
+        "zwlr_layer_shell_v1",
+        "zwlr_screencopy_manager_v1",
+        "zwlr_virtual_pointer_manager_v1",
+        "zwp_virtual_keyboard_manager_v1",
+        "zwlr_data_control_manager_v1",
+        "ext_data_control_manager_v1",
+        "ext_session_lock_manager_v1",
+        "zwlr_output_manager_v1",
+        "zwlr_output_power_manager_v1",
+        "ext_image_copy_capture_manager_v1",
+        "ext_output_image_capture_source_manager_v1",
+        "ext_foreign_toplevel_image_capture_source_manager_v1",
+        "ext_foreign_toplevel_list_v1",
+        "zwlr_foreign_toplevel_manager_v1",
+        "hyprland_toplevel_export_manager_v1",
+        "ext_workspace_manager_v1",
+        "zwp_input_method_manager_v2",
+        "wp_security_context_manager_v1",
+    ];
+    for g in privileged {
+        assert!(ordinary.iter().any(|i| i == g), "an ordinary client sees {g}: {ordinary:?}");
+        assert!(!inside.iter().any(|i| i == g), "a sandboxed client must not see {g}");
+    }
+    // What an app needs is still there.
+    for g in ["wl_compositor", "wl_shm", "xdg_wm_base", "wl_seat", "wl_data_device_manager", "wl_output"] {
+        assert!(inside.iter().any(|i| i == g), "a sandboxed client sees {g}: {inside:?}");
+    }
+}
+
+#[test]
+fn blur_radius_is_an_option_and_a_per_window_rule() {
+    let mut uwc = Uwc::start("blur-option", Some("rule { match title=\"Glass\"; blur-radius 14 }"));
+    let mut c = uwc.connect();
+    let _a = c.window("Glass", 300, 200);
+    let _b = c.window("Solid", 300, 200);
+    let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (glass, solid) = (win(&s, "Glass")["id"].as_u64().unwrap(), win(&s, "Solid")["id"].as_u64().unwrap());
+    let radius = |uwc: &mut Uwc, id: u64| uwc.cmd(&format!("get-window {id}"))["options"]["blur-radius"].clone();
+    assert_eq!(uwc.cmd("get blur-radius")["value"], 0.0, "off by default");
+    assert_eq!((radius(&mut uwc, glass), radius(&mut uwc, solid)), (14.0.into(), 0.0.into()));
+    uwc.ok("set blur-radius 6");
+    assert_eq!(
+        (radius(&mut uwc, glass), radius(&mut uwc, solid)),
+        (14.0.into(), 6.0.into()),
+        "a rule beats the option"
+    );
+    for bad in ["set blur-radius -1", "set blur-radius 1000", "set blur-radius wide"] {
+        assert!(uwc.cmd(bad).get("error").is_some(), "{bad}");
+    }
+    // Headless has no renderer: a blurred window must not break anything there.
+    uwc.ok(&format!("focus {glass}"));
+    c.sync();
+}
+
+#[test]
+fn output_captures_offer_dmabufs_only_when_asked_for() {
+    // Argb8888 and Xrgb8888 as fourcc codes; the fake GPU also has Rgb565, which is never offered.
+    let (argb, xrgb) = (0x3432_5241_u32, 0x3432_5258_u32);
+    for (config, offered) in [(Some("options { capture-dmabuf true }"), true), (None, false)] {
+        let uwc = Uwc::start_env("dmabuf-offer", config, &[("UWC_DEBUG_DMABUF", "1")]);
+        let mut c = uwc.connect();
+        let qh = c.queue.handle();
+        let _w = c.window("shared", 320, 200);
+        let sources: ext_tl_source_manager::ExtForeignToplevelImageCaptureSourceManagerV1 =
+            c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let list: ext_tl_list::ExtForeignToplevelListV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let out_sources: ext_output_source_manager::ExtOutputImageCaptureSourceManagerV1 =
+            c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let copy: ext_copy_manager::ExtImageCopyCaptureManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let output = c.bind_output();
+        c.sync();
+        c.sync();
+        let handle = c.app.ext_tl.iter().find(|t| t.2 == "shared").expect("window announced").0.clone();
+
+        // The output: the device and each format with its modifiers, before `done`.
+        let osrc = out_sources.create_source(&output, &qh, ());
+        let _osession = copy.create_session(&osrc, ext_copy_manager::Options::empty(), &qh, ());
+        c.sync();
+        let want: Vec<String> = if offered {
+            vec![
+                "size 1000x600".into(),
+                "shm".into(),
+                "dmabuf device 0x102030405060708".into(),
+                format!("dmabuf {argb:#x} [0, ffffffffffffff]"),
+                format!("dmabuf {xrgb:#x} [0]"),
+                "done".into(),
+            ]
+        } else {
+            vec!["size 1000x600".into(), "shm".into(), "done".into()]
+        };
+        assert_eq!(c.app.cap_events, want, "offered: {offered}");
+
+        // A window capture stays shm either way.
+        c.app.cap_events.clear();
+        let src = sources.create_source(&handle, &qh, ());
+        let _session = copy.create_session(&src, ext_copy_manager::Options::empty(), &qh, ());
+        c.sync();
+        assert_eq!(c.app.cap_events, ["size 320x200", "shm", "done"]);
+
+        // wlr-screencopy: a linux_dmabuf per format, before buffer_done.
+        let sc: sc_manager::ZwlrScreencopyManagerV1 = c.globals.bind(&qh, 1..=3, ()).unwrap();
+        let wl_out: wl_output::WlOutput = c.globals.bind(&qh, 1..=4, ()).unwrap();
+        let _f = sc.capture_output(0, &wl_out, &qh, ());
+        c.sync();
+        let formats: Vec<u32> = c.app.linux_dmabuf.iter().map(|f| f.0).collect();
+        assert_eq!(formats, if offered { vec![argb, xrgb] } else { vec![] });
+        assert!(c.app.linux_dmabuf.iter().all(|f| (f.1, f.2) == (1000, 600)));
+        assert!(c.app.export_done);
+        let _ = list;
+    }
+}
+
+#[test]
+fn dragging_over_a_wallpaper_pans_the_canvas() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("wallpan", Some("options { view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    // A full-screen background layer, as a wallpaper is, covers all the empty canvas.
+    let _wall = c.layer(
+        "wall",
+        zwlr_layer_shell_v1::Layer::Background,
+        zwlr_layer_surface_v1::Anchor::Top
+            | zwlr_layer_surface_v1::Anchor::Bottom
+            | zwlr_layer_surface_v1::Anchor::Left
+            | zwlr_layer_surface_v1::Anchor::Right,
+        (0, 0),
+        -1,
+        zwlr_layer_surface_v1::KeyboardInteractivity::None,
+    );
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let vx = |s: &Value| num(&s["monitors"][0]["viewport"]["x"]);
+    let x0 = vx(&uwc.state());
+    p.motion_absolute(0, 500, 300, 1000, 600);
+    p.frame();
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.motion(2, 100.0, 0.0);
+    p.frame();
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    assert!(vx(&uwc.state()) < x0 - 50.0, "the view panned: {x0} -> {}", vx(&uwc.state()));
+}
+
+#[test]
+fn a_client_requested_move_ends_when_the_button_is_released() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("clientmove", Some("options { open-ms 0\n move-ms 0\n view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let seat = c.bind_seat();
+    let w = c.window("M", 200, 150);
+    let id = win(&uwc.state(), "M")["id"].as_u64().unwrap();
+    uwc.cmd(&format!("move {id} 100 100"));
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let s = uwc.state();
+    let (vx, vy) = (num(&s["monitors"][0]["viewport"]["x"]), num(&s["monitors"][0]["viewport"]["y"]));
+    p.motion_absolute(0, (100.0 - vx + 50.0) as u32, (100.0 - vy + 50.0) as u32, 1000, 600);
+    p.frame();
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.frame();
+    c.sync();
+    // What a CSD title bar does on a press.
+    w.toplevel._move(&seat, 1);
+    c.sync();
+    p.motion(2, 30.0, 0.0);
+    p.frame();
+    c.sync();
+    let x = |uwc: &mut Uwc| num(&win(&uwc.state(), "M")["x"]);
+    assert_eq!(x(&mut uwc), 130.0);
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    // The drag is over: further motion leaves the window where it was.
+    p.motion(4, 50.0, 0.0);
+    p.frame();
+    c.sync();
+    assert_eq!(x(&mut uwc), 130.0, "the window kept following the pointer after the release");
+}
+
+#[test]
+fn dragging_over_click_through_shell_layers_pans_the_canvas() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("shellpan", Some("options { view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let all = zwlr_layer_surface_v1::Anchor::Top
+        | zwlr_layer_surface_v1::Anchor::Bottom
+        | zwlr_layer_surface_v1::Anchor::Left
+        | zwlr_layer_surface_v1::Anchor::Right;
+    let none = zwlr_layer_surface_v1::KeyboardInteractivity::None;
+    let _wall = c.layer("wall", zwlr_layer_shell_v1::Layer::Background, all, (0, 0), -1, none);
+    // A full-screen overlay and top layer that take no input (an empty input region), as a shell's pips and
+    // OSD do, and a side panel that takes it only inside a small hitbox.
+    let click_through = c.layer("pips", zwlr_layer_shell_v1::Layer::Top, all, (0, 0), -1, none);
+    let empty = c.app.compositor.create_region(&qh, ());
+    click_through.surface.set_input_region(Some(&empty));
+    click_through.surface.commit();
+    let osd = c.layer("osd", zwlr_layer_shell_v1::Layer::Overlay, all, (0, 0), -1, none);
+    osd.surface.set_input_region(Some(&empty));
+    osd.surface.commit();
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let vx = |s: &Value| num(&s["monitors"][0]["viewport"]["x"]);
+    let x0 = vx(&uwc.state());
+    p.motion_absolute(0, 500, 300, 1000, 600);
+    p.frame();
+    c.sync();
+    assert_eq!(uwc.state()["cursor"]["under"], "layer:wall", "the click-through layers do not take the click");
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.motion(2, 100.0, 0.0);
+    p.frame();
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    assert!(vx(&uwc.state()) < x0 - 50.0, "the view panned: {x0} -> {}", vx(&uwc.state()));
 }

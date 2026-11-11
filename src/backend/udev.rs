@@ -65,8 +65,10 @@ use crate::{
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
-type OutputManager = DrmOutputManager<Allocator, Exporter, (), DrmDeviceFd>;
-type GbmDrmOutput = DrmOutput<Allocator, Exporter, (), DrmDeviceFd>;
+/// What each queued frame carries until its vblank: the presentation feedback clients asked for.
+type Queued = smithay::desktop::utils::OutputPresentationFeedback;
+type OutputManager = DrmOutputManager<Allocator, Exporter, Queued, DrmDeviceFd>;
+type GbmDrmOutput = DrmOutput<Allocator, Exporter, Queued, DrmDeviceFd>;
 
 /// Scan-out formats to try, in order.
 const FORMATS: [Fourcc; 2] = [Fourcc::Argb8888, Fourcc::Xrgb8888];
@@ -378,8 +380,8 @@ impl Uwc {
 
         let notifier = self
             .loop_handle
-            .insert_source(drm_notifier, |event, _, state| match event {
-                DrmEvent::VBlank(crtc) => state.udev_vblank(crtc),
+            .insert_source(drm_notifier, |event, metadata, state| match event {
+                DrmEvent::VBlank(crtc) => state.udev_vblank(crtc, metadata.take()),
                 DrmEvent::Error(e) => tracing::error!("DRM: {e}"),
             })
             .map_err(|e| anyhow!("{e}"))?;
@@ -392,6 +394,11 @@ impl Uwc {
         }
         self.dmabuf_global =
             Some(self.dmabuf_state.create_global_with_default_feedback::<Uwc>(&self.display_handle, &feedback));
+        // Output captures into a client's dmabuf: what the renderer can draw to, on this device (`capture-dmabuf`).
+        self.capture_dmabuf = Some(crate::capture::DmabufOffer::new(
+            node.dev_id(),
+            renderer.egl_context().dmabuf_render_formats().iter().copied(),
+        ));
 
         // Explicit sync, when the kernel driver can do syncobj eventfds (NVIDIA 560+, recent Mesa drivers).
         if explicit_sync && self.syncobj_state.is_none() {
@@ -561,13 +568,36 @@ impl Uwc {
         Ok(())
     }
 
-    fn udev_vblank(&mut self, crtc: crtc::Handle) {
+    fn udev_vblank(&mut self, crtc: crtc::Handle, metadata: Option<smithay::backend::drm::DrmEventMetadata>) {
+        use smithay::backend::drm::DrmEventTime as DrmTime;
         let Some(u) = self.udev() else { return };
         let Some(out) = u.gpu.as_mut().and_then(|g| g.outs.iter_mut().find(|o| o.crtc == crtc)) else { return };
-        if let Err(e) = out.drm_output.frame_submitted() {
-            tracing::warn!("frame submitted: {e}");
-        }
+        let feedback = match out.drm_output.frame_submitted() {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("frame submitted: {e}");
+                None
+            }
+        };
         out.pending = false;
+        let output = out.output.clone();
+        // Clients that asked when their content was shown are told what the kernel measured: the flip's
+        // own timestamp (CLOCK_MONOTONIC unless the driver only has the realtime clock, then now) and its
+        // sequence number.
+        if let Some(feedback) = feedback {
+            let (time, seq) = match metadata {
+                Some(m) => (
+                    match m.time {
+                        DrmTime::Monotonic(d) => Some(d),
+                        DrmTime::Realtime(_) => None,
+                    },
+                    m.sequence as u64,
+                ),
+                None => (None, self.frames_drawn),
+            };
+            use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+            self.frame_presented(&output, feedback, time, seq, Kind::Vsync | Kind::HwClock | Kind::HwCompletion);
+        }
         // The next frame, if one is wanted, is rendered at the end of this event-loop turn.
     }
 
@@ -599,7 +629,7 @@ impl Uwc {
                 let elements = self.frame_elements(&mut gpu.renderer, m);
                 let queued =
                     match out.drm_output.render_frame(&mut gpu.renderer, &elements, self.tag_look().0, frame_flags) {
-                        Ok(r) if !r.is_empty => match out.drm_output.queue_frame(()) {
+                        Ok(r) if !r.is_empty => match out.drm_output.queue_frame(self.take_feedback(&out.output)) {
                             Ok(()) => {
                                 out.pending = true;
                                 self.frames_drawn += 1;
@@ -624,7 +654,7 @@ impl Uwc {
                     let refresh = output.current_mode().map(|m| m.refresh).unwrap_or(60_000).max(1000);
                     let d = Duration::from_micros(1_000_000_000 / refresh as u64);
                     let _ = self.loop_handle.insert_source(Timer::from_duration(d), move |_, _, state| {
-                        super::send_frame_callbacks(state, &output);
+                        super::frame_done(state, &output);
                         TimeoutAction::Drop
                     });
                 }

@@ -47,8 +47,11 @@ use crate::{
     ipc::Ipc,
 };
 
+#[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Set for clients that connected through a `wp_security_context_v1` socket (sandboxed apps).
+    pub security: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
 impl ClientData for ClientState {
@@ -67,13 +70,18 @@ pub struct Fx {
     /// How long the fade/grow and the glide take, as configured when they started.
     pub fade_ms: f64,
     pub move_ms: f64,
+    /// Focus crossfade (`focus-ms`): 1 = settled on the current focus, 0 = just changed, with the
+    /// configured duration alongside.
+    pub focus_fade: f64,
+    pub focus_ms: f64,
 }
 
 impl Fx {
-    pub const REST: Fx = Fx { alpha: 1.0, scale: 1.0, off: (0.0, 0.0), fade_ms: 0.0, move_ms: 0.0 };
+    pub const REST: Fx =
+        Fx { alpha: 1.0, scale: 1.0, off: (0.0, 0.0), fade_ms: 0.0, move_ms: 0.0, focus_fade: 1.0, focus_ms: 0.0 };
 
     pub fn at_rest(&self) -> bool {
-        self.alpha == 1.0 && self.scale == 1.0 && self.off == (0.0, 0.0)
+        self.alpha == 1.0 && self.scale == 1.0 && self.off == (0.0, 0.0) && self.focus_fade == 1.0
     }
 }
 
@@ -102,6 +110,8 @@ pub struct Ghost {
     pub fade_ms: f64,
     /// Ids for the dim, backdrop, border and shadow shader elements.
     pub deco_ids: [Id; 4],
+    /// The closed window's id, kept as the key for its blur textures (blur.rs).
+    pub key: u32,
 }
 
 impl Ghost {
@@ -169,6 +179,14 @@ pub struct Client {
     pub prev_size: Option<Size<i32, Logical>>,
     /// Minimized (the scratchpad): 0 = no, else the order it was hidden in (newest highest).
     pub minimized: u32,
+    /// Kept out of the tiling layouts (tiling.rs): by a rule, `toggle-float`, or being moved by hand.
+    pub floating: bool,
+    /// Its announced (min, max) size, 0 = none; read at every commit.
+    pub limits: crate::tiling::Limits,
+    /// The size it showed it needs when it drew bigger than the slot it was told.
+    pub tile_min: (i32, i32),
+    /// The size its layout last asked for.
+    pub tile_want: Option<(i32, i32)>,
     /// What the rules' `open { }` blocks said, decided at the first configure, used when it maps.
     pub open: crate::rules::Open,
     /// The window's own scale on the canvas (1 = normal), on top of the view's zoom.
@@ -183,6 +201,11 @@ pub struct Client {
     pub border_ids: [Id; 4],
     /// Ids for the dim, backdrop, border and shadow shader elements.
     pub deco_ids: [Id; 4],
+    /// The icon the client set over xdg-toplevel-icon-v1: a stock icon name, and/or pixel data
+    /// written to a PAM file under the cache dir (path here); `icon_hash` is what was written.
+    pub icon_name: Option<String>,
+    pub icon_path: Option<std::path::PathBuf>,
+    pub icon_hash: u64,
 }
 
 impl Client {
@@ -247,15 +270,19 @@ impl Client {
     }
 }
 
-/// A touchpad gesture the compositor takes (3 fingers): a swipe pans the view, a pinch zooms.
-/// Gestures with fewer fingers go to the client under the pointer (zwp-pointer-gestures-v1).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A touchpad gesture the compositor is taking (see `gestures { }` in the config); gestures with no
+/// bind go to the client under the pointer (zwp-pointer-gestures-v1).
+#[derive(Debug, Clone, PartialEq)]
 pub enum Gesture {
-    Swipe,
-    /// `last` is the scale the previous update reported (the pinch's is absolute).
-    Pinch {
-        last: f64,
-    },
+    /// A swipe that pans the view with the fingers; releasing while moving coasts on (fling).
+    Pan,
+    /// A swipe with direction binds: when the fingers lift, run the action of the direction the
+    /// swipe went (if it went far enough), with the total travel in `dx`/`dy`.
+    Dir { dirs: Vec<(Dir, Action)>, dx: f64, dy: f64 },
+    /// Run this action when the fingers lift (a swipe or pinch bound to an action).
+    End(Action),
+    /// A pinch that zooms the view; `last` is the scale the previous update reported (absolute).
+    Zoom { last: f64 },
 }
 
 /// A touchpad or touch pan that was let go while moving: the view keeps gliding, slowing down
@@ -300,16 +327,13 @@ pub enum Drag {
         orig: Size<i32, Logical>,
     },
     Pan,
-    /// Dragging a frame by its title strip; the windows it carries are in `frames.carrying`.
-    FrameMove {
-        id: u32,
+    /// Resizing a tile moves its region's main split: `ratio0` is the ratio when the drag began.
+    TileResize {
+        region: crate::tiling::Region,
         start: Point<f64, Logical>,
-        orig: Point<f64, Logical>,
-    },
-    FrameResize {
-        id: u32,
-        start: Point<f64, Logical>,
-        orig: Size<f64, Logical>,
+        ratio0: f64,
+        /// Screen px per canvas px of the window being dragged.
+        zoom: f64,
     },
 }
 
@@ -467,6 +491,8 @@ pub struct Uwc {
     /// linux-drm-syncobj-v1 (explicit sync), when the GPU supports it.
     pub syncobj_state: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
     pub dmabuf_global: Option<DmabufGlobal>,
+    /// The render node and formats output captures can be written to as dmabufs; set by the udev backend.
+    pub capture_dmabuf: Option<crate::capture::DmabufOffer>,
     pub backend: Backend,
 
     pub config: Config,
@@ -506,8 +532,8 @@ pub struct Uwc {
     /// The active keyboard layout: (index, name, count).
     pub layout: (usize, String, usize),
     pub hot: crate::hotzones::HotState,
-    /// Labelled regions of the canvas (frames.rs).
-    pub frames: crate::frames::Frames,
+    /// Each tag's tiling layout (tiling.rs).
+    pub tiling: crate::tiling::Tiling,
     /// Alignment lines drawn while a window is dragged (snap.rs).
     pub guides: crate::snap::Guides,
     /// Hint mode (`jump-hints`) while it is up.
@@ -524,6 +550,11 @@ pub struct Uwc {
     pub drag_last: Point<f64, Logical>,
     /// A mouse bind took the press, so the matching release is swallowed too.
     pub consumed_press: bool,
+    /// The running drag was asked for by a client (xdg move/resize request): its press already reached
+    /// the client, so the release must too, or the client's implicit grab never ends.
+    pub drag_from_client: bool,
+    /// Pointer buttons currently held (as the compositor saw them).
+    pub buttons_down: Vec<u32>,
     /// Bumped on anything that changes how decorations look, so the damage tracker redraws them.
     pub deco_commit: smithay::backend::renderer::utils::CommitCounter,
     /// Set by anything that needs a new frame.
@@ -534,6 +565,31 @@ pub struct Uwc {
     pub fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState,
     #[allow(dead_code)]
     pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
+    /// wp_presentation, wp_fifo_v1 and wp_commit_timing_v1 (presentation.rs); held so the globals stay alive.
+    #[allow(dead_code)]
+    pub presentation_state: smithay::wayland::presentation::PresentationState,
+    #[allow(dead_code)]
+    pub fifo_state: smithay::wayland::fifo::FifoManagerState,
+    #[allow(dead_code)]
+    pub commit_timing_state: smithay::wayland::commit_timing::CommitTimingManagerState,
+    /// wp_security_context_v1 (sandbox.rs); held so the global stays alive.
+    #[allow(dead_code)]
+    pub security_context_state: smithay::wayland::security_context::SecurityContextState,
+    /// CLOCK_MONOTONIC, the clock presentation timestamps are given on.
+    pub present_clock: crate::presentation::PresentClock,
+    /// A timer for a commit that waits for a time is pending / a hidden window's fifo barrier is queued.
+    pub commit_timer_armed: bool,
+    /// Textures the background blur keeps between frames (blur.rs).
+    pub blur: crate::blur::BlurCache,
+    /// ext-background-effect-v1: the surfaces that asked for blur behind them (background_effect.rs).
+    pub bg_effect: std::collections::HashMap<WlSurface, crate::background_effect::BgEffect>,
+    /// Texture keys for blur.rs beyond window ids (layer surfaces, ghosts).
+    pub next_blur_key: u32,
+    #[allow(dead_code)] // held so the global stays alive
+    pub alpha_modifier: smithay::wayland::alpha_modifier::AlphaModifierState,
+    #[allow(dead_code)] // held so the global stays alive
+    pub toplevel_icon: smithay::wayland::xdg_toplevel_icon::XdgToplevelIconManager,
+    pub pace_idle: bool,
     /// Counts minimize calls, so the newest minimized window comes back first.
     pub minimize_stamp: u32,
     /// Compiled user shaders by kind and file (None: it failed), and why the failed ones failed
@@ -583,7 +639,8 @@ impl Uwc {
                 ),
                 |_, display, state| {
                     // Safety: the display is not dropped while it is being dispatched.
-                    unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+                    let display = unsafe { display.get_mut() };
+                    dispatch_surviving_panics(display, state);
                     Ok(smithay::reexports::calloop::PostAction::Continue)
                 },
             )
@@ -591,6 +648,7 @@ impl Uwc {
 
         let ipc = Ipc::new(&loop_handle, &socket_name)?;
         crate::virtual_pointer::create_global(&dh);
+        Uwc::bg_effect_new(&dh);
         let primary_selection = smithay::wayland::selection::primary_selection::PrimarySelectionState::new::<Uwc>(&dh);
         let extras = crate::extras::Extras::new(&dh, &primary_selection);
 
@@ -609,7 +667,7 @@ impl Uwc {
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
             primary_selection,
             popups: PopupManager::default(),
-            layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
+            layer_shell_state: WlrLayerShellState::new_with_filter::<Uwc, _>(&dh, |c| !crate::sandbox::is_sandboxed(c)),
             ipc_rules: Vec::new(),
             workspaces: crate::workspace::WorkspaceState::new(&dh),
             toplevels: crate::toplevels::ForeignToplevels::new(&dh),
@@ -626,7 +684,9 @@ impl Uwc {
             or_windows: Vec::new(),
             pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState::new::<Uwc>(&dh),
             text_input: smithay::wayland::text_input::TextInputManagerState::new::<Uwc>(&dh),
-            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |_| true),
+            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |c| {
+                !crate::sandbox::is_sandboxed(c)
+            }),
             ime_popups: Vec::new(),
             output_management: Default::default(),
             output_power: crate::output_power::OutputPower::new(&dh),
@@ -637,6 +697,7 @@ impl Uwc {
             dmabuf_state: DmabufState::new(),
             syncobj_state: None,
             dmabuf_global: None,
+            capture_dmabuf: None,
             backend: Backend::None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_theme: crate::cursor::CursorTheme::new(&config.cursor_theme, config.cursor_size),
@@ -666,7 +727,7 @@ impl Uwc {
             window_layouts: Default::default(),
             layout: (0, String::new(), 1),
             hot: Default::default(),
-            frames: Default::default(),
+            tiling: Default::default(),
             guides: Default::default(),
             hints: None,
             in_drag_motion: false,
@@ -676,12 +737,29 @@ impl Uwc {
             selection_owner: [SelectionOwner::None; 2],
             drag_last: (0.0, 0.0).into(),
             consumed_press: false,
+            drag_from_client: false,
+            buttons_down: Vec::new(),
             deco_commit: Default::default(),
             redraw: true,
             minimize_stamp: 0,
             scale_gen: 0,
             fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Uwc>(&dh),
             viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Uwc>(&dh),
+            presentation_state: smithay::wayland::presentation::PresentationState::new::<Uwc>(
+                &dh,
+                smithay::reexports::rustix::time::ClockId::Monotonic as u32,
+            ),
+            fifo_state: smithay::wayland::fifo::FifoManagerState::new::<Uwc>(&dh),
+            commit_timing_state: smithay::wayland::commit_timing::CommitTimingManagerState::new::<Uwc>(&dh),
+            security_context_state: crate::sandbox::create_state(&dh),
+            present_clock: crate::presentation::PresentClock::new(),
+            commit_timer_armed: false,
+            blur: Default::default(),
+            bg_effect: Default::default(),
+            next_blur_key: 0x4000_0000,
+            alpha_modifier: smithay::wayland::alpha_modifier::AlphaModifierState::new::<Uwc>(&dh),
+            toplevel_icon: smithay::wayland::xdg_toplevel_icon::XdgToplevelIconManager::new::<Uwc>(&dh),
+            pace_idle: false,
             fullscreen_bg_id: Id::new(),
             user_shaders: Default::default(),
             shader_errors: Default::default(),
@@ -699,10 +777,7 @@ impl Uwc {
         let name = source.socket_name().to_os_string();
         handle
             .insert_source(source, |stream, _, state| {
-                if let Err(e) = state
-                    .display_handle
-                    .insert_client(stream, Arc::new(ClientState { compositor_state: Default::default() }))
-                {
+                if let Err(e) = state.display_handle.insert_client(stream, Arc::new(ClientState::default())) {
                     tracing::warn!("rejecting client: {e}");
                 }
             })
@@ -872,6 +947,11 @@ impl Uwc {
     }
 
     /// Whether the window is drawn anywhere at all.
+    /// What output captures may be written into besides shm: only with `capture-dmabuf` on and a udev backend.
+    pub fn dmabuf_offer(&self) -> Option<&crate::capture::DmabufOffer> {
+        self.config.capture_dmabuf.then_some(self.capture_dmabuf.as_ref()).flatten()
+    }
+
     pub fn visible(&self, c: &Client) -> bool {
         c.mapped && c.minimized == 0 && (c.pin.is_some() || c.tags & self.tagset != 0)
     }
@@ -1165,6 +1245,7 @@ impl Uwc {
             f.alpha += (1.0 - f.alpha) * kf;
             f.scale += (1.0 - f.scale) * kf;
             f.off = (f.off.0 - f.off.0 * km, f.off.1 - f.off.1 * km);
+            f.focus_fade += (1.0 - f.focus_fade) * k(f.focus_ms);
             if (1.0 - f.alpha) < 0.01 {
                 f.alpha = 1.0;
             }
@@ -1173,6 +1254,9 @@ impl Uwc {
             }
             if f.off.0.abs() < 0.25 && f.off.1.abs() < 0.25 {
                 f.off = (0.0, 0.0);
+            }
+            if (1.0 - f.focus_fade) < 0.01 {
+                f.focus_fade = 1.0;
             }
             if f.at_rest() {
                 *f = Fx::REST;
@@ -1337,6 +1421,15 @@ impl Uwc {
             }
         }
         self.focus = id;
+        // The focus look crossfades between the old and the new window over `focus-ms`.
+        if changed && self.config.focus_ms > 0.0 {
+            for c in &mut self.clients {
+                if Some(c.id) == old || Some(c.id) == id {
+                    c.fx.focus_fade = 0.0;
+                    c.fx.focus_ms = self.config.focus_ms;
+                }
+            }
+        }
         if let Some(i) = id.and_then(|id| self.client_index(id)).filter(|_| raise) {
             let c = self.clients.remove(i);
             self.clients.push(c);
@@ -1510,6 +1603,7 @@ impl Uwc {
                 self.drag = None;
             }
         }
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -1589,6 +1683,7 @@ impl Uwc {
         self.fling = None;
         self.in_drag_motion = false;
         self.consumed_press = false;
+        self.drag_from_client = false;
         self.hints_cancel();
         self.touch_cancel();
         self.damage();
@@ -1659,6 +1754,7 @@ impl Uwc {
                 let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
                 self.focus_client(top);
             }
+            self.retile_all();
             self.damage();
         }
     }
@@ -1688,6 +1784,7 @@ impl Uwc {
             c.tags = ts;
         }
         self.focus_client(Some(id));
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -1708,6 +1805,7 @@ impl Uwc {
                 let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
                 self.focus_client(top);
             }
+            self.retile_all();
             self.refresh_pointer();
             self.damage();
         } else {
@@ -1715,6 +1813,7 @@ impl Uwc {
             if self.clients[i].pin.is_none() {
                 self.clients[i].tags = self.tagset();
             }
+            self.retile_all();
             self.focus_and_reveal(id);
             self.damage();
         }
@@ -1772,6 +1871,7 @@ impl Uwc {
             if on {
                 self.focus_client(Some(id));
             }
+            self.retile_all();
             self.refresh_pointer();
             self.damage();
             return;
@@ -1814,6 +1914,7 @@ impl Uwc {
         if on {
             self.focus_client(Some(id));
         }
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -1875,6 +1976,7 @@ impl Uwc {
                     let s = self.config.move_step;
                     let c = self.clients[i].canvas;
                     let id = self.clients[i].id;
+                    self.release_from_tiling(id);
                     self.move_client_eased(id, c.x + v.0 * s, c.y + v.1 * s);
                 }
             }
@@ -1884,6 +1986,7 @@ impl Uwc {
                     let s = self.config.move_step;
                     let sz = self.clients[i].size();
                     let id = self.clients[i].id;
+                    self.release_from_tiling(id);
                     self.resize_client(id, sz.w + (v.0 * s) as i32, sz.h + (v.1 * s) as i32);
                 }
             }
@@ -1914,23 +2017,18 @@ impl Uwc {
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::JumpHints => self.hints_toggle(),
             Action::NextLayout => self.set_layout(None),
-            Action::FrameNew => {
-                if let Some(id) = self.focus {
-                    self.frame_around(id);
+            Action::Tile(l) => self.tile_set(Some(*l)),
+            Action::TileOnce(l) => self.tile_once(*l),
+            Action::TileOff => self.tile_set(None),
+            Action::TileCycle => self.tile_cycle(),
+            Action::TileRatio(d) => self.tile_ratio(*d),
+            Action::TileMasters(d) => self.tile_masters(*d),
+            Action::ToggleFloat => {
+                if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
+                    let (id, on) = (self.clients[i].id, !self.clients[i].floating);
+                    self.set_floating(id, on);
                 }
             }
-            Action::FrameRemove => {
-                if let Some(f) = self.frame_of_focus() {
-                    self.frame_remove(f);
-                }
-            }
-            Action::FrameFit => {
-                if let Some(f) = self.frame_of_focus() {
-                    self.frame_fit(f);
-                }
-            }
-            Action::FrameNext => self.frame_cycle(true),
-            Action::FramePrevious => self.frame_cycle(false),
             Action::Hint(k) => self.hint_key(k.clone()),
             Action::ToggleFullscreen => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
@@ -2046,6 +2144,7 @@ impl Uwc {
                 self.config_error = None;
                 self.config_rev += 1;
                 self.deco_commit.increment();
+                self.retile_all();
                 self.damage();
                 Ok(())
             }
@@ -2058,6 +2157,40 @@ impl Uwc {
             }
         }
     }
+}
+
+/// Dispatch the clients' requests. A panic in a protocol handler unwinds out of `dispatch_clients` (uwc uses
+/// the pure Rust wayland backend, see Cargo.toml), leaving the requests that client had sent after the
+/// guilty one buffered in the backend: the socket is empty, so nothing would wake the loop for them and the
+/// client would hang waiting for its reply. So after a panic every client is dispatched again, then the panic
+/// goes on to `serve` (main.rs), which counts it and drops the half-done state.
+fn dispatch_surviving_panics(display: &mut Display<Uwc>, state: &mut Uwc) {
+    use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+    let Err(first) = catch_unwind(AssertUnwindSafe(|| display.dispatch_clients(state).unwrap())) else {
+        return;
+    };
+    state.recover_after_panic();
+    // A bounded number of rounds: each one that panics again has used up a request, but a client could
+    // send a lot of them.
+    for _ in 0..16 {
+        let mut ids = Vec::new();
+        display.backend().handle().with_all_clients(|id| ids.push(id));
+        let mut more = false;
+        for id in ids {
+            match catch_unwind(AssertUnwindSafe(|| display.backend().dispatch_single_client(state, id))) {
+                Ok(Ok(n)) => more |= n > 0,
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    state.recover_after_panic();
+                    more = true;
+                }
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    resume_unwind(first);
 }
 
 #[cfg(test)]
@@ -2089,6 +2222,7 @@ mod tests {
             scale_fx,
             fade_ms: 160.0,
             deco_ids: std::array::from_fn(|_| Id::new()),
+            key: 0,
         }
     }
 

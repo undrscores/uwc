@@ -35,6 +35,20 @@ options {
     opacity 1                   // 0-1: focused windows (the surface only, not the border or shadow)
     inactive-opacity 1          // 0-1: windows that do not have focus
     inactive-dim 0              // 0-1: how much windows without focus are darkened
+    // Background blur: what is behind a window is blurred and shown through its translucent parts (a
+    // terminal at opacity 0.8). The number is how far the blur reaches, in px of canvas (it scales with
+    // zoom); 0 = none. Best set per window with a rule (match app-id="foot"; opacity 0.85; blur-radius 12).
+    // The window's corner-radius clips it. Windows stacked on each other blur through each other, and a
+    // closing window's ghost is blurred too while it fades. Layer surfaces (bars) can ask for the same
+    // blur over ext-background-effect, with the global blur-radius. The result is cached while nothing
+    // behind changes.
+    blur-radius 0
+    blur-brightness 1           // what the blur does to the light behind: brightness multiplier (0-2)
+    blur-saturation 1           // saturation multiplier (0-2)
+    blur-noise 0                // speckle added to the blurred backdrop, 0-1; 0 = none
+    // uwm's `grid` (a grid drawn on the canvas) is accepted so uwm themes load, and ignored: draw the
+    // canvas grid with background-shader (see shaders/) and snap windows to it with snap-grid.
+    // grid 32 "#1a1b26"
     // Border gradients replace the border / focus color: 2 to 6 colors, angle in CSS degrees
     // (0 = first color at the bottom, last at the top; 90 = first at the left; the default).
     // No colors turns it off. Needs border-width > 0.
@@ -62,18 +76,28 @@ options {
     move-ms 140                 // windows moved by key or IPC glide for about this long; 0 = jump. Dragging is always instant
     tag-ms 140                  // windows that come into view with a tag switch fade in over this long; 0 = at once
     close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
+    focus-ms 0                  // the focus look (border, shadow, dim) crossfades between the old and the new window over this long; 0 = jumps at once
     pan-momentum-ms 600         // let go of a touchpad swipe or a touch drag while moving and the view glides on, losing most of its speed in about this long; 0 = stops dead. Not uwm's option
-    // Dragging a window snaps its edges and centre lines to other windows and frames within this many screen px
+    swipe-gain 2.0              // screen px the view pans per unit of swipe finger travel (the canvas follows the fingers)
+    swipe-threshold 60          // finger travel before a directional swipe (gestures { swipe N left ... }) counts as that direction
+    // Dragging a window snaps its edges and centre lines to other windows within this many screen px
     // (so it feels the same at any zoom), drawing a guide line; hold Ctrl to drag freely. 0 = off. Not uwm's option.
     snap-distance 8
     snap-grid 0                 // also snap to a grid of this many canvas px (0 = no grid); windows' edges win over the grid
     snap-color "#ff6ac1"        // the guide lines
-    // Frames: labelled regions of the canvas behind the windows (frame-new draws one around the focused window).
-    // Drag a frame by its title strip and its windows go with it; drag the bottom-right corner to resize.
-    frame-color "#7aa2f7"       // border, title strip and label badge
-    frame-opacity 0.08          // how much the inside is tinted
-    frame-label-scale 2         // size of the label, in screen px per font pixel (the strip is 11 of them tall)
-    frame-border-width 2        // px; 0 = none
+    // Tiling: everything floats until you tile a tag. `tile "master-stack"` (or dwindle, spiral, columns) lays the
+    // tag's windows out over what the screen shows now and keeps doing it as windows open and close; the area is fixed
+    // on the canvas, so panning moves and resizes nothing (run `tile` again to re-anchor it where you are). A window
+    // float (toggle-float, `open { float }` in a rule), or move or resize with the keys, leaves the layout; so does a
+    // window with one fixed size. With the mouse a tile is lifted: drop it on another tile to swap, inside the area to
+    // put it back, anywhere else to float it; resizing one moves the main split
+    // (the ratio) with the pointer. A window that cannot get as small as its slot is given the room it needs.
+    // `tile-once` arranges once and leaves the windows floating. `uwc msg tile ...` does the same from a
+    // script. Not uwm's.
+    tile-gap 12                 // px between the windows and the edge of the tile area
+    tile-inner-gap 12           // px between neighbouring tiled windows
+    tile-ratio 0.55             // the share the master column (or the first split) takes, 0.1 to 0.9; tile-ratio in binds changes it per tag
+    tile-masters 1              // master-stack: windows in the master column
     per-window-layout false     // each window keeps the keyboard layout it was typed in (with several layouts in input { keyboard { xkb-layout "us,de" } }). Not uwm's option
     hot-zone-size 2             // hot zones (below) are this many px deep at the screen's corners and edges; 0 = off
     hot-zone-delay-ms 250       // the pointer has to rest in one this long, so passing by does nothing
@@ -110,6 +134,12 @@ options {
     hardware-cursor true        // draw the pointer on the GPU's cursor plane; false = composite it
     direct-scanout true         // show a client buffer that covers the output without compositing
     explicit-sync true          // linux-drm-syncobj-v1, needed for flicker-free GL/Vulkan apps on NVIDIA
+    // Screen capture of a whole output (OBS, wf-recorder, portal screen sharing, grim) normally goes through
+    // shared memory: the GPU draws, the CPU copies. With this on, capture clients are also offered dmabuf
+    // buffers, which stay on the GPU (much cheaper for recording and sharing at high resolution). Off by
+    // default because it has not been tried on real hardware yet; if a capture client fails or shows garbage
+    // with it on, turn it off. Window captures stay shm. Applies to new captures at once.
+    capture-dmabuf false
 }
 
 // Outputs (in a real session). Not listed: preferred mode, scale 1. Only one output is used for now:
@@ -153,10 +183,11 @@ options {
 //       size 900 600       canvas px
 //       position 3000 0    canvas px of its top-left corner (screen px when it also opens pinned)
 //       pinned / fullscreen / minimized    (minimized: it starts hidden, a scratchpad)
+//       float                              (keep it out of the tiling layouts, below)
 //       focus false        it does not take the keyboard
 //       scale 0.5          its own scale on the canvas (also scale-window / Mod+Ctrl+scroll)
 // - any decoration option (border-width, border-color, focus-color, focus-gradient, corner-radius,
-//   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, border-spin-ms,
+//   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, blur-radius, border-spin-ms,
 //   urgent-*): it applies to these windows live, and follows their state (e.g. match focused=false).
 // IPC: `rule { ... }` adds one until the next reload, `rule clear` removes those.
 //
@@ -176,7 +207,7 @@ options {
 // screen, all monitors together; each fires once per visit). Any bind action works.
 // hot-zones {
 //     top-left     { toggle-overview; }
-//     bottom-right { frame-next; }
+//     bottom-right { jump-hints; }
 //     left         { view-previous; }
 // }
 
@@ -221,19 +252,21 @@ binds {
     // Zoom out, label every window, type a label to glide to that window at the zoom you came from
     // (Escape cancels). From a script: `uwc msg jump QUERY` fuzzy-finds a window by app-id and title.
     Mod+Slash { jump-hints; }
-    // Frames: label a region of the canvas and move it, or jump the view to it, as a unit. Name one from a
-    // script: `uwc msg frame label ID mail`. Windows belong to a frame while their centre is inside it.
-    Mod+B { frame-new; }                // a frame around the focused window
-    Mod+Shift+B { frame-remove; }       // remove the focused window's frame
-    Mod+Ctrl+B { frame-fit; }           // fit the view to the focused window's frame
-    Mod+bracketright { frame-next; }    // fit the next frame, in reading order
-    Mod+bracketleft { frame-previous; }
     // A VM or remote desktop can ask for every key (keyboard-shortcuts-inhibit); this takes them back, and
     // is the one bind that still works while they are held.
     Mod+Shift+Escape { toggle-shortcuts-inhibit; }
     Mod+C { center-window; }
     Mod+M { fit-window; }
     Mod+E { toggle-fullscreen; }
+    // Tiling (see tile-gap above): Mod+G steps through master-stack, dwindle, spiral, columns and off for the tag in
+    // use; windows tile over what the screen shows now. Mod+Shift+G floats or re-tiles the focused window.
+    Mod+G { tile-cycle; }
+    Mod+Alt+G { tile-once "master-stack"; }     // arrange once, then leave the windows floating
+    Mod+Shift+G { toggle-float; }
+    Mod+Shift+bracketleft { tile-ratio -0.05; } // a smaller / larger master column
+    Mod+Shift+bracketright { tile-ratio 0.05; }
+    Mod+Ctrl+bracketleft { tile-masters -1; }   // fewer / more windows in it
+    Mod+Ctrl+bracketright { tile-masters 1; }
     Mod+Space { next-layout; }          // the next keyboard layout (input { keyboard { xkb-layout "us,de" } }); `uwc msg state` reports it
     Mod+Shift+Space { toggle-pin; }     // keep on screen while the view moves, unzoomed, on every tag
     Mod+Y { minimize-window; }          // hide the focused window until restored (a scratchpad)
@@ -318,4 +351,30 @@ binds {
     Ctrl+Alt+XF86Switch_VT_10 { switch-vt 10; }
     Ctrl+Alt+XF86Switch_VT_11 { switch-vt 11; }
     Ctrl+Alt+XF86Switch_VT_12 { switch-vt 12; }
+}
+
+// Touchpad gestures: `swipe N` / `pinch N` with N fingers, a swipe optionally with a direction.
+// Handlers: pan = drag the view with the fingers (coasts on if you let go while moving);
+// zoom = pinch-zoom the view about the pointer; client = send the gesture to the app under the
+// pointer (zwp-pointer-gestures-v1, e.g. a browser's two-finger pinch; in a directional entry it
+// just makes that direction a no-op, since the gesture is already taken when the fingers go
+// down); swipe = treat the pinch as a swipe; any other action runs when the fingers lift. A
+// directional swipe runs its action only if the swipe went that way at least swipe-threshold.
+// A pinch whose finger count has swipe binds but no `pinch N` entry is treated as that swipe
+// (libinput reports 3/4-finger swipes as pinches on some trackpads, the Magic Trackpad does),
+// so the defaults below make a 3-finger swipe pan even when the trackpad reports it as a pinch.
+// A direction-less entry replaces all entries for that kind and finger count: `swipe 4 { client; }`
+// turns the 4-finger swipes off.
+gestures {
+    swipe 3 { pan; }
+    // The canvas follows the fingers, so a swipe left acts on what was to the right:
+    swipe 4 left  { focus-direction right; }
+    swipe 4 right { focus-direction left; }
+    swipe 4 up    { focus-direction down; }
+    swipe 4 down  { focus-direction up; }
+    pinch 2 { zoom; }
+    // pinch 2 { client; }      // give two-finger pinches to the app (browser zoom) instead of zooming the view
+    // swipe 4 left { toggle-overview; }   // rebind one direction; `focus-direction` with no argument takes it
+    // swipe 3 { client; }      // hand 3-finger swipes to the app too
+    // pinch 3 { zoom; }        // a real 3-finger pinch zooms (instead of panning like a swipe)
 }

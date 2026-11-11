@@ -5,11 +5,14 @@
 
 use smithay::{
     backend::{
-        allocator::Fourcc,
+        allocator::{dmabuf::Dmabuf, Buffer as _, Format, Fourcc, Modifier},
         renderer::{
             damage::OutputDamageTracker,
             element::memory::MemoryRenderBuffer,
-            element::RenderElement,
+            element::{
+                utils::{Relocate, RelocateRenderElement},
+                RenderElement,
+            },
             gles::{GlesRenderer, GlesTexture},
             Bind, ExportMem, Offscreen,
         },
@@ -19,7 +22,7 @@ use smithay::{
         Resource,
     },
     utils::{Buffer, Physical, Point, Rectangle, Size, Transform},
-    wayland::shm::with_buffer_contents_mut,
+    wayland::{dmabuf::get_dmabuf, shm::with_buffer_contents_mut},
 };
 
 use crate::{
@@ -29,6 +32,97 @@ use crate::{
 
 /// The shm format captures are offered in (ARGB8888, which every client supports).
 pub const FORMAT: wl_shm::Format = wl_shm::Format::Argb8888;
+
+/// The dmabuf buffers an output capture can be written into: the render node and what the renderer can
+/// draw to. Only the udev backend knows them (`Uwc.capture_dmabuf`); offered when `capture-dmabuf` is on.
+#[derive(Debug, Clone)]
+pub struct DmabufOffer {
+    /// The DRM device (dev_t) the buffers must be allocated on.
+    pub device: u64,
+    /// Fourcc codes with the modifiers the renderer can render to.
+    pub formats: Vec<(Fourcc, Vec<Modifier>)>,
+}
+
+impl DmabufOffer {
+    /// The 8-bit RGB formats of `render_formats`, grouped by fourcc (what every capture client handles).
+    pub fn new(device: u64, render_formats: impl IntoIterator<Item = Format>) -> DmabufOffer {
+        let mut formats: Vec<(Fourcc, Vec<Modifier>)> = Vec::new();
+        for f in render_formats {
+            if !matches!(f.code, Fourcc::Argb8888 | Fourcc::Xrgb8888 | Fourcc::Abgr8888 | Fourcc::Xbgr8888) {
+                continue;
+            }
+            match formats.iter_mut().find(|(c, _)| *c == f.code) {
+                Some((_, m)) => m.push(f.modifier),
+                None => formats.push((f.code, vec![f.modifier])),
+            }
+        }
+        DmabufOffer { device, formats }
+    }
+
+    /// `device` as the byte array the protocols send (a dev_t in native byte order).
+    pub fn device_bytes(&self) -> Vec<u8> {
+        self.device.to_ne_bytes().to_vec()
+    }
+
+    /// The modifiers of one format as the byte array the protocols send (u64s in native byte order).
+    pub fn modifier_bytes(mods: &[Modifier]) -> Vec<u8> {
+        mods.iter().flat_map(|m| u64::from(*m).to_ne_bytes()).collect()
+    }
+}
+
+/// Whether `buffer` is a dmabuf an output capture of `size` can be rendered into (the client may only use what
+/// was offered: format and modifier). `Ok(None)`: it is not a dmabuf at all (the caller checks it as shm).
+pub fn check_dmabuf(
+    buffer: &WlBuffer,
+    size: Size<i32, Physical>,
+    offer: Option<&DmabufOffer>,
+) -> Result<Option<Dmabuf>, String> {
+    let Ok(dmabuf) = get_dmabuf(buffer) else { return Ok(None) };
+    let Some(offer) = offer else { return Err("dmabuf buffers are not offered".into()) };
+    let have = dmabuf.size();
+    if have.w != size.w || have.h != size.h {
+        return Err(format!("buffer is {}x{}, expected {}x{}", have.w, have.h, size.w, size.h));
+    }
+    let f = dmabuf.format();
+    let allowed = offer.formats.iter().any(|(c, mods)| *c == f.code && mods.contains(&f.modifier));
+    if !allowed {
+        return Err(format!("buffer format {:?} with modifier {:?} was not offered", f.code, f.modifier));
+    }
+    Ok(Some(dmabuf.clone()))
+}
+
+/// Whether `buffer` can take an output capture of `size`: a dmabuf that was offered, else shm.
+pub fn check_output_buffer(
+    buffer: &WlBuffer,
+    size: Size<i32, Physical>,
+    offer: Option<&DmabufOffer>,
+) -> Result<(), String> {
+    match check_dmabuf(buffer, size, offer)? {
+        Some(_) => Ok(()),
+        None => check_buffer(buffer, size),
+    }
+}
+
+/// Render the part `region` of `elements` (front to back, laid out for an output of `scale`) into the client's
+/// `dmabuf`, which is `region`'s size, over `clear`. Waits for the GPU, so the client can read it at once.
+pub fn render_region_to_dmabuf<E: RenderElement<GlesRenderer>>(
+    r: &mut GlesRenderer,
+    elements: &[E],
+    region: Rectangle<i32, Physical>,
+    scale: f64,
+    clear: [f32; 4],
+    mut dmabuf: Dmabuf,
+) -> Result<(), String> {
+    // Move the region to the buffer's top-left instead of drawing everything and cropping.
+    let at = smithay::utils::Point::<i32, Physical>::from((-region.loc.x, -region.loc.y));
+    let moved: Vec<RelocateRenderElement<&E>> =
+        elements.iter().map(|e| RelocateRenderElement::from_element(e, at, Relocate::Relative)).collect();
+    let mut fb = r.bind(&mut dmabuf).map_err(|e| format!("bind the client's dmabuf: {e}"))?;
+    let mut tracker = OutputDamageTracker::new(region.size, scale, Transform::Normal);
+    let result = tracker.render_output(r, &mut fb, 0, &moved, clear).map_err(|e| format!("render: {e:?}"))?;
+    result.sync.wait().map_err(|e| format!("waiting for the GPU: {e:?}"))?;
+    Ok(())
+}
 
 /// A time for `ready` events: CLOCK_MONOTONIC as (seconds, nanoseconds).
 pub fn now() -> (u64, u32) {
@@ -100,8 +194,8 @@ impl Uwc {
         }
         let deco = self.deco_for(c);
         let focused = self.focus == Some(c.id);
-        let (canvas, pin, pin_mon, scale, fullscreen, fs_mon) =
-            (c.canvas, c.pin, c.pin_mon, c.scale, c.fullscreen, c.fs_mon);
+        let (id, canvas, pin, pin_mon, scale, fullscreen, fs_mon) =
+            (c.id, c.canvas, c.pin, c.pin_mon, c.scale, c.fullscreen, c.fs_mon);
         let px = Size::from(((size.w as f64 * k).round() as i32, (size.h as f64 * k).round() as i32));
         let buffer = self
             .with_renderer(|state, r| {
@@ -129,6 +223,7 @@ impl Uwc {
             scale_fx: 1.0,
             fade_ms: self.config.close_ms,
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            key: id,
         })
     }
 

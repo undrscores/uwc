@@ -1,0 +1,13 @@
+// Keybinds for ushell. Paste inside your `binds { ... }` block. ushell must be started as `qs -c ushell`
+// (see startup-ushell), so these `qs -c ushell ipc ...` calls find it.
+Mod+D { spawn "qs" "-c" "ushell" "ipc" "call" "shell" "toggle" "launcher"; }
+Mod+V { spawn "qs" "-c" "ushell" "ipc" "call" "shell" "toggle" "clipboard"; }
+Mod+Comma { spawn "qs" "-c" "ushell" "ipc" "call" "shell" "toggle" "notifications"; }
+Mod+Shift+P { spawn "qs" "-c" "ushell" "ipc" "call" "shell" "toggle" "power"; }
+Mod+Shift+W { spawn "qs" "-c" "ushell" "ipc" "call" "shell" "toggle" "wallpapers"; }
+Mod+Alt+Tab { spawn "qs" "-c" "ushell" "ipc" "call" "switcher" "toggle"; }
+Mod+Ctrl+Q { spawn "qs" "-c" "ushell" "ipc" "call" "lock" "lock"; }
+Mod+Shift+S { spawn "qs" "-c" "ushell" "ipc" "call" "capture" "region"; }
+Print { spawn "qs" "-c" "ushell" "ipc" "call" "capture" "screen"; }
+XF86MonBrightnessUp { spawn "qs" "-c" "ushell" "ipc" "call" "shell" "brightness" "+5"; }
+XF86MonBrightnessDown { spawn "qs" "-c" "ushell" "ipc" "call" "shell" "brightness" "-5"; }

@@ -7,6 +7,9 @@
 //!                                                     # fractional scale it is told (a HiDPI client)
 //!     cargo run --example paint -- --popup                 # a window with a grabbed popup (a menu);
 //!                                                     # prints "popup done" and exits when it is dismissed
+//!     cargo run --example paint -- --wallpaper 202040      # a full-screen background layer
+//!     cargo run --example paint -- --mover "title" 300 200 ff3366   # a window that asks the compositor to
+//!                                                     # move it when a button is pressed on it (CSD title bar)
 
 use std::{io::Write, os::fd::AsFd};
 
@@ -43,6 +46,11 @@ fn main() {
     if a.get(1).map(String::as_str) == Some("--popup") {
         return popup();
     }
+    if a.get(1).map(String::as_str) == Some("--wallpaper") {
+        return wallpaper(a.get(2).map(String::as_str).unwrap_or("202040"));
+    }
+    let mover = a.get(1).map(String::as_str) == Some("--mover");
+    let a: Vec<String> = if mover { std::iter::once(a[0].clone()).chain(a.into_iter().skip(2)).collect() } else { a };
     let title = a.get(1).cloned().unwrap_or_else(|| "paint".into());
     let w: i32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(400);
     let h: i32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(300);
@@ -61,6 +69,13 @@ fn main() {
     let toplevel = xdg.get_toplevel(&qh, ());
     toplevel.set_title(title);
     toplevel.set_app_id("uwc.paint".into());
+    if mover {
+        use wayland_client::protocol::wl_seat;
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=7, ()).unwrap();
+        let _pointer = seat.get_pointer(&qh, ());
+        *MOVER.lock().unwrap() = Some((toplevel.clone(), seat));
+        std::mem::forget(_pointer);
+    }
     surface.commit();
     queue.roundtrip(&mut app).unwrap();
 
@@ -187,6 +202,44 @@ fn popup() {
     let pbuf = pool.create_buffer(0, pw, ph, pw * 4, wl_shm::Format::Argb8888, &qh, ());
     psurface.attach(Some(&pbuf), 0, 0);
     psurface.commit();
+    while !app.quit {
+        queue.blocking_dispatch(&mut app).unwrap();
+    }
+}
+
+/// The window that asks to be moved on a button press (`--mover`).
+static MOVER: std::sync::Mutex<Option<(xdg_toplevel::XdgToplevel, wayland_client::protocol::wl_seat::WlSeat)>> =
+    std::sync::Mutex::new(None);
+
+/// A full-screen layer on the background layer, like a wallpaper program's window.
+fn wallpaper(color: &str) {
+    let rgb = u32::from_str_radix(color, 16).unwrap_or(0x202040);
+    let conn = Connection::connect_to_env().expect("WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).unwrap();
+    let qh = queue.handle();
+    let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 4..=6, ()).unwrap();
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).unwrap();
+    let shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).unwrap();
+    let mut app = App { quit: false, layer_size: None, new_scale: None };
+    let surface = compositor.create_surface(&qh, ());
+    use zwlr_layer_surface_v1::Anchor;
+    let layer =
+        shell.get_layer_surface(&surface, None, zwlr_layer_shell_v1::Layer::Background, "wallpaper".into(), &qh, ());
+    layer.set_size(0, 0);
+    layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+    layer.set_exclusive_zone(-1);
+    surface.commit();
+    queue.roundtrip(&mut app).unwrap();
+    let (w, h) = app.layer_size.take().unwrap_or((800, 600));
+    let (w, h) = (w as i32, h as i32);
+    let (r, g, b) = ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+    let px: Vec<u8> = (0..w * h).flat_map(|_| [b, g, r, 255]).collect();
+    let mut f = tempfile_in_runtime();
+    f.write_all(&px).unwrap();
+    let pool = shm.create_pool(f.as_fd(), w * h * 4, &qh, ());
+    let buf = pool.create_buffer(0, w, h, w * 4, wl_shm::Format::Argb8888, &qh, ());
+    surface.attach(Some(&buf), 0, 0);
+    surface.commit();
     while !app.quit {
         queue.blocking_dispatch(&mut app).unwrap();
     }
@@ -344,6 +397,29 @@ impl Dispatch<wayland_protocols::wp::fractional_scale::v1::client::wp_fractional
         } = e
         {
             app.new_scale = Some(scale);
+        }
+    }
+}
+impl Dispatch<wayland_client::protocol::wl_pointer::WlPointer, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &wayland_client::protocol::wl_pointer::WlPointer,
+        e: wayland_client::protocol::wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_client::{protocol::wl_pointer::Event, WEnum};
+        // What a client-side title bar does: ask for a move on a press.
+        if let Event::Button {
+            serial,
+            state: WEnum::Value(wayland_client::protocol::wl_pointer::ButtonState::Pressed),
+            ..
+        } = e
+        {
+            if let Some((toplevel, seat)) = MOVER.lock().unwrap().as_ref() {
+                toplevel._move(seat, serial);
+            }
         }
     }
 }

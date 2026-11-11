@@ -248,43 +248,65 @@ check("typing a label jumps: hint mode is over", st["hints"], False)
 check("and focuses one of the windows", st["keyboard_focus"] is not None, True)
 time.sleep(0.5)
 check("the view is back at the zoom it came from", cmd("state")["monitors"][0]["viewport"]["zoom"], z0)
-# Frames: a labelled region drawn behind the windows (fill, border, title strip, label badge in the frame colour).
-cmd('set frame-color "#ff00ff"'); cmd("set frame-opacity 0.3"); cmd("set frame-border-width 4"); cmd("set frame-label-scale 3")
-cmd("zoom 1 0 0"); time.sleep(0.4)
-st = cmd("state"); vp = st["monitors"][0]["viewport"]
-cmd(f"move {win('E')['id']} {vp['x']+250} {vp['y']+200}"); time.sleep(0.4)
-e = win("E")
-fx, fy = e["x"]-80, e["y"]-80
-cmd(f"frame add {fx} {fy} {e['width']+160} {e['height']+160} zone"); time.sleep(0.5)
-sx, sy = int((fx-vp["x"])*vp["zoom"]), int((fy-vp["y"])*vp["zoom"])
-magenta = lambda p_: p_[0] > 200 and p_[2] > 200 and p_[1] < 60
-check("the frame's border is drawn", magenta(px(sx+1, sy+e["height"]+100)), True)
-inside = px(sx+30, sy+100)
-check("its inside is tinted (between the canvas and the frame colour)", inside[0] > 40 and inside[1] < 60 and inside[2] > 40, True)
-check("its label badge is drawn in the frame colour", count_color((255,0,255)) > 600, True)
-ex, ey = int((e["x"]-vp["x"])*vp["zoom"])+150, int((e["y"]-vp["y"])*vp["zoom"])+100
-check("a window inside is drawn over the frame, untinted", px(ex, ey), (0x30,0xd0,0xd0))
-cmd(f"frame remove {cmd('state')['frames'][0]['id']}"); time.sleep(0.4)
-check("removing the frame removes its drawing", px(sx+1, sy+e["height"]+100), (32,32,32))
-# Snap guides: dragging a window within snap-distance of a frame's edge snaps flush and draws a guide line.
-cmd('set snap-color "#ff6ac1"'); cmd("set snap-distance 8"); cmd("zoom 1 0 0"); time.sleep(0.4)
-st = cmd("state"); vp = st["monitors"][0]["viewport"]; e = win("E")
-cmd(f"frame add {e['x']+400} {e['y']-60} 300 300 snap"); time.sleep(0.3)
-ecx, ecy = int(e["x"]-vp["x"])+150, int(e["y"]-vp["y"])+100
-subprocess.run(["xdotool","keydown","Alt_L","mousemove",str(ecx),str(ecy),"mousedown","1"], env=env); time.sleep(0.3)
-subprocess.run(["xdotool","mousemove",str(ecx+150),str(ecy)], env=env); time.sleep(0.3)
-subprocess.run(["xdotool","mousemove",str(ecx+397),str(ecy)], env=env); time.sleep(0.5)
-snapped = count_color((255,106,193))
-subprocess.run(["xdotool","mouseup","1","keyup","Alt_L"], env=env); time.sleep(0.4)
-check("a guide line is drawn while snapped", snapped > 100, True)
-check("the window snapped flush with the frame's left edge", win("E")["x"], e["x"]+400)
-check("the guide goes when the drag ends", count_color((255,106,193)), 0)
-cmd(f"frame remove {cmd('state')['frames'][0]['id']}")
 # Per-tag looks: tag 2 has its own colour behind the canvas.
 cmd("view 2"); time.sleep(0.5)
 check("tag 2 has its own root colour", px(640, 400), (0,0x33,0x66))
 cmd("view 1"); time.sleep(0.5)
 check("and tag 1 has the global one again", px(1270, 700), (32,32,32))
+# Background blur: a half-transparent black window (K) straddles the corner of a red one (W). Without
+# blur the corner is sharp through it; with blur-radius it is smooth, and the right way up (the red
+# is above the edge, so the pixel above the edge is the redder one). K's 10 px frame and its white
+# strip are avoided, and W's own frame makes the red side lighter, so the checks are relative.
+cmd("view 3"); time.sleep(0.4)
+spawn(["./target/debug/examples/paint","W","400","300","d03030"], env=wenv); time.sleep(0.8)
+spawn(["./target/debug/examples/paint","K","300","300","000000"], env=wenv); time.sleep(0.8)
+vp = cmd("state")["monitors"][0]["viewport"]
+kx, ky = 200+400-75, 150+300-120       # W is 400x300 at 200,150: its right edge is a quarter into K, its bottom 0.4
+cmd(f"move {win('W')['id']} {vp['x']+200} {vp['y']+150}")
+cmd(f"move {win('K')['id']} {vp['x']+kx} {vp['y']+ky}")
+cmd('rule { match title="K"; opacity 0.5; corner-radius 0; shadow-size 0; border-width 0 }'); time.sleep(0.6)
+ex, ey = kx+75, ky+120   # the corner of W, in screen px at zoom 1
+def around():
+    return (px(ex-8, ky+45)[0], px(ex+8, ky+45)[0], px(kx+30, ey-8)[0], px(kx+30, ey+8)[0])
+l0, r0, t0, b0 = around()
+check("without blur the edge is sharp (red side, root side; right edge)", (l0 > 100, r0 < 20), (True, True))
+check("without blur the edge is sharp (red side, root side; bottom edge)", (t0 > 100, b0 < 20), (True, True))
+cmd('rule { match title="K"; blur-radius 30 }'); time.sleep(0.8)
+l, r_, t, b = around()
+check("blur: the red side gets less red and the root side lighter (right edge)", (l < l0 - 10, r_ > r0 + 10), (True, True))
+check("blur: and the red side is still the redder one", l > r_ + 6, True)
+check("blur is the right way up (red above the edge, not below)", (t < t0 - 10, b > b0 + 10, t > b + 6), (True, True, True))
+cmd('rule { match title="K"; blur-radius 0 }'); time.sleep(0.6)
+check("blur-radius 0 turns it off again", around(), (l0, r0, t0, b0))
+for t_ in ("W","K"): cmd(f"close {win(t_)['id']}")
+cmd("view 1"); time.sleep(0.4)
+# Dragging with real pointer input. A client that asks to be moved (what a CSD title bar does) is moved
+# while the button is held and let go on release; dragging bare canvas, with a wallpaper layer covering
+# it, pans the view. Both on tag 5, which is empty.
+cmd("view 5"); time.sleep(0.4)
+spawn(["./target/debug/examples/paint","--wallpaper","202040"], env=wenv); time.sleep(0.8)
+spawn(["./target/debug/examples/paint","--mover","M","300","200","50d050"], env=wenv); time.sleep(0.8)
+vp = cmd("state")["monitors"][0]["viewport"]
+cmd(f"move {win('M')['id']} {vp['x']+400} {vp['y']+200}"); time.sleep(0.4)
+m0 = win("M")
+def drag(x0, y0, x1, y1):
+    subprocess.run(["xdotool","mousemove",str(x0),str(y0),"mousedown","1"], env=env); time.sleep(0.3)
+    for k in range(1, 5):
+        subprocess.run(["xdotool","mousemove",str(x0+(x1-x0)*k//4),str(y0+(y1-y0)*k//4)], env=env); time.sleep(0.15)
+    subprocess.run(["xdotool","mouseup","1"], env=env); time.sleep(0.4)
+drag(550, 300, 630, 340)
+m1 = win("M")
+check("a client-requested move follows the pointer", (m1["x"]-m0["x"], m1["y"]-m0["y"]), (80, 40))
+subprocess.run(["xdotool","mousemove","800","500"], env=env); time.sleep(0.4)
+m2 = win("M")
+check("and ends on release: the window stays put", (m2["x"], m2["y"]), (m1["x"], m1["y"]))
+st = cmd("state"); vp0 = st["monitors"][0]["viewport"]
+subprocess.run(["xdotool","mousemove","200","600"], env=env); time.sleep(0.3)
+check("the wallpaper is under the pointer on empty canvas", cmd("state")["cursor"].get("under"), "layer:wallpaper")
+drag(200, 600, 300, 600)
+vp1 = cmd("state")["monitors"][0]["viewport"]
+check("dragging empty canvas over a wallpaper pans the view", round(vp0["x"] - vp1["x"]), 100)
+cmd("view 1"); time.sleep(0.4)
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,

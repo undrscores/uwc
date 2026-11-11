@@ -34,6 +34,7 @@ render_elements! {
     pub UwcElement<=GlesRenderer>;
     Surface=RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     Rounded=RoundedElement,
+    Blur=crate::blur::BlurElement,
     Shader=ShaderElement,
     Solid=SolidColorRenderElement,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
@@ -80,6 +81,43 @@ impl crate::state::Client {
     }
 }
 
+/// `from` moved `t` of the way to `to` (the focus crossfade, `focus-ms`).
+fn lerp_look(from: &Look, to: &Look, t: f64) -> Look {
+    let l = |a: f64, b: f64| a + (b - a) * t;
+    let lc = |a: [f32; 4], b: [f32; 4]| {
+        [
+            l(a[0] as f64, b[0] as f64) as f32,
+            l(a[1] as f64, b[1] as f64) as f32,
+            l(a[2] as f64, b[2] as f64) as f32,
+            l(a[3] as f64, b[3] as f64) as f32,
+        ]
+    };
+    let border = match (&from.border, &to.border) {
+        (Paint::Solid(a), Paint::Solid(b)) => Paint::Solid(lc(*a, *b)),
+        (Paint::Gradient(a, s), Paint::Gradient(b, _)) if a.colors.len() == b.colors.len() => Paint::Gradient(
+            crate::config::Gradient {
+                colors: a.colors.iter().zip(&b.colors).map(|(x, y)| lc(*x, *y)).collect(),
+                angle: l(a.angle, b.angle),
+            },
+            *s,
+        ),
+        _ => {
+            if t >= 0.5 {
+                to.border.clone()
+            } else {
+                from.border.clone()
+            }
+        }
+    };
+    Look {
+        border,
+        alpha: l(from.alpha as f64, to.alpha as f64) as f32,
+        dim: l(from.dim, to.dim),
+        shadow_size: l(from.shadow_size, to.shadow_size),
+        shadow_color: lc(from.shadow_color, to.shadow_color),
+    }
+}
+
 /// How one window looks right now, resolved from the options and its focus.
 struct Look {
     border: Paint,
@@ -123,6 +161,12 @@ impl Uwc {
             self.animating = true;
         }
         let shaders = Shaders::get(renderer);
+        // Stable texture keys for every blurred surface (windows, layer surfaces that asked for a
+        // background effect, closing ghosts), and eviction of the ones gone — once per scene, with
+        // the union over all monitors, so multi-monitor blurs do not evict each other (blur.rs).
+        let blurred = self.blur_keys();
+        self.blur.ensure(&blurred);
+        self.blur.keep(&blurred);
         // User border shaders the visible windows use, compiled (once) before drawing.
         let mut user: HashMap<String, GlesPixelProgram> = HashMap::new();
         let wanted: Vec<String> = self
@@ -176,7 +220,6 @@ impl Uwc {
         out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Top]));
         out.extend(self.render_elements(renderer, shaders.as_ref(), &user, scale, m, false));
         out.extend(self.ghost_elements(renderer, shaders.as_ref(), &user, scale, m, false));
-        out.extend(self.region_elements(renderer, m, scale));
         out.extend(self.layer_elements_on(m, renderer, scale, &[Layer::Bottom, Layer::Background]));
         if let Some((program, _)) = background {
             let (w, h) = self.screen_size();
@@ -209,6 +252,9 @@ impl Uwc {
             );
         }
         out.extend(self.ime_popup_elements(renderer, m, scale));
+        // Blurred backdrops need the whole scene, so they are made last (blur.rs).
+        let clear = self.tag_look().0;
+        self.fill_blurs(renderer, &mut out, scale, clear);
         out
     }
 
@@ -261,11 +307,21 @@ impl Uwc {
     }
 
     fn look(&self, c: &Client, o: &Deco) -> Look {
-        self.look_of(self.focus == Some(c.id), c.fx.alpha, o)
+        self.look_of(self.focus == Some(c.id), c.fx.alpha, c.fx.focus_fade, o)
     }
 
-    /// A window's look for a given focus and fade (the same for a ghost, with its own fade).
-    fn look_of(&self, focused: bool, fade: f64, o: &Deco) -> Look {
+    /// A window's look for a given focus and fade (the same for a ghost, with its own fade),
+    /// crossfading from the other focus state over `focus_fade` (0..1, `focus-ms`).
+    fn look_of(&self, focused: bool, fade: f64, focus_fade: f64, o: &Deco) -> Look {
+        let look = self.look_plain(focused, fade, o);
+        if focus_fade >= 1.0 {
+            return look;
+        }
+        lerp_look(&self.look_plain(!focused, fade, o), &look, focus_fade)
+    }
+
+    /// A window's look for a given focus and fade, without any focus crossfade.
+    fn look_plain(&self, focused: bool, fade: f64, o: &Deco) -> Look {
         let spin = spin_degrees(o.border_spin_ms, self.start_time.elapsed().as_secs_f64() * 1000.0);
         let border = match (focused, &o.focus_gradient, &o.border_gradient) {
             (true, Some(g), _) => Paint::Gradient(g.clone(), spin),
@@ -426,6 +482,17 @@ impl Uwc {
                     }
                 }));
             }
+            // The blurred backdrop sits under the content, border and backdrop colour, over the shadow;
+            // `fill_blurs` makes it once the whole scene is known.
+            if o.blur_radius > 0.0 && c.fx.alpha > 0.0 && s.blur.is_some() {
+                out.push(UwcElement::from(crate::blur::BlurElement::new(
+                    &self.blur,
+                    s,
+                    c.id,
+                    content.to_i32_round(),
+                    crate::blur::BlurParams::from_deco(o, o.blur_radius * k, inner_radius, c.fx.alpha as f32),
+                )));
+            }
             if look.shadow_size > 0.0 && look.shadow_color[3] > 0.0 {
                 let spread = o.shadow_spread * k;
                 let caster = Rectangle::new(
@@ -467,7 +534,7 @@ impl Uwc {
 
         for g in self.ghosts.iter().filter(|g| g.fullscreen == fullscreen && g.visible_on(m)) {
             let o = &g.deco;
-            let look = self.look_of(g.focused, g.alpha, o);
+            let look = self.look_of(g.focused, g.alpha, 1.0, o);
             let pl = g.place(vp);
             let size = g.size;
             let k = pl.zoom * scale;
@@ -554,6 +621,16 @@ impl Uwc {
                         ShaderElement::rounded_box(s, border_id, commit, outer.to_i32_round(), radius, bw, &look.border)
                     }
                 }));
+            }
+            // The blurred backdrop under the ghost's last frame, over the shadow (like a window's).
+            if o.blur_radius > 0.0 && g.alpha > 0.0 && s.blur.is_some() {
+                out.push(UwcElement::from(crate::blur::BlurElement::new(
+                    &self.blur,
+                    s,
+                    g.key,
+                    content.to_i32_round(),
+                    crate::blur::BlurParams::from_deco(o, o.blur_radius * k, inner_radius, g.alpha as f32),
+                )));
             }
             if look.shadow_size > 0.0 && look.shadow_color[3] > 0.0 {
                 let spread = o.shadow_spread * k;

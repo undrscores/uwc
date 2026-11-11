@@ -5,11 +5,11 @@ use std::os::unix::io::OwnedFd;
 use smithay::{
     backend::allocator::dmabuf::Dmabuf,
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit, delegate_idle_notify,
-    delegate_input_method_manager, delegate_output, delegate_pointer_constraints, delegate_pointer_gestures,
-    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_session_lock, delegate_shm,
-    delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
-    delegate_xwayland_shell,
+    delegate_alpha_modifier, delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_idle_inhibit,
+    delegate_idle_notify, delegate_input_method_manager, delegate_output, delegate_pointer_constraints,
+    delegate_pointer_gestures, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
+    delegate_session_lock, delegate_shm, delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_xdg_shell, delegate_xdg_toplevel_icon, delegate_xwayland_shell,
     desktop::{utils::output_update, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window},
     input::{
         pointer::{CursorImageStatus, Focus},
@@ -102,6 +102,7 @@ impl CompositorHandler for Uwc {
                         toplevel.send_configure();
                     }
                     if root == *surface {
+                        self.note_tile_hints(i);
                         if !self.clients[i].mapped {
                             if attached && w.geometry().size.w > 0 {
                                 self.map_client(i);
@@ -117,9 +118,11 @@ impl CompositorHandler for Uwc {
             self.ipc.dirty = true;
             let id = self.clients[i].id;
             self.export_on_commit(id);
+            self.note_icon(i);
         }
 
         self.layer_commit(&root);
+        self.pace_hidden_window(&root);
 
         self.popups.commit(surface);
         if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
@@ -181,6 +184,7 @@ impl Uwc {
         if !self.clients[i].ever_mapped {
             self.clients[i].ever_mapped = true;
             let open = self.clients[i].open.clone();
+            self.clients[i].floating = open.float;
             let size = self.clients[i].size();
             let vp = self.viewport();
             let (ax, ay, aw, ah) = self.work_area();
@@ -253,12 +257,14 @@ impl Uwc {
         if first_map {
             self.run_hook(crate::hooks::Hook::WindowOpen, self.client_index(id));
         }
+        // A new window goes straight to its slot; the others glide to theirs.
+        self.retile_all_with(if first_map { crate::tiling::Glide::InstantFor(id) } else { crate::tiling::Glide::Ease });
         self.refresh_pointer();
         self.damage();
     }
 
     /// The window `i` is a dialog of, if any.
-    fn parent_of(&self, i: usize) -> Option<usize> {
+    pub fn parent_of(&self, i: usize) -> Option<usize> {
         let parent = match &self.clients[i].shell {
             Shell::Wayland(w) => w.toplevel()?.parent().and_then(|s| self.client_by_surface(&s)),
             Shell::X11(s) => {
@@ -284,6 +290,7 @@ impl Uwc {
                 self.drag = None;
             }
         }
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -314,6 +321,10 @@ impl XdgShellHandler for Uwc {
             tags: self.tagset(),
             mapped: false,
             ever_mapped: false,
+            floating: false,
+            limits: ((0, 0), (0, 0)),
+            tile_min: (0, 0),
+            tile_want: None,
             urgent: false,
             pin: None,
             pin_mon: 0,
@@ -328,6 +339,9 @@ impl XdgShellHandler for Uwc {
             commits: 0,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            icon_name: None,
+            icon_path: None,
+            icon_hash: 0,
         });
     }
 
@@ -402,8 +416,13 @@ impl XdgShellHandler for Uwc {
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        // A request with no button held (a late or stale one) would start a drag nothing can end.
+        if self.buttons_down.is_empty() {
+            return;
+        }
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
             self.begin_move(i);
+            self.drag_from_client = self.drag.is_some();
         }
     }
 
@@ -414,12 +433,28 @@ impl XdgShellHandler for Uwc {
         _serial: Serial,
         _edges: xdg_toplevel::ResizeEdge,
     ) {
+        if self.buttons_down.is_empty() {
+            return;
+        }
         if let Some(i) = self.client_by_surface(surface.wl_surface()) {
             self.begin_resize(i);
+            self.drag_from_client = self.drag.is_some();
         }
     }
 
-    fn title_changed(&mut self, _surface: ToplevelSurface) {
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        // `UWC_DEBUG_PANIC=1`: a window titled "uwc-debug-panic" panics here, inside a protocol handler,
+        // to test that the session survives one (see `serve` in main.rs).
+        if std::env::var_os("UWC_DEBUG_PANIC").is_some() {
+            let title = smithay::wayland::compositor::with_states(surface.wl_surface(), |s| {
+                s.data_map
+                    .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                    .and_then(|d| d.lock().ok().and_then(|d| d.title.clone()))
+            });
+            if title.as_deref() == Some("uwc-debug-panic") {
+                panic!("uwc-debug-panic title");
+            }
+        }
         self.ipc.dirty = true;
     }
 
@@ -530,6 +565,10 @@ impl DmabufHandler for Uwc {
     }
 }
 
+impl smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler for Uwc {}
+
+delegate_alpha_modifier!(Uwc);
+delegate_xdg_toplevel_icon!(Uwc);
 delegate_compositor!(Uwc);
 delegate_shm!(Uwc);
 delegate_xdg_shell!(Uwc);

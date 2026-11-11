@@ -7,22 +7,17 @@ use serde_json::{Map, Value};
 
 use crate::canvas::TAGCOUNT;
 
-/// `frame ...`: labelled regions of the canvas (frames.rs).
+/// `tile ...`: the tiling of the tag in use (tiling.rs).
 #[derive(Debug, Clone, PartialEq)]
-pub enum FrameCmd {
-    Add {
-        x: f64,
-        y: f64,
-        w: f64,
-        h: f64,
-        label: String,
-    },
-    Label(u32, String),
-    /// Moves the windows inside with it.
-    Move(u32, f64, f64),
-    Resize(u32, f64, f64),
-    Remove(u32),
-    Fit(u32),
+pub enum TileCmd {
+    /// Tile with this layout and keep doing so.
+    Set(crate::layout::Layout),
+    /// Arrange once.
+    Once(crate::layout::Layout),
+    Off,
+    Cycle,
+    Ratio(f64),
+    Masters(usize),
 }
 
 /// A command, as understood by the compositor.
@@ -39,7 +34,9 @@ pub enum Request {
     GetWindow(u32),
     Pan(f64, f64),
     PanTo(f64, f64),
-    Frame(FrameCmd),
+    Tile(TileCmd),
+    /// Keep a window out of the tiling layouts / let it be tiled.
+    Float(u32, bool),
     /// Switch the keyboard layout: `next` or an index.
     Layout(Option<usize>),
     /// Panic inside the compositor, to test that it survives (only with UWC_DEBUG_PANIC=1).
@@ -48,6 +45,15 @@ pub enum Request {
     Jump(String),
     /// Start a glide at this velocity in screen px/s (what letting go of a touchpad swipe does).
     Fling(f64, f64),
+    /// Simulate a touchpad gesture (tests; no backend in CI produces them):
+    /// `swipe-begin N`, `swipe-update DX DY`, `swipe-end [CANCELLED]`,
+    /// `pinch-begin N`, `pinch-update DX DY SCALE`, `pinch-end [CANCELLED]`.
+    SwipeBegin(u32),
+    SwipeUpdate(f64, f64),
+    SwipeEnd(bool),
+    PinchBegin(u32),
+    PinchUpdate(f64, f64, f64),
+    PinchEnd(bool),
     Zoom(f64, Option<(f64, f64)>),
     View(usize),
     ToggleView(usize),
@@ -69,6 +75,15 @@ pub enum Request {
     },
     Overview,
     Home,
+    /// `dpms on|off [OUTPUT]`: blank or wake an output (all of them without a name).
+    Dpms(Option<String>, bool),
+    /// `mode OUTPUT W H [HZ]`: a video mode (the fastest of that size without HZ).
+    Mode(String, i32, i32, Option<f64>),
+    /// `scale OUTPUT S`: an output's scale.
+    Scale(String, f64),
+    /// Per-tag canvas bounds and windows (ids for previews, rects, icons) plus each monitor's view
+    /// per tag: everything an overview strip / minimap needs, in canvas px.
+    Minimap,
     Reload,
     Quit,
 }
@@ -84,9 +99,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("get-window ID", "a window's decoration with its rules applied"),
     ("pan DX DY", "move the view by canvas px"),
     (
-        "frame add|label|move|resize|remove|fit ...",
-        "labelled regions of the canvas: add X Y W H [LABEL], label ID TEXT, move ID X Y (its windows go too), resize ID W H, remove ID, fit ID",
+        "tile LAYOUT|off|cycle|once LAYOUT|ratio R|masters N",
+        "tile the tag in use: LAYOUT is master-stack, dwindle, spiral or columns; once arranges one time; ratio (0.1-0.9) and masters (1-16) change the layout",
     ),
+    ("float ID | unfloat ID", "keep a window out of the tiling layouts / let it be tiled"),
     ("layout next|N", "switch the keyboard layout (0 is the first of input { keyboard { xkb-layout \"us,de\" } })"),
     ("crash", "panic on purpose to test recovery (only when UWC_DEBUG_PANIC=1 is set in uwc's environment)"),
     (
@@ -94,6 +110,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "focus and reveal the window whose app-id and title best match (fuzzy), on any tag; #ID for a window id",
     ),
     ("fling VX VY", "glide the view like a released swipe: screen px/s, slowing down over pan-momentum-ms"),
+    (
+        "swipe-begin N | swipe-update DX DY | swipe-end [CANCELLED] | pinch-begin N | pinch-update DX DY SCALE | pinch-end [CANCELLED]",
+        "simulate a touchpad gesture (no test backend produces them); what they do is bound in gestures { }",
+    ),
     ("panto X Y", "put canvas point X,Y at the top-left of the screen"),
     ("zoom Z [X Y]", "set the zoom, keeping screen point X,Y (default: the centre) fixed"),
     ("view TAG | toggleview TAG", "show only TAG / show or hide TAG as well"),
@@ -106,6 +126,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("bookmark save N | bookmark goto N", "remember / return to a view of the tag in use (1-9)"),
     ("session save | session forget", "write the remembered canvas now / forget it"),
     ("overview | home", "fit all windows / back to the origin at zoom 1"),
+    ("dpms on|off [OUTPUT]", "blank or wake an output (all of them without a name)"),
+    ("mode OUTPUT W H [HZ]", "change an output's video mode (the fastest refresh rate of that size without HZ; real session only)"),
+    ("scale OUTPUT S", "change an output's scale (0.1-10)"),
+    ("minimap", "per-tag canvas bounds and windows (ids, rects, icons) and each monitor's view per tag, for an overview strip"),
     ("reload | quit", ""),
 ];
 
@@ -134,6 +158,14 @@ impl Request {
                 Err("a window id is a whole number".into())
             }
         };
+        let flag = |i: usize| -> Result<bool, String> {
+            match args.get(i).copied() {
+                None => Ok(false),
+                Some("0") | Some("false") => Ok(false),
+                Some("1") | Some("true") => Ok(true),
+                Some(a) => Err(format!("`{cmd}` takes 0 or 1 here, got `{a}`")),
+            }
+        };
         let tag = |i: usize| -> Result<usize, String> {
             let t = num(i)?;
             if t.fract() == 0.0 && (1.0..=TAGCOUNT as f64).contains(&t) {
@@ -159,6 +191,12 @@ impl Request {
             "pan" => Request::Pan(num(0)?, num(1)?),
             "panto" => Request::PanTo(num(0)?, num(1)?),
             "fling" => Request::Fling(num(0)?, num(1)?),
+            "swipe-begin" => Request::SwipeBegin(id(0)?),
+            "swipe-update" => Request::SwipeUpdate(num(0)?, num(1)?),
+            "swipe-end" => Request::SwipeEnd(flag(0)?),
+            "pinch-begin" => Request::PinchBegin(id(0)?),
+            "pinch-update" => Request::PinchUpdate(num(0)?, num(1)?, num(2)?),
+            "pinch-end" => Request::PinchEnd(flag(0)?),
             "crash" => none(Request::Crash)?,
             "layout" => match args.first().copied() {
                 Some("next") => Request::Layout(None),
@@ -167,19 +205,34 @@ impl Request {
                 }
                 None => return Err("layout takes `next` or a layout number (0 is the first)".into()),
             },
-            "frame" => {
-                let sub = args.first().copied().unwrap_or("");
-                let text = |from: usize| args.get(from..).unwrap_or(&[]).join(" ");
-                Request::Frame(match sub {
-                    "add" => FrameCmd::Add { x: num(1)?, y: num(2)?, w: num(3)?, h: num(4)?, label: text(5) },
-                    "label" => FrameCmd::Label(id(1)?, text(2)),
-                    "move" => FrameCmd::Move(id(1)?, num(2)?, num(3)?),
-                    "resize" => FrameCmd::Resize(id(1)?, num(2)?, num(3)?),
-                    "remove" => FrameCmd::Remove(id(1)?),
-                    "fit" => FrameCmd::Fit(id(1)?),
-                    _ => return Err("frame needs add X Y W H [LABEL], label ID TEXT, move ID X Y, resize ID W H, remove ID or fit ID".into()),
+            "tile" => {
+                use crate::layout::Layout;
+                let layout = |s: Option<&&str>| {
+                    s.and_then(|s| Layout::parse(s)).ok_or_else(|| format!("a layout is one of: {}", Layout::names()))
+                };
+                Request::Tile(match args.first().copied() {
+                    Some("off") if args.len() == 1 => TileCmd::Off,
+                    Some("cycle") if args.len() == 1 => TileCmd::Cycle,
+                    Some("once") => TileCmd::Once(layout(args.get(1))?),
+                    Some("ratio") => {
+                        let r = num(1)?;
+                        if !(0.1..=0.9).contains(&r) {
+                            return Err("a tile ratio is 0.1 to 0.9".into());
+                        }
+                        TileCmd::Ratio(r)
+                    }
+                    Some("masters") => {
+                        let n = num(1)?;
+                        if n.fract() != 0.0 || !(1.0..=16.0).contains(&n) {
+                            return Err("masters is 1 to 16".into());
+                        }
+                        TileCmd::Masters(n as usize)
+                    }
+                    Some(_) if args.len() == 1 => TileCmd::Set(layout(args.first())?),
+                    _ => return Err("tile LAYOUT, off, cycle, once LAYOUT, ratio R or masters N".into()),
                 })
             }
+            "float" | "unfloat" => Request::Float(id(0)?, cmd == "float"),
             "jump" => {
                 if args.is_empty() {
                     return Err("jump needs some text to match, e.g. jump firefox (or #12 for a window id)".into());
@@ -235,6 +288,39 @@ impl Request {
             },
             "overview" => none(Request::Overview)?,
             "home" => none(Request::Home)?,
+            "minimap" => none(Request::Minimap)?,
+            "dpms" => {
+                let on = match args.first().copied() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => return Err("dpms on|off [OUTPUT]".into()),
+                };
+                Request::Dpms(args.get(1).map(|s| s.to_string()), on)
+            }
+            "mode" => {
+                let name = args.first().ok_or("mode OUTPUT W H [HZ]")?.to_string();
+                let (w, h) = (num(1)?, num(2)?);
+                if w.fract() != 0.0
+                    || h.fract() != 0.0
+                    || !(1.0..=16384.0).contains(&w)
+                    || !(1.0..=16384.0).contains(&h)
+                {
+                    return Err("a mode is a whole width and height of 1 to 16384".into());
+                }
+                let hz = if args.len() > 3 { Some(num(3)?) } else { None };
+                if hz.is_some_and(|r| !(1.0..=1000.0).contains(&r)) {
+                    return Err("a refresh rate is 1 to 1000 Hz".into());
+                }
+                Request::Mode(name, w as i32, h as i32, hz)
+            }
+            "scale" => {
+                let name = args.first().ok_or("scale OUTPUT S")?.to_string();
+                let s = num(1)?;
+                if !(0.1..=10.0).contains(&s) {
+                    return Err("a scale is 0.1 to 10".into());
+                }
+                Request::Scale(name, s)
+            }
             "reload" => none(Request::Reload)?,
             "quit" => none(Request::Quit)?,
             other => return Err(format!("unknown command `{other}` (`uwc msg --help` lists them)")),
@@ -284,6 +370,18 @@ pub struct Tag {
     pub urgent: bool,
     pub viewport: View,
     pub bookmarks: Vec<Bookmark>,
+    /// The layout windows on this tag are tiled with, if any.
+    pub tiling: Option<Tiling>,
+}
+
+#[derive(Serialize)]
+pub struct Tiling {
+    pub layout: &'static str,
+    pub ratio: f64,
+    pub masters: usize,
+    /// The canvas rect the windows are laid out in.
+    #[serde(flatten)]
+    pub area: Rect,
 }
 
 #[derive(Serialize)]
@@ -295,6 +393,16 @@ pub struct Layer {
     pub keyboard: bool,
 }
 
+/// A video mode of a monitor; `refresh` is in Hz.
+#[derive(Serialize)]
+pub struct Mode {
+    pub width: i64,
+    pub height: i64,
+    pub refresh: f64,
+    pub current: bool,
+    pub preferred: bool,
+}
+
 #[derive(Serialize)]
 pub struct Monitor {
     pub name: String,
@@ -303,6 +411,9 @@ pub struct Monitor {
     #[serde(flatten)]
     pub rect: Rect,
     pub scale: f64,
+    /// Whether the output is lit (`dpms`).
+    pub powered: bool,
+    pub modes: Vec<Mode>,
     pub viewport: View,
     pub work_area: Rect,
     /// An eased view move is still under way (`viewport` already shows where it ends).
@@ -318,18 +429,6 @@ pub struct KeyboardLayout {
     pub index: usize,
     pub name: String,
     pub count: usize,
-}
-
-#[derive(Serialize)]
-pub struct Frame {
-    pub id: u32,
-    pub label: String,
-    pub tags: u32,
-    /// Canvas px.
-    #[serde(flatten)]
-    pub rect: Rect,
-    /// The windows whose centre is inside it (what moves with it).
-    pub windows: Vec<u32>,
 }
 
 #[derive(Serialize)]
@@ -350,6 +449,10 @@ pub struct Window {
     pub minimized: bool,
     /// The window's own scale on the canvas (1 = normal).
     pub scale: f64,
+    /// The icon the client set (xdg-toplevel-icon-v1): a PAM file under the cache dir, if it sent
+    /// pixels, and/or a stock icon name.
+    pub icon: Option<String>,
+    pub icon_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -357,6 +460,9 @@ pub struct Cursor {
     pub x: i64,
     pub y: i64,
     pub hidden: bool,
+    /// What takes a click here: `window:ID`, `layer:NAMESPACE`, or absent over empty canvas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub under: Option<String>,
 }
 
 /// Where the seat's keyboard is.
@@ -385,7 +491,6 @@ pub enum Event {
         monitors: Vec<Monitor>,
         cursor: Cursor,
         windows: Vec<Window>,
-        frames: Vec<Frame>,
     },
     Options {
         options: Map<String, Value>,
@@ -411,14 +516,31 @@ mod tests {
     #[test]
     fn parses_commands() {
         assert_eq!(Request::parse("state"), Ok(Request::State));
+        assert_eq!(Request::parse("minimap"), Ok(Request::Minimap));
         assert_eq!(Request::parse("  pan 10 -2.5 "), Ok(Request::Pan(10.0, -2.5)));
         assert_eq!(Request::parse("zoom 2"), Ok(Request::Zoom(2.0, None)));
+        assert_eq!(Request::parse("dpms off"), Ok(Request::Dpms(None, false)));
+        assert_eq!(Request::parse("dpms on DP-1"), Ok(Request::Dpms(Some("DP-1".into()), true)));
+        assert_eq!(Request::parse("mode DP-1 1920 1080"), Ok(Request::Mode("DP-1".into(), 1920, 1080, None)));
+        assert_eq!(
+            Request::parse("mode DP-1 1920 1080 144"),
+            Ok(Request::Mode("DP-1".into(), 1920, 1080, Some(144.0)))
+        );
+        assert_eq!(Request::parse("scale DP-1 1.5"), Ok(Request::Scale("DP-1".into(), 1.5)));
         assert_eq!(Request::parse("zoom 2 10 20"), Ok(Request::Zoom(2.0, Some((10.0, 20.0)))));
         assert_eq!(Request::parse("view 3"), Ok(Request::View(2)));
         assert_eq!(Request::parse("unpin 4"), Ok(Request::Pin(4, false)));
         assert_eq!(Request::parse("bookmark goto 9"), Ok(Request::Bookmark { save: false, n: 8 }));
         assert_eq!(Request::parse("set focus-color \"#ff8800\""), Ok(Request::Set("focus-color \"#ff8800\"".into())));
         assert_eq!(Request::parse("rule clear"), Ok(Request::Rule("rule clear".into())));
+        assert_eq!(Request::parse("swipe-begin 3"), Ok(Request::SwipeBegin(3)));
+        assert_eq!(Request::parse("swipe-update -1.5 2"), Ok(Request::SwipeUpdate(-1.5, 2.0)));
+        assert_eq!(Request::parse("swipe-end"), Ok(Request::SwipeEnd(false)));
+        assert_eq!(Request::parse("swipe-end 1"), Ok(Request::SwipeEnd(true)));
+        assert_eq!(Request::parse("swipe-end 0"), Ok(Request::SwipeEnd(false)));
+        assert_eq!(Request::parse("pinch-begin 2"), Ok(Request::PinchBegin(2)));
+        assert_eq!(Request::parse("pinch-update 0 0 1.5"), Ok(Request::PinchUpdate(0.0, 0.0, 1.5)));
+        assert_eq!(Request::parse("pinch-end true"), Ok(Request::PinchEnd(true)));
     }
 
     #[test]
@@ -440,6 +562,19 @@ mod tests {
             "state now",
             "set",
             "set opacity",
+            "dpms",
+            "dpms maybe",
+            "mode DP-1 1920",
+            "mode DP-1 0 1080",
+            "scale DP-1 0",
+            "swipe-begin",
+            "swipe-begin x",
+            "swipe-update 1",
+            "swipe-end 2",
+            "swipe-end maybe",
+            "pinch-begin -1",
+            "pinch-update 0 0",
+            "pinch-end 2",
         ] {
             assert!(Request::parse(bad).is_err(), "should reject: {bad:?}");
         }
@@ -459,10 +594,18 @@ mod tests {
             "pan",
             "panto",
             "fling",
+            "swipe-begin",
+            "swipe-update",
+            "swipe-end",
+            "pinch-begin",
+            "pinch-update",
+            "pinch-end",
             "jump",
             "crash",
             "layout",
-            "frame",
+            "tile",
+            "float",
+            "unfloat",
             "zoom",
             "view",
             "toggleview",
@@ -481,6 +624,10 @@ mod tests {
             "session",
             "overview",
             "home",
+            "dpms",
+            "mode",
+            "scale",
+            "minimap",
             "reload",
             "quit",
         ] {

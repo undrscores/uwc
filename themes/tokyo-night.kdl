@@ -8,7 +8,6 @@ options {
     focus-gradient "#7aa2f7" "#bb9af7"
     urgent-color "#f7768e"
     shadow-color "#00000088"
-    frame-color "#7aa2f7"
     snap-color "#bb9af7"
     fullscreen-bg "#000000"
 }

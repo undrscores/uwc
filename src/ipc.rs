@@ -196,6 +196,59 @@ impl Uwc {
         serde_json::to_value(self.snapshot()).expect("the snapshot serializes")
     }
 
+    /// `minimap`: what an overview strip needs, in canvas px — per tag the bounds of its windows
+    /// and the windows themselves (id for the preview, rect, icon), and per monitor each tag's view.
+    fn ipc_minimap(&self) -> Value {
+        use serde_json::json;
+        let rj = |r: &smithay::utils::Rectangle<f64, smithay::utils::Logical>| json!({"x": r.loc.x.round() as i64, "y": r.loc.y.round() as i64, "width": r.size.w.round() as i64, "height": r.size.h.round() as i64});
+        let ts = self.tagset();
+        let tags: Vec<Value> = (0..TAGCOUNT)
+            .map(|i| {
+                let wins: Vec<&crate::state::Client> =
+                    self.clients.iter().filter(|c| c.mapped && c.tags & (1 << i) != 0).collect();
+                let bounds = wins.iter().map(|c| c.rect()).reduce(|a, b| {
+                    let loc = (a.loc.x.min(b.loc.x), a.loc.y.min(b.loc.y)).into();
+                    let end =
+                        ((a.loc.x + a.size.w).max(b.loc.x + b.size.w), (a.loc.y + a.size.h).max(b.loc.y + b.size.h));
+                    smithay::utils::Rectangle::new(loc, ((end.0 - loc.x).max(0.0), (end.1 - loc.y).max(0.0)).into())
+                });
+                json!({
+                    "n": i + 1,
+                    "active": ts & (1 << i) != 0,
+                    "occupied": !wins.is_empty(),
+                    "bounds": bounds.as_ref().map(rj),
+                    "windows": wins.iter().map(|c| json!({
+                        "id": c.id,
+                        "title": c.title(),
+                        "app_id": c.app_id(),
+                        "rect": rj(&c.rect()),
+                        "focused": self.focus == Some(c.id),
+                        "minimized": c.minimized != 0,
+                        "fullscreen": c.fullscreen,
+                        "pinned": c.pin.is_some(),
+                        "icon": c.icon_path.as_ref().map(|p| p.display().to_string()),
+                        "icon_name": c.icon_name,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let monitors: Vec<Value> = self
+            .monitors
+            .iter()
+            .map(|m| {
+                json!({
+                    "name": m.output.name(),
+                    "rect": {"x": m.origin.x as i64, "y": m.origin.y as i64, "width": m.size.w as i64, "height": m.size.h as i64},
+                    "views": (0..TAGCOUNT).map(|i| {
+                        let v = m.view_of(i, ts);
+                        json!({"tag": i + 1, "x": v.x.round() as i64, "y": v.y.round() as i64, "zoom": v.zoom})
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        json!({"tags": tags, "monitors": monitors})
+    }
+
     fn snapshot(&self) -> P::Event {
         let view = |v: &Viewport| P::View { x: v.x.round() as i64, y: v.y.round() as i64, zoom: v.zoom };
         let ts = self.tagset();
@@ -223,6 +276,21 @@ impl Uwc {
                         height: m.size.h as i64,
                     },
                     scale: m.output.current_scale().fractional_scale(),
+                    powered: m.powered,
+                    modes: {
+                        let (cur, pref) = (m.output.current_mode(), m.output.preferred_mode());
+                        m.output
+                            .modes()
+                            .into_iter()
+                            .map(|o| P::Mode {
+                                width: o.size.w as i64,
+                                height: o.size.h as i64,
+                                refresh: o.refresh as f64 / 1000.0,
+                                current: Some(o) == cur,
+                                preferred: Some(o) == pref,
+                            })
+                            .collect()
+                    },
                     viewport: view(&m.target_viewport(ts)),
                     view_moving: m.target.is_some() || self.fling.is_some_and(|f| f.mon == mi),
                     animating: self.anim_running(),
@@ -240,6 +308,20 @@ impl Uwc {
                                 .enumerate()
                                 .filter_map(|(n, b)| b.as_ref().map(|v| P::Bookmark { n: n + 1, view: view(v) }))
                                 .collect(),
+                            tiling: self.tiling.tags[i].state.layout.map(|l| P::Tiling {
+                                layout: l.name(),
+                                ratio: self.tile_opts(crate::tiling::Region::Tag(i)).ratio,
+                                masters: self.tile_opts(crate::tiling::Region::Tag(i)).masters,
+                                area: {
+                                    let a = self.tiling.tags[i].area;
+                                    P::Rect {
+                                        x: a.loc.x as i64,
+                                        y: a.loc.y as i64,
+                                        width: a.size.w as i64,
+                                        height: a.size.h as i64,
+                                    }
+                                },
+                            }),
                         })
                         .collect(),
                 }
@@ -263,7 +345,7 @@ impl Uwc {
                     monitor: name.clone(),
                     tags: c.tags,
                     focused: self.focus == Some(c.id),
-                    floating: true,
+                    floating: self.client_index(c.id).is_none_or(|i| self.tile_region(i).is_none()),
                     fullscreen: c.fullscreen,
                     urgent: c.urgent,
                     // The client's own size (what `resize` sets); the footprint is that times `scale`.
@@ -276,6 +358,8 @@ impl Uwc {
                     pinned: c.pin.is_some(),
                     minimized: c.minimized != 0,
                     scale: c.scale,
+                    icon: c.icon_path.as_ref().map(|p| p.display().to_string()),
+                    icon_name: c.icon_name.clone(),
                 }
             })
             .collect();
@@ -295,25 +379,13 @@ impl Uwc {
             },
             hints: self.hints_active(),
             monitors,
-            cursor: P::Cursor { x: self.cursor.x.round() as i64, y: self.cursor.y.round() as i64, hidden: false },
+            cursor: P::Cursor {
+                x: self.cursor.x.round() as i64,
+                y: self.cursor.y.round() as i64,
+                hidden: false,
+                under: self.under_name(self.cursor),
+            },
             windows,
-            frames: self
-                .frames
-                .list
-                .iter()
-                .map(|f| P::Frame {
-                    id: f.id,
-                    label: f.label.clone(),
-                    tags: f.tags,
-                    rect: P::Rect {
-                        x: f.rect.loc.x.round() as i64,
-                        y: f.rect.loc.y.round() as i64,
-                        width: f.rect.size.w.round() as i64,
-                        height: f.rect.size.h.round() as i64,
-                    },
-                    windows: self.frame_members(f.id),
-                })
-                .collect(),
         }
     }
 
@@ -357,6 +429,20 @@ impl Uwc {
         let window = |s: &Uwc, w: u32| s.client_index(w).ok_or_else(|| format!("no window {w}"));
         match req {
             R::State => return Ok(Some(self.ipc_state())),
+            R::Minimap => return Ok(Some(self.ipc_minimap())),
+            R::Dpms(name, on) => {
+                if let Some(n) = &name {
+                    if !self.monitors.iter().any(|m| m.output.name() == *n) {
+                        return Err(format!("no output `{n}`"));
+                    }
+                }
+                for m in self.monitors.iter_mut().filter(|m| name.as_ref().is_none_or(|n| m.output.name() == *n)) {
+                    m.powered = on;
+                }
+                self.damage();
+            }
+            R::Mode(name, w, h, hz) => self.output_set(&name, Some((w, h, hz)), None)?,
+            R::Scale(name, s) => self.output_set(&name, None, Some(s))?,
             R::Subscribe => {
                 if let Some(c) = self.ipc.conns.iter_mut().find(|c| c.id == id) {
                     c.subscribed = true;
@@ -377,6 +463,7 @@ impl Uwc {
                 self.config_rev += 1;
                 self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
                 self.deco_commit.increment();
+                self.retile_all();
                 self.damage();
             }
             R::Rule(line) => {
@@ -411,44 +498,6 @@ impl Uwc {
                 }
             }
             R::Pan(dx, dy) => self.pan_canvas(dx, dy),
-            R::Frame(cmd) => {
-                use P::FrameCmd as F;
-                let known = |s: &Self, id: u32| -> Result<(), String> {
-                    s.frames.list.iter().any(|f| f.id == id).then_some(()).ok_or_else(|| format!("no frame {id}"))
-                };
-                match cmd {
-                    F::Add { x, y, w, h, label } => {
-                        if w <= 0.0 || h <= 0.0 {
-                            return Err("a frame needs a positive width and height".into());
-                        }
-                        if self.frames.list.len() >= crate::frames::MAX_FRAMES {
-                            return Err(format!("at most {} frames", crate::frames::MAX_FRAMES));
-                        }
-                        let tags = self.tagset;
-                        self.frame_add(smithay::utils::Rectangle::new((x, y).into(), (w, h).into()), &label, tags);
-                    }
-                    F::Label(id, text) => {
-                        known(self, id)?;
-                        self.frame_set_label(id, &text);
-                    }
-                    F::Move(id, x, y) => {
-                        known(self, id)?;
-                        self.frame_move(id, x, y);
-                    }
-                    F::Resize(id, w, h) => {
-                        known(self, id)?;
-                        self.frame_resize(id, w, h);
-                    }
-                    F::Remove(id) => {
-                        known(self, id)?;
-                        self.frame_remove(id);
-                    }
-                    F::Fit(id) => {
-                        known(self, id)?;
-                        self.frame_fit(id);
-                    }
-                }
-            }
             R::Layout(n) => {
                 if n.is_some_and(|n| n >= self.layout.2) {
                     return Err(format!("there are {} layouts (0 to {})", self.layout.2, self.layout.2 - 1));
@@ -469,6 +518,12 @@ impl Uwc {
                 self.pan_sampled = std::time::Instant::now();
                 self.pan_release();
             }
+            R::SwipeBegin(n) => self.gesture_swipe_begin(n, 0),
+            R::SwipeUpdate(dx, dy) => self.gesture_swipe_update(dx, dy, 0),
+            R::SwipeEnd(cancelled) => self.gesture_swipe_end(cancelled, 0),
+            R::PinchBegin(n) => self.gesture_pinch_begin(n, 0),
+            R::PinchUpdate(dx, dy, scale) => self.gesture_pinch_update(dx, dy, scale, 0.0, 0),
+            R::PinchEnd(cancelled) => self.gesture_pinch_end(cancelled, 0),
             R::PanTo(x, y) => self.with_viewport_eased(|v, _| {
                 v.x = x;
                 v.y = y;
@@ -493,11 +548,28 @@ impl Uwc {
             }
             R::Move(w, x, y) => {
                 window(self, w)?;
+                self.release_from_tiling(w);
                 self.move_client_eased(w, x, y);
             }
             R::Resize(w, cw, ch) => {
                 window(self, w)?;
+                self.release_from_tiling(w);
                 self.resize_client(w, cw, ch);
+            }
+            R::Tile(cmd) => {
+                use P::TileCmd as T;
+                match cmd {
+                    T::Set(l) => self.tile_set(Some(l)),
+                    T::Once(l) => self.tile_once(l),
+                    T::Off => self.tile_set(None),
+                    T::Cycle => self.tile_cycle(),
+                    T::Ratio(r) => self.tile_set_ratio(r),
+                    T::Masters(n) => self.tile_set_masters(n),
+                }
+            }
+            R::Float(w, on) => {
+                window(self, w)?;
+                self.set_floating(w, on);
             }
             R::Pin(w, on) => {
                 let i = window(self, w)?;

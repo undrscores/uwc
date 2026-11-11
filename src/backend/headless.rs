@@ -37,13 +37,27 @@ pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>, sizes: &[(i32, i
         })
         .collect();
     state.backend = super::Backend::Headless;
+    // `UWC_DEBUG_DMABUF=1`: pretend to have a GPU for the capture protocols' dmabuf announcements (there is no
+    // renderer, so a capture into such a buffer still fails); for tests/headless.rs.
+    if std::env::var_os("UWC_DEBUG_DMABUF").is_some() {
+        use smithay::backend::allocator::{Format, Fourcc, Modifier};
+        state.capture_dmabuf = Some(crate::capture::DmabufOffer::new(
+            0x0102_0304_0506_0708,
+            [
+                Format { code: Fourcc::Argb8888, modifier: Modifier::Linear },
+                Format { code: Fourcc::Argb8888, modifier: Modifier::Invalid },
+                Format { code: Fourcc::Xrgb8888, modifier: Modifier::Linear },
+                Format { code: Fourcc::Rgb565, modifier: Modifier::Linear },
+            ],
+        ));
+    }
 
     handle
         .insert_source(Timer::from_duration(Duration::from_millis(16)), move |_, _, state| {
             state.step_animations();
             if std::mem::take(&mut state.redraw) {
                 for output in &outputs {
-                    super::send_frame_callbacks(state, output);
+                    super::frame_done(state, output);
                 }
             }
             state.popups.cleanup();
