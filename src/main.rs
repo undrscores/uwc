@@ -3,6 +3,7 @@
 
 mod activation;
 mod backend;
+mod background_effect;
 mod blur;
 mod canvas;
 mod capture;
@@ -19,6 +20,7 @@ mod handlers;
 mod hints;
 mod hooks;
 mod hotzones;
+mod icon;
 mod idle;
 mod ime;
 mod input;

@@ -78,6 +78,9 @@ impl Uwc {
             sent_scale: None,
             border_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            icon_name: None,
+            icon_path: None,
+            icon_hash: 0,
         });
         // Tell it where it ended up on our screen.
         let _ = s.configure(Rectangle::new((o + pin).to_i32_round(), g.size));

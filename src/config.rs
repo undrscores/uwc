@@ -291,6 +291,8 @@ pub struct Config {
     pub tag_ms: f64,
     /// A closing window fades out (towards `open_scale`) over this long; 0 = vanishes at once.
     pub close_ms: f64,
+    /// The focus look (border, shadow, dim) crossfades between windows over this long; 0 = jumps.
+    pub focus_ms: f64,
     pub move_step: f64,
     pub zoom_scroll: f64,
     /// Zoom is told to clients only after it stayed put this long.
@@ -433,6 +435,7 @@ impl Config {
             move_ms: 140.0,
             tag_ms: 140.0,
             close_ms: 160.0,
+            focus_ms: 0.0,
             move_step: 50.0,
             zoom_scroll: 1.1,
             zoom_settle_ms: 200.0,
@@ -468,6 +471,8 @@ impl Config {
         for n in &nodes {
             match n.name.as_str() {
                 "vars" | "include" | "binds" => {}
+                // uwm's `grid`, accepted at the top level too, ignored (see set_option).
+                "grid" => {}
                 "hot-zones" => {
                     for z in &n.kids {
                         let zone = crate::hotzones::Zone::parse(&z.name).ok_or_else(|| {
@@ -543,6 +548,12 @@ impl Config {
     fn set_option(&mut self, n: &Node, vars: &HashMap<String, String>) -> Result<()> {
         use crate::options::{set, DECO, GLOBAL};
         if set(DECO, &mut self.deco, n, vars)? || set(GLOBAL, self, n, vars)? {
+            return Ok(());
+        }
+        // uwm's `grid` (a grid drawn on the canvas): accepted so uwm themes load as a whole; uwc
+        // draws the canvas grid with a background-shader (see shaders/) and snaps with snap-grid.
+        if n.name == "grid" {
+            tracing::debug!("ignoring uwm's `grid` option (line {}); use background-shader / snap-grid", n.line);
             return Ok(());
         }
         bail!("unknown option `{}`", n.name)
@@ -1082,6 +1093,19 @@ mod tests {
         for bad in ["tag 0 { }", "tag 10 { }", "tag { }", "tag 1 { sparkle \"x\" }", "tag 1 { root-color \"red\" }"] {
             assert!(Config::parse(bad, p).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn uwm_grid_is_accepted_and_ignored() {
+        let p = Some(Path::new("/x/c.kdl"));
+        // In the options block and at the top level, with uwm's arguments: a theme that sets it
+        // loads as a whole instead of being rejected.
+        let c = Config::parse("options { grid 32 \"#1a1b26\"; border-width 2 }", p).unwrap();
+        assert_eq!(c.deco.border_width, 2);
+        let c = Config::parse("grid 32 \"#1a1b26\"\noptions { corner-radius 3 }", p).unwrap();
+        assert_eq!(c.deco.corner_radius, 3.0);
+        // A made-up option is still rejected.
+        assert!(Config::parse("options { sparkle 1 }", p).is_err());
     }
 
     #[test]

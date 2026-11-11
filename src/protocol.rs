@@ -87,6 +87,9 @@ pub enum Request {
     },
     Overview,
     Home,
+    /// Per-tag canvas bounds and windows (ids for previews, rects, icons) plus each monitor's view
+    /// per tag: everything an overview strip / minimap needs, in canvas px.
+    Minimap,
     Reload,
     Quit,
 }
@@ -129,6 +132,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("bookmark save N | bookmark goto N", "remember / return to a view of the tag in use (1-9)"),
     ("session save | session forget", "write the remembered canvas now / forget it"),
     ("overview | home", "fit all windows / back to the origin at zoom 1"),
+    ("minimap", "per-tag canvas bounds and windows (ids, rects, icons) and each monitor's view per tag, for an overview strip"),
     ("reload | quit", ""),
 ];
 
@@ -296,6 +300,7 @@ impl Request {
             },
             "overview" => none(Request::Overview)?,
             "home" => none(Request::Home)?,
+            "minimap" => none(Request::Minimap)?,
             "reload" => none(Request::Reload)?,
             "quit" => none(Request::Quit)?,
             other => return Err(format!("unknown command `{other}` (`uwc msg --help` lists them)")),
@@ -432,6 +437,10 @@ pub struct Window {
     pub minimized: bool,
     /// The window's own scale on the canvas (1 = normal).
     pub scale: f64,
+    /// The icon the client set (xdg-toplevel-icon-v1): a PAM file under the cache dir, if it sent
+    /// pixels, and/or a stock icon name.
+    pub icon: Option<String>,
+    pub icon_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -493,6 +502,7 @@ mod tests {
     #[test]
     fn parses_commands() {
         assert_eq!(Request::parse("state"), Ok(Request::State));
+        assert_eq!(Request::parse("minimap"), Ok(Request::Minimap));
         assert_eq!(Request::parse("  pan 10 -2.5 "), Ok(Request::Pan(10.0, -2.5)));
         assert_eq!(Request::parse("zoom 2"), Ok(Request::Zoom(2.0, None)));
         assert_eq!(Request::parse("zoom 2 10 20"), Ok(Request::Zoom(2.0, Some((10.0, 20.0)))));

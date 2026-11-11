@@ -194,8 +194,8 @@ impl Uwc {
         }
         let deco = self.deco_for(c);
         let focused = self.focus == Some(c.id);
-        let (canvas, pin, pin_mon, scale, fullscreen, fs_mon) =
-            (c.canvas, c.pin, c.pin_mon, c.scale, c.fullscreen, c.fs_mon);
+        let (id, canvas, pin, pin_mon, scale, fullscreen, fs_mon) =
+            (c.id, c.canvas, c.pin, c.pin_mon, c.scale, c.fullscreen, c.fs_mon);
         let px = Size::from(((size.w as f64 * k).round() as i32, (size.h as f64 * k).round() as i32));
         let buffer = self
             .with_renderer(|state, r| {
@@ -223,6 +223,7 @@ impl Uwc {
             scale_fx: 1.0,
             fade_ms: self.config.close_ms,
             deco_ids: std::array::from_fn(|_| smithay::backend::renderer::element::Id::new()),
+            key: id,
         })
     }
 

@@ -196,6 +196,59 @@ impl Uwc {
         serde_json::to_value(self.snapshot()).expect("the snapshot serializes")
     }
 
+    /// `minimap`: what an overview strip needs, in canvas px — per tag the bounds of its windows
+    /// and the windows themselves (id for the preview, rect, icon), and per monitor each tag's view.
+    fn ipc_minimap(&self) -> Value {
+        use serde_json::json;
+        let rj = |r: &smithay::utils::Rectangle<f64, smithay::utils::Logical>| json!({"x": r.loc.x.round() as i64, "y": r.loc.y.round() as i64, "width": r.size.w.round() as i64, "height": r.size.h.round() as i64});
+        let ts = self.tagset();
+        let tags: Vec<Value> = (0..TAGCOUNT)
+            .map(|i| {
+                let wins: Vec<&crate::state::Client> =
+                    self.clients.iter().filter(|c| c.mapped && c.tags & (1 << i) != 0).collect();
+                let bounds = wins.iter().map(|c| c.rect()).reduce(|a, b| {
+                    let loc = (a.loc.x.min(b.loc.x), a.loc.y.min(b.loc.y)).into();
+                    let end =
+                        ((a.loc.x + a.size.w).max(b.loc.x + b.size.w), (a.loc.y + a.size.h).max(b.loc.y + b.size.h));
+                    smithay::utils::Rectangle::new(loc, ((end.0 - loc.x).max(0.0), (end.1 - loc.y).max(0.0)).into())
+                });
+                json!({
+                    "n": i + 1,
+                    "active": ts & (1 << i) != 0,
+                    "occupied": !wins.is_empty(),
+                    "bounds": bounds.as_ref().map(rj),
+                    "windows": wins.iter().map(|c| json!({
+                        "id": c.id,
+                        "title": c.title(),
+                        "app_id": c.app_id(),
+                        "rect": rj(&c.rect()),
+                        "focused": self.focus == Some(c.id),
+                        "minimized": c.minimized != 0,
+                        "fullscreen": c.fullscreen,
+                        "pinned": c.pin.is_some(),
+                        "icon": c.icon_path.as_ref().map(|p| p.display().to_string()),
+                        "icon_name": c.icon_name,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let monitors: Vec<Value> = self
+            .monitors
+            .iter()
+            .map(|m| {
+                json!({
+                    "name": m.output.name(),
+                    "rect": {"x": m.origin.x as i64, "y": m.origin.y as i64, "width": m.size.w as i64, "height": m.size.h as i64},
+                    "views": (0..TAGCOUNT).map(|i| {
+                        let v = m.view_of(i, ts);
+                        json!({"tag": i + 1, "x": v.x.round() as i64, "y": v.y.round() as i64, "zoom": v.zoom})
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        json!({"tags": tags, "monitors": monitors})
+    }
+
     fn snapshot(&self) -> P::Event {
         let view = |v: &Viewport| P::View { x: v.x.round() as i64, y: v.y.round() as i64, zoom: v.zoom };
         let ts = self.tagset();
@@ -290,6 +343,8 @@ impl Uwc {
                     pinned: c.pin.is_some(),
                     minimized: c.minimized != 0,
                     scale: c.scale,
+                    icon: c.icon_path.as_ref().map(|p| p.display().to_string()),
+                    icon_name: c.icon_name.clone(),
                 }
             })
             .collect();
@@ -376,6 +431,7 @@ impl Uwc {
         let window = |s: &Uwc, w: u32| s.client_index(w).ok_or_else(|| format!("no window {w}"));
         match req {
             R::State => return Ok(Some(self.ipc_state())),
+            R::Minimap => return Ok(Some(self.ipc_minimap())),
             R::Subscribe => {
                 if let Some(c) = self.ipc.conns.iter_mut().find(|c| c.id == id) {
                     c.subscribed = true;
