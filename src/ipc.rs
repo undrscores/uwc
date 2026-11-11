@@ -240,6 +240,20 @@ impl Uwc {
                                 .enumerate()
                                 .filter_map(|(n, b)| b.as_ref().map(|v| P::Bookmark { n: n + 1, view: view(v) }))
                                 .collect(),
+                            tiling: self.tiling.tags[i].state.layout.map(|l| P::Tiling {
+                                layout: l.name(),
+                                ratio: self.tile_opts(crate::tiling::Region::Tag(i)).ratio,
+                                masters: self.tile_opts(crate::tiling::Region::Tag(i)).masters,
+                                area: {
+                                    let a = self.tiling.tags[i].area;
+                                    P::Rect {
+                                        x: a.loc.x as i64,
+                                        y: a.loc.y as i64,
+                                        width: a.size.w as i64,
+                                        height: a.size.h as i64,
+                                    }
+                                },
+                            }),
                         })
                         .collect(),
                 }
@@ -263,7 +277,7 @@ impl Uwc {
                     monitor: name.clone(),
                     tags: c.tags,
                     focused: self.focus == Some(c.id),
-                    floating: true,
+                    floating: self.client_index(c.id).is_none_or(|i| self.tile_region(i).is_none()),
                     fullscreen: c.fullscreen,
                     urgent: c.urgent,
                     // The client's own size (what `resize` sets); the footprint is that times `scale`.
@@ -312,6 +326,11 @@ impl Uwc {
                         height: f.rect.size.h.round() as i64,
                     },
                     windows: self.frame_members(f.id),
+                    tiling: f.tile.layout.map(|l| P::FrameTiling {
+                        layout: l.name(),
+                        ratio: self.tile_opts(crate::tiling::Region::Frame(f.id)).ratio,
+                        masters: self.tile_opts(crate::tiling::Region::Frame(f.id)).masters,
+                    }),
                 })
                 .collect(),
         }
@@ -377,6 +396,7 @@ impl Uwc {
                 self.config_rev += 1;
                 self.cursor_theme.configure(&self.config.cursor_theme, self.config.cursor_size);
                 self.deco_commit.increment();
+                self.retile_all();
                 self.damage();
             }
             R::Rule(line) => {
@@ -447,6 +467,10 @@ impl Uwc {
                         known(self, id)?;
                         self.frame_fit(id);
                     }
+                    F::Layout(id, layout) => {
+                        known(self, id)?;
+                        self.frame_tile_set(id, layout);
+                    }
                 }
             }
             R::Layout(n) => {
@@ -493,11 +517,28 @@ impl Uwc {
             }
             R::Move(w, x, y) => {
                 window(self, w)?;
+                self.release_from_tiling(w);
                 self.move_client_eased(w, x, y);
             }
             R::Resize(w, cw, ch) => {
                 window(self, w)?;
+                self.release_from_tiling(w);
                 self.resize_client(w, cw, ch);
+            }
+            R::Tile(cmd) => {
+                use P::TileCmd as T;
+                match cmd {
+                    T::Set(l) => self.tile_set(Some(l)),
+                    T::Once(l) => self.tile_once(l),
+                    T::Off => self.tile_set(None),
+                    T::Cycle => self.tile_cycle(),
+                    T::Ratio(r) => self.tile_set_ratio(r),
+                    T::Masters(n) => self.tile_set_masters(n),
+                }
+            }
+            R::Float(w, on) => {
+                window(self, w)?;
+                self.set_floating(w, on);
             }
             R::Pin(w, on) => {
                 let i = window(self, w)?;

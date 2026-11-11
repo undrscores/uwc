@@ -414,6 +414,9 @@ impl Uwc {
                 let (dx, dy) = delta(start, zooms(self, id).1);
                 self.resize_client(id, orig.w + dx as i32, orig.h + dy as i32)
             }
+            Drag::TileResize { region, start, ratio0, zoom } => {
+                self.tile_resize_to(region, ratio0, (pos.x - start.x) / zoom.max(1e-6));
+            }
             Drag::FrameMove { id, start, orig } => {
                 let z = self.viewport().zoom;
                 self.frame_drag_to(id, ((pos.x - start.x) / z, (pos.y - start.y) / z), orig);
@@ -437,8 +440,8 @@ impl Uwc {
         if c.fullscreen {
             return;
         }
-        let orig = c.pin.unwrap_or(c.canvas);
-        self.drag = Some(Drag::Move { id: c.id, start: self.cursor, orig });
+        // A tile is lifted out of its slot; where it is dropped decides what happens (tile_drop).
+        self.drag = Some(Drag::Move { id: c.id, start: self.cursor, orig: c.pin.unwrap_or(c.canvas) });
         self.drag_last = self.cursor;
     }
 
@@ -447,7 +450,13 @@ impl Uwc {
         if c.fullscreen {
             return;
         }
-        self.drag = Some(Drag::Resize { id: c.id, start: self.cursor, orig: c.size() });
+        let (id, orig) = (c.id, c.size());
+        let zoom = self.place_at_rest(&self.clients[i]).zoom;
+        // A tile moves the split of its layout; anything else changes its own size.
+        self.drag = Some(match self.tile_begin_resize(id) {
+            Some((region, ratio0)) => Drag::TileResize { region, start: self.cursor, ratio0, zoom },
+            None => Drag::Resize { id, start: self.cursor, orig },
+        });
         self.drag_last = self.cursor;
     }
 
@@ -537,7 +546,11 @@ impl Uwc {
                 }
                 _ => {}
             }
-        } else if self.drag.take().is_some() {
+        } else if let Some(drag) = self.drag.take() {
+            // A tile that was carried goes where it was dropped.
+            if let Drag::Move { id, .. } = drag {
+                self.tile_drop(id);
+            }
             // The alignment lines go with the drag.
             if !std::mem::take(&mut self.guides.list).is_empty() {
                 self.deco_commit.increment();

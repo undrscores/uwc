@@ -23,6 +23,21 @@ pub enum FrameCmd {
     Resize(u32, f64, f64),
     Remove(u32),
     Fit(u32),
+    /// Tile the windows inside the frame with a layout, or stop.
+    Layout(u32, Option<crate::layout::Layout>),
+}
+
+/// `tile ...`: the tiling of the tag in use (tiling.rs).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TileCmd {
+    /// Tile with this layout and keep doing so.
+    Set(crate::layout::Layout),
+    /// Arrange once.
+    Once(crate::layout::Layout),
+    Off,
+    Cycle,
+    Ratio(f64),
+    Masters(usize),
 }
 
 /// A command, as understood by the compositor.
@@ -40,6 +55,9 @@ pub enum Request {
     Pan(f64, f64),
     PanTo(f64, f64),
     Frame(FrameCmd),
+    Tile(TileCmd),
+    /// Keep a window out of the tiling layouts / let it be tiled.
+    Float(u32, bool),
     /// Switch the keyboard layout: `next` or an index.
     Layout(Option<usize>),
     /// Panic inside the compositor, to test that it survives (only with UWC_DEBUG_PANIC=1).
@@ -84,9 +102,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("get-window ID", "a window's decoration with its rules applied"),
     ("pan DX DY", "move the view by canvas px"),
     (
-        "frame add|label|move|resize|remove|fit ...",
-        "labelled regions of the canvas: add X Y W H [LABEL], label ID TEXT, move ID X Y (its windows go too), resize ID W H, remove ID, fit ID",
+        "frame add|label|move|resize|remove|fit|layout ...",
+        "labelled regions of the canvas: add X Y W H [LABEL], label ID TEXT, move ID X Y (its windows go too), resize ID W H, remove ID, fit ID, layout ID LAYOUT|off (tile the windows inside it)",
     ),
+    (
+        "tile LAYOUT|off|cycle|once LAYOUT|ratio R|masters N",
+        "tile the tag in use: LAYOUT is master-stack, dwindle, spiral or columns; once arranges one time; ratio (0.1-0.9) and masters (1-16) change the layout",
+    ),
+    ("float ID | unfloat ID", "keep a window out of the tiling layouts / let it be tiled"),
     ("layout next|N", "switch the keyboard layout (0 is the first of input { keyboard { xkb-layout \"us,de\" } })"),
     ("crash", "panic on purpose to test recovery (only when UWC_DEBUG_PANIC=1 is set in uwc's environment)"),
     (
@@ -177,9 +200,47 @@ impl Request {
                     "resize" => FrameCmd::Resize(id(1)?, num(2)?, num(3)?),
                     "remove" => FrameCmd::Remove(id(1)?),
                     "fit" => FrameCmd::Fit(id(1)?),
-                    _ => return Err("frame needs add X Y W H [LABEL], label ID TEXT, move ID X Y, resize ID W H, remove ID or fit ID".into()),
+                    "layout" => FrameCmd::Layout(
+                        id(1)?,
+                        match args.get(2).copied() {
+                            Some("off") => None,
+                            Some(l) => Some(crate::layout::Layout::parse(l).ok_or_else(|| {
+                                format!("a layout is off or one of: {}", crate::layout::Layout::names())
+                            })?),
+                            None => return Err("frame layout ID LAYOUT|off".into()),
+                        },
+                    ),
+                    _ => return Err("frame needs add X Y W H [LABEL], label ID TEXT, move ID X Y, resize ID W H, remove ID fit ID or layout ID LAYOUT|off".into()),
                 })
             }
+            "tile" => {
+                use crate::layout::Layout;
+                let layout = |s: Option<&&str>| {
+                    s.and_then(|s| Layout::parse(s)).ok_or_else(|| format!("a layout is one of: {}", Layout::names()))
+                };
+                Request::Tile(match args.first().copied() {
+                    Some("off") if args.len() == 1 => TileCmd::Off,
+                    Some("cycle") if args.len() == 1 => TileCmd::Cycle,
+                    Some("once") => TileCmd::Once(layout(args.get(1))?),
+                    Some("ratio") => {
+                        let r = num(1)?;
+                        if !(0.1..=0.9).contains(&r) {
+                            return Err("a tile ratio is 0.1 to 0.9".into());
+                        }
+                        TileCmd::Ratio(r)
+                    }
+                    Some("masters") => {
+                        let n = num(1)?;
+                        if n.fract() != 0.0 || !(1.0..=16.0).contains(&n) {
+                            return Err("masters is 1 to 16".into());
+                        }
+                        TileCmd::Masters(n as usize)
+                    }
+                    Some(_) if args.len() == 1 => TileCmd::Set(layout(args.first())?),
+                    _ => return Err("tile LAYOUT, off, cycle, once LAYOUT, ratio R or masters N".into()),
+                })
+            }
+            "float" | "unfloat" => Request::Float(id(0)?, cmd == "float"),
             "jump" => {
                 if args.is_empty() {
                     return Err("jump needs some text to match, e.g. jump firefox (or #12 for a window id)".into());
@@ -284,6 +345,18 @@ pub struct Tag {
     pub urgent: bool,
     pub viewport: View,
     pub bookmarks: Vec<Bookmark>,
+    /// The layout windows on this tag are tiled with, if any.
+    pub tiling: Option<Tiling>,
+}
+
+#[derive(Serialize)]
+pub struct Tiling {
+    pub layout: &'static str,
+    pub ratio: f64,
+    pub masters: usize,
+    /// The canvas rect the windows are laid out in.
+    #[serde(flatten)]
+    pub area: Rect,
 }
 
 #[derive(Serialize)]
@@ -330,6 +403,15 @@ pub struct Frame {
     pub rect: Rect,
     /// The windows whose centre is inside it (what moves with it).
     pub windows: Vec<u32>,
+    /// The layout its windows are tiled with, if any.
+    pub tiling: Option<FrameTiling>,
+}
+
+#[derive(Serialize)]
+pub struct FrameTiling {
+    pub layout: &'static str,
+    pub ratio: f64,
+    pub masters: usize,
 }
 
 #[derive(Serialize)]
@@ -463,6 +545,9 @@ mod tests {
             "crash",
             "layout",
             "frame",
+            "tile",
+            "float",
+            "unfloat",
             "zoom",
             "view",
             "toggleview",

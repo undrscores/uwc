@@ -169,6 +169,16 @@ pub struct Client {
     pub prev_size: Option<Size<i32, Logical>>,
     /// Minimized (the scratchpad): 0 = no, else the order it was hidden in (newest highest).
     pub minimized: u32,
+    /// Kept out of the tiling layouts (tiling.rs): by a rule, `toggle-float`, or being moved by hand.
+    pub floating: bool,
+    /// The layout frame it is tiled in (tiling.rs), if any.
+    pub tile_frame: Option<u32>,
+    /// Its announced (min, max) size, 0 = none; read at every commit.
+    pub limits: crate::tiling::Limits,
+    /// The size it showed it needs when it drew bigger than the slot it was told.
+    pub tile_min: (i32, i32),
+    /// The size its layout last asked for.
+    pub tile_want: Option<(i32, i32)>,
     /// What the rules' `open { }` blocks said, decided at the first configure, used when it maps.
     pub open: crate::rules::Open,
     /// The window's own scale on the canvas (1 = normal), on top of the view's zoom.
@@ -300,6 +310,14 @@ pub enum Drag {
         orig: Size<i32, Logical>,
     },
     Pan,
+    /// Resizing a tile moves its region's main split: `ratio0` is the ratio when the drag began.
+    TileResize {
+        region: crate::tiling::Region,
+        start: Point<f64, Logical>,
+        ratio0: f64,
+        /// Screen px per canvas px of the window being dragged.
+        zoom: f64,
+    },
     /// Dragging a frame by its title strip; the windows it carries are in `frames.carrying`.
     FrameMove {
         id: u32,
@@ -508,6 +526,8 @@ pub struct Uwc {
     pub hot: crate::hotzones::HotState,
     /// Labelled regions of the canvas (frames.rs).
     pub frames: crate::frames::Frames,
+    /// Each tag's tiling layout (tiling.rs).
+    pub tiling: crate::tiling::Tiling,
     /// Alignment lines drawn while a window is dragged (snap.rs).
     pub guides: crate::snap::Guides,
     /// Hint mode (`jump-hints`) while it is up.
@@ -667,6 +687,7 @@ impl Uwc {
             layout: (0, String::new(), 1),
             hot: Default::default(),
             frames: Default::default(),
+            tiling: Default::default(),
             guides: Default::default(),
             hints: None,
             in_drag_motion: false,
@@ -1510,6 +1531,7 @@ impl Uwc {
                 self.drag = None;
             }
         }
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -1659,6 +1681,7 @@ impl Uwc {
                 let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
                 self.focus_client(top);
             }
+            self.retile_all();
             self.damage();
         }
     }
@@ -1688,6 +1711,7 @@ impl Uwc {
             c.tags = ts;
         }
         self.focus_client(Some(id));
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -1708,6 +1732,7 @@ impl Uwc {
                 let top = self.clients.iter().rev().find(|c| self.visible(c)).map(|c| c.id);
                 self.focus_client(top);
             }
+            self.retile_all();
             self.refresh_pointer();
             self.damage();
         } else {
@@ -1715,6 +1740,7 @@ impl Uwc {
             if self.clients[i].pin.is_none() {
                 self.clients[i].tags = self.tagset();
             }
+            self.retile_all();
             self.focus_and_reveal(id);
             self.damage();
         }
@@ -1772,6 +1798,7 @@ impl Uwc {
             if on {
                 self.focus_client(Some(id));
             }
+            self.retile_all();
             self.refresh_pointer();
             self.damage();
             return;
@@ -1814,6 +1841,7 @@ impl Uwc {
         if on {
             self.focus_client(Some(id));
         }
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -1875,6 +1903,7 @@ impl Uwc {
                     let s = self.config.move_step;
                     let c = self.clients[i].canvas;
                     let id = self.clients[i].id;
+                    self.release_from_tiling(id);
                     self.move_client_eased(id, c.x + v.0 * s, c.y + v.1 * s);
                 }
             }
@@ -1884,6 +1913,7 @@ impl Uwc {
                     let s = self.config.move_step;
                     let sz = self.clients[i].size();
                     let id = self.clients[i].id;
+                    self.release_from_tiling(id);
                     self.resize_client(id, sz.w + (v.0 * s) as i32, sz.h + (v.1 * s) as i32);
                 }
             }
@@ -1914,6 +1944,29 @@ impl Uwc {
             Action::ToggleShortcutsInhibit => self.toggle_shortcuts_inhibit(),
             Action::JumpHints => self.hints_toggle(),
             Action::NextLayout => self.set_layout(None),
+            Action::Tile(l) => self.tile_set(Some(*l)),
+            Action::FrameTile(l) => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_tile_set(f, Some(*l));
+                }
+            }
+            Action::FrameTileOff => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_tile_set(f, None);
+                }
+            }
+            Action::FrameTileCycle => self.frame_tile_cycle(),
+            Action::TileOnce(l) => self.tile_once(*l),
+            Action::TileOff => self.tile_set(None),
+            Action::TileCycle => self.tile_cycle(),
+            Action::TileRatio(d) => self.tile_ratio(*d),
+            Action::TileMasters(d) => self.tile_masters(*d),
+            Action::ToggleFloat => {
+                if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {
+                    let (id, on) = (self.clients[i].id, !self.clients[i].floating);
+                    self.set_floating(id, on);
+                }
+            }
             Action::FrameNew => {
                 if let Some(id) = self.focus {
                     self.frame_around(id);
@@ -2046,6 +2099,7 @@ impl Uwc {
                 self.config_error = None;
                 self.config_rev += 1;
                 self.deco_commit.increment();
+                self.retile_all();
                 self.damage();
                 Ok(())
             }

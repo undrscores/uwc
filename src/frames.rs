@@ -36,6 +36,8 @@ pub struct Frame {
     pub tags: u32,
     /// Fill, four borders, strip.
     ids: [Id; 6],
+    /// The layout its windows are tiled in, if it has one (tiling.rs).
+    pub tile: crate::tiling::TileState,
 }
 
 #[derive(Default)]
@@ -76,6 +78,7 @@ impl Uwc {
             label: label.chars().take(60).collect(),
             tags,
             ids: std::array::from_fn(|_| Id::new()),
+            tile: Default::default(),
         });
         self.frames_changed();
         id
@@ -83,6 +86,8 @@ impl Uwc {
 
     /// Frames look different without moving: new colours, a new label.
     fn frames_changed(&mut self) {
+        // A frame that moved or resized takes its tiled windows with it.
+        self.retile_all_with(crate::tiling::Glide::Instant);
         self.deco_commit.increment();
         self.damage();
     }
@@ -153,6 +158,7 @@ impl Uwc {
         self.frames.cache.retain(|k, _| k.0 != id);
         let removed = self.frames.list.len() != before;
         if removed {
+            self.frame_tile_forget(id);
             self.frames_changed();
         }
         removed

@@ -34,6 +34,8 @@ src/render.rs      the canvas as a list of render elements (zoom = RescaleRender
 src/protocol.rs    the IPC protocol, typed: Request (parsed from a line), the snapshot and events (serde)
 src/ipc.rs         control socket: connections, subscriptions, running requests
 src/layer.rs       wlr-layer-shell: hit-testing, keyboard interactivity, work area, drawing
+src/layout.rs      tiling layouts as pure maths (area + count + gaps -> rects; unit-tested)
+src/tiling.rs      per-tag tiling: when windows are re-placed, floating, the `tile` actions
 src/rules.rs       window rules and the per-window decoration settings (`Deco`)
 shaders/           example user shaders (border, background)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content

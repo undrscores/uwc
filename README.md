@@ -24,7 +24,8 @@ IPC, improved where uwm was awkward.
 - **Find any window.** `Mod+/` labels every window and jumps to the one you type; `uwc msg jump firefox` fuzzy-finds by
   app-id and title on any tag, and `examples/uwc-jump` does it from a launcher.
 - **Everything floats.** Windows can also have their own scale on the canvas, be pinned to the screen, minimized to a
-  scratchpad, or go fullscreen.
+  scratchpad, or go fullscreen. Tiling is opt-in per tag (master-stack, dwindle, spiral, columns), or a one-off
+  "tidy up".
 - **Rice it.** (A tag can have its own wallpaper shader and colour.) Rounded corners, gradient borders, shadows, focus glow, opacity and dimming, animations (open, close,
   move, tag switch, eased pan and zoom, touchpad momentum), and your own GLSL for borders and the background.
   Window rules, `include`, `vars` and live reload. No client-side decorations and no built-in bar: bring your own.
