@@ -61,6 +61,22 @@ impl Backend {
     }
 }
 
+/// A frame was drawn and, on a backend without a vblank to wait for (winit, headless, an unchanged udev
+/// output), counts as shown now: answer presentation feedback, send frame callbacks and let fifo barriers
+/// and timed commits through.
+pub fn frame_done(state: &mut Uwc, output: &Output) {
+    let feedback = state.take_feedback(output);
+    send_frame_callbacks(state, output);
+    let seq = state.frames_drawn;
+    state.frame_presented(
+        output,
+        feedback,
+        None,
+        seq,
+        smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+    );
+}
+
 /// Tell every visible window a frame was drawn so clients can produce the next one.
 pub fn send_frame_callbacks(state: &Uwc, output: &Output) {
     let time = state.start_time.elapsed();

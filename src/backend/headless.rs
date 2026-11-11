@@ -43,7 +43,7 @@ pub fn init(state: &mut Uwc, handle: &LoopHandle<'static, Uwc>, sizes: &[(i32, i
             state.step_animations();
             if std::mem::take(&mut state.redraw) {
                 for output in &outputs {
-                    super::send_frame_callbacks(state, output);
+                    super::frame_done(state, output);
                 }
             }
             state.popups.cleanup();

@@ -13,7 +13,7 @@ use serde_json::Value;
 use wayland_client::{
     globals::GlobalList,
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
+    protocol::{wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
@@ -34,9 +34,12 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_manager_v1 as ws_manager,
 };
 use wayland_protocols::wp::{
+    commit_timing::v1::client::{wp_commit_timer_v1, wp_commit_timing_manager_v1},
+    fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
     pointer_constraints::zv1::client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
     text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -259,6 +262,9 @@ struct App {
     ext_tl: Vec<(ext_tl_handle::ExtForeignToplevelHandleV1, String, String, String, bool)>,
     /// ext-image-copy-capture: what the session offered and how frames ended.
     cap_events: Vec<String>,
+    /// wp_presentation_feedback outcomes ("presented", "discarded") and finished frame callbacks.
+    presentation: Vec<String>,
+    frames_done: u32,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -337,6 +343,8 @@ impl Client {
             ti_leave: false,
             ext_tl: Vec::new(),
             cap_events: Vec::new(),
+            presentation: Vec::new(),
+            frames_done: 0,
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -976,6 +984,42 @@ impl Dispatch<ws_handle::ExtWorkspaceHandleV1, ()> for App {
 }
 noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer);
 noop!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+noop!(wp_fifo_manager_v1::WpFifoManagerV1, wp_fifo_v1::WpFifoV1);
+noop!(wp_commit_timing_manager_v1::WpCommitTimingManagerV1, wp_commit_timer_v1::WpCommitTimerV1);
+noop!(wp_presentation::WpPresentation);
+
+impl Dispatch<wl_callback::WlCallback, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        app.frames_done += 1;
+    }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wp_presentation_feedback::WpPresentationFeedback,
+        e: wp_presentation_feedback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            wp_presentation_feedback::Event::Presented { tv_sec_hi, tv_sec_lo, tv_nsec, refresh, .. } => {
+                let secs = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
+                app.presentation.push(format!("presented {secs}.{tv_nsec:09} refresh {refresh}"));
+            }
+            wp_presentation_feedback::Event::Discarded => app.presentation.push("discarded".into()),
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<ext_tl_list::ExtForeignToplevelListV1, ()> for App {
     fn event(
@@ -1520,6 +1564,16 @@ fn a_panic_in_a_handler_does_not_take_the_session_down() {
     assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), before);
     uwc.ok(&format!("focus {id}"));
     c.sync();
+    // A panic inside a Wayland protocol handler (a toplevel set_title, here) is survived too: uwc uses the pure
+    // Rust wayland backend, so it unwinds out of the dispatch instead of aborting through libwayland's C.
+    let victim = c.window("Victim", 200, 150);
+    victim.toplevel.set_title("uwc-debug-panic".into());
+    let _ = c.queue.roundtrip(&mut c.app);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc survived a panic in a protocol handler");
+    let mut c2 = uwc.connect();
+    let _w2 = c2.window("After the handler panic", 200, 150);
+    assert!(uwc.state()["windows"].as_array().unwrap().iter().any(|w| w["title"] == "After the handler panic"));
     // Three in a row mean something is badly wrong: the session is saved and uwc exits non-zero.
     let mut held = Vec::new();
     for _ in 0..3 {
@@ -3516,4 +3570,114 @@ fn a_frame_can_own_a_layout() {
     let s = uwc.state();
     assert!(s["frames"][0]["tiling"].is_null());
     assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == true));
+}
+
+/// Commit a fresh buffer on `w` asking for a frame callback, and wait (bounded) for it.
+fn commit_and_wait_for_frame(c: &mut Client, w: &Window, name: &str, size: (i32, i32)) -> bool {
+    let qh = c.queue.handle();
+    let before = c.app.frames_done;
+    w.surface.frame(&qh, ());
+    let buf = c.buffer(name, size.0, size.1);
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let start = Instant::now();
+    while c.app.frames_done == before {
+        if start.elapsed() > Duration::from_secs(2) {
+            return false;
+        }
+        c.dispatch_pending();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+#[test]
+fn presentation_feedback_is_answered_with_a_monotonic_time() {
+    let uwc = Uwc::start("presentation", None);
+    let mut c = uwc.connect();
+    let w = c.window("Video", 200, 150);
+    let qh = c.queue.handle();
+    let pres: wp_presentation::WpPresentation = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let _fb = pres.feedback(&w.surface, &qh, ());
+    assert!(commit_and_wait_for_frame(&mut c, &w, "video-a", (200, 150)), "the frame callback arrives");
+    c.sync();
+    assert_eq!(c.app.presentation.len(), 1, "one feedback, one answer: {:?}", c.app.presentation);
+    let said = c.app.presentation[0].clone();
+    assert!(said.starts_with("presented "), "{said}");
+    // The clock is CLOCK_MONOTONIC: seconds since boot, not since 1970.
+    let secs: u64 = said["presented ".len()..].split('.').next().unwrap().parse().unwrap();
+    assert!(secs < 365 * 24 * 3600 * 20, "a monotonic time, not the wall clock: {said}");
+    // Feedback for a commit that another commit replaces before it is shown is discarded, never lost.
+    let _a = pres.feedback(&w.surface, &qh, ());
+    let buf = c.buffer("video-b", 200, 150);
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let _b = pres.feedback(&w.surface, &qh, ());
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let start = Instant::now();
+    while c.app.presentation.len() < 3 && start.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+        c.sync();
+    }
+    assert_eq!(c.app.presentation.len(), 3, "every request is answered: {:?}", c.app.presentation);
+}
+
+#[test]
+fn a_client_waiting_on_fifo_barriers_keeps_running() {
+    let mut uwc = Uwc::start("fifo", None);
+    let mut c = uwc.connect();
+    let w = c.window("Fifo", 200, 150);
+    let qh = c.queue.handle();
+    let mgr: wp_fifo_manager_v1::WpFifoManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let fifo = mgr.get_fifo(&w.surface, &qh, ());
+    // Every commit waits for the previous one's barrier and sets its own, the way a vsynced game does.
+    for i in 0..12 {
+        fifo.wait_barrier();
+        fifo.set_barrier();
+        assert!(commit_and_wait_for_frame(&mut c, &w, "fifo", (200, 150)), "commit {i} was held for good");
+    }
+    // A hidden window is never drawn, and must not stall either.
+    uwc.ok("view 2");
+    for i in 0..6 {
+        fifo.wait_barrier();
+        fifo.set_barrier();
+        let buf = c.buffer("fifo-hidden", 200, 150);
+        w.surface.attach(Some(&buf), 0, 0);
+        w.surface.commit();
+        c.sync();
+        std::thread::sleep(Duration::from_millis(40));
+        let _ = i;
+    }
+    uwc.ok("view 1");
+    assert!(commit_and_wait_for_frame(&mut c, &w, "fifo-back", (200, 150)), "back on screen it still runs");
+}
+
+#[test]
+fn a_commit_with_a_timestamp_is_applied_at_that_time() {
+    let uwc = Uwc::start("commit-timing", None);
+    let mut c = uwc.connect();
+    let w = c.window("Timed", 200, 150);
+    let qh = c.queue.handle();
+    let mgr: wp_commit_timing_manager_v1::WpCommitTimingManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let timer = mgr.get_timer(&w.surface, &qh, ());
+    // CLOCK_MONOTONIC now, from the same clock the compositor uses.
+    let now = {
+        let mut ts = std::mem::MaybeUninit::<[i64; 2]>::uninit();
+        // Safety: clock_gettime fills the two words of a timespec.
+        unsafe {
+            extern "C" {
+                fn clock_gettime(clk: i32, ts: *mut [i64; 2]) -> i32;
+            }
+            assert_eq!(clock_gettime(1, ts.as_mut_ptr()), 0);
+            ts.assume_init()
+        }
+    };
+    let target = Duration::new(now[0] as u64, now[1] as u32) + Duration::from_millis(400);
+    timer.set_timestamp((target.as_secs() >> 32) as u32, target.as_secs() as u32, target.subsec_nanos());
+    let start = Instant::now();
+    assert!(commit_and_wait_for_frame(&mut c, &w, "timed", (200, 150)), "the timed commit is applied in the end");
+    let took = start.elapsed();
+    assert!(took >= Duration::from_millis(300), "not before its time ({took:?})");
+    assert!(took < Duration::from_millis(1500), "but not much after ({took:?})");
 }

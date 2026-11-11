@@ -101,7 +101,7 @@ impl Uwc {
             if let Err(e) = w.backend.submit(damage.as_deref()) {
                 tracing::error!("submit: {e}");
             }
-            super::send_frame_callbacks(self, &w.output);
+            super::frame_done(self, &w.output);
             if std::mem::take(&mut self.animating) {
                 self.redraw = true;
             }
