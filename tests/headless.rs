@@ -867,6 +867,7 @@ noop!(
 );
 noop!(wl_output::WlOutput);
 noop!(wayland_client::protocol::wl_seat::WlSeat);
+noop!(wayland_client::protocol::wl_region::WlRegion);
 noop!(wayland_client::protocol::wl_pointer::WlPointer);
 noop!(export_manager::HyprlandToplevelExportManagerV1);
 noop!(sc_manager::ZwlrScreencopyManagerV1);
@@ -3916,4 +3917,45 @@ fn a_client_requested_move_ends_when_the_button_is_released() {
     p.frame();
     c.sync();
     assert_eq!(x(&mut uwc), 130.0, "the window kept following the pointer after the release");
+}
+
+#[test]
+fn dragging_over_click_through_shell_layers_pans_the_canvas() {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let mut uwc = Uwc::start("shellpan", Some("options { view-ms 0 }"));
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let all = zwlr_layer_surface_v1::Anchor::Top
+        | zwlr_layer_surface_v1::Anchor::Bottom
+        | zwlr_layer_surface_v1::Anchor::Left
+        | zwlr_layer_surface_v1::Anchor::Right;
+    let none = zwlr_layer_surface_v1::KeyboardInteractivity::None;
+    let _wall = c.layer("wall", zwlr_layer_shell_v1::Layer::Background, all, (0, 0), -1, none);
+    // A full-screen overlay and top layer that take no input (an empty input region), as a shell's pips and
+    // OSD do, and a side panel that takes it only inside a small hitbox.
+    let click_through = c.layer("pips", zwlr_layer_shell_v1::Layer::Top, all, (0, 0), -1, none);
+    let empty = c.app.compositor.create_region(&qh, ());
+    click_through.surface.set_input_region(Some(&empty));
+    click_through.surface.commit();
+    let osd = c.layer("osd", zwlr_layer_shell_v1::Layer::Overlay, all, (0, 0), -1, none);
+    osd.surface.set_input_region(Some(&empty));
+    osd.surface.commit();
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    let vx = |s: &Value| num(&s["monitors"][0]["viewport"]["x"]);
+    let x0 = vx(&uwc.state());
+    p.motion_absolute(0, 500, 300, 1000, 600);
+    p.frame();
+    c.sync();
+    assert_eq!(uwc.state()["cursor"]["under"], "layer:wall", "the click-through layers do not take the click");
+    p.button(1, 0x110, ButtonState::Pressed);
+    p.motion(2, 100.0, 0.0);
+    p.frame();
+    p.button(3, 0x110, ButtonState::Released);
+    p.frame();
+    c.sync();
+    assert!(vx(&uwc.state()) < x0 - 50.0, "the view panned: {x0} -> {}", vx(&uwc.state()));
 }

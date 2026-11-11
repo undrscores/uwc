@@ -433,6 +433,9 @@ pub struct Cursor {
     pub x: i64,
     pub y: i64,
     pub hidden: bool,
+    /// What takes a click here: `window:ID`, `layer:NAMESPACE`, or absent over empty canvas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub under: Option<String>,
 }
 
 /// Where the seat's keyboard is.

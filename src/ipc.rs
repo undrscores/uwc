@@ -379,7 +379,12 @@ impl Uwc {
             },
             hints: self.hints_active(),
             monitors,
-            cursor: P::Cursor { x: self.cursor.x.round() as i64, y: self.cursor.y.round() as i64, hidden: false },
+            cursor: P::Cursor {
+                x: self.cursor.x.round() as i64,
+                y: self.cursor.y.round() as i64,
+                hidden: false,
+                under: self.under_name(self.cursor),
+            },
             windows,
         }
     }

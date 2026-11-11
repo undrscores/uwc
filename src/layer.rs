@@ -332,6 +332,19 @@ impl Uwc {
     }
 
     /// For IPC: the layer surfaces on every output.
+    /// What a click at `p` would hit, for IPC: `window:ID`, `layer:NAMESPACE` or nothing.
+    pub fn under_name(&self, p: Point<f64, Logical>) -> Option<String> {
+        match self.under(p)? {
+            Under::Window { idx, .. } => Some(format!("window:{}", self.clients[idx].id)),
+            Under::Layer { root, .. } => {
+                let o = self.output_of(self.mon_at(p))?;
+                let map = layer_map_for_output(&o);
+                let ns = map.layers().find(|l| *l.wl_surface() == root).map(|l| l.namespace().to_string());
+                Some(format!("layer:{}", ns.unwrap_or_else(|| "?".into())))
+            }
+        }
+    }
+
     pub fn layer_info(&self) -> Vec<crate::protocol::Layer> {
         let mut out = Vec::new();
         for m in &self.monitors {
