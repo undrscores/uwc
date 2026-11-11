@@ -29,7 +29,7 @@ src/options.rs     every option once: name, field, range -> parsing, set, get
 src/kdl.rs         the KDL subset parser (a port of uwm's kdl.h)
 src/state.rs       Uwc state: windows, tags, viewport, focus, actions
 src/handlers.rs    wayland protocol handlers
-src/input.rs       keyboard/pointer/drag handling, backend-independent
+src/input.rs       keyboard/pointer/drag handling and touchpad gestures (`gestures { }` in the config), backend-independent
 src/render.rs      the canvas as a list of render elements (zoom = RescaleRenderElement)
 src/protocol.rs    the IPC protocol, typed: Request (parsed from a line), the snapshot and events (serde)
 src/ipc.rs         control socket: connections, subscriptions, running requests

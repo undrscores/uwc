@@ -27,8 +27,9 @@ IPC, improved where uwm was awkward.
 - **Rice it.** (A tag can have its own wallpaper shader and colour.) Rounded corners, gradient borders, shadows, focus glow, background blur, opacity and dimming, animations (open, close,
   move, tag switch, eased pan and zoom, touchpad momentum), and your own GLSL for borders and the background.
   Window rules, `include`, `vars` and live reload. No client-side decorations and no built-in bar: bring your own.
-- **Input.** Keyboard, mouse (Mod+drag move, resize and pan), touchpad gestures, touchscreens, tablets, XKB layouts and
-  libinput settings; pointer constraints for games; input methods (fcitx5 and friends).
+- **Input.** Keyboard, mouse (Mod+drag move, resize and pan), touchpad gestures (configurable in `gestures { }`:
+  3-finger swipe pans with momentum, 4-finger swipe focuses a neighbour, 2-finger pinch zooms; the rest go to the app),
+  touchscreens, tablets, XKB layouts and libinput settings; pointer constraints for games; input methods (fcitx5 and friends).
 - **Multiple monitors** on one shared canvas, with a view per monitor and output management (wdisplays, kanshi).
 - **Plays well with the rest of the desktop.** layer-shell bars and launchers, foreign-toplevel and ext-workspace for
   taskbars, Quickshell window previews, screen capture and portal screen sharing, session lock, idle notify and

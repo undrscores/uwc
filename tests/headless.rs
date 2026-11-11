@@ -1569,6 +1569,62 @@ fn view_moves_ease_to_their_target() {
 }
 
 #[test]
+fn touchpad_gestures_pan_focus_and_zoom() {
+    // No backend here produces gesture events, so drive the handlers over the IPC; pan-momentum-ms 0
+    // keeps a released pan from coasting on and racing the assertions.
+    let mut uwc = Uwc::start("gestures", Some("options { view-ms 0\n open-ms 0\n move-ms 0\n pan-momentum-ms 0 }"));
+    let mut c = uwc.connect();
+    let _a = c.window("A", 200, 200);
+    let _b = c.window("B", 200, 200);
+    uwc.wait("both windows", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (a, b) = (win(&uwc.state(), "A")["id"].as_u64().unwrap(), win(&uwc.state(), "B")["id"].as_u64().unwrap());
+    uwc.ok(&format!("move {a} 0 0"));
+    uwc.ok(&format!("move {b} 600 0"));
+    uwc.ok(&format!("focus {a}"));
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], a);
+    let vp = |uwc: &mut Uwc| {
+        let v = &uwc.state()["monitors"][0]["viewport"];
+        (num(&v["x"]), num(&v["y"]), num(&v["zoom"]))
+    };
+    // A 3-finger swipe pans the view with the fingers (swipe-gain 2.0): fingers left 50, the view
+    // goes right 100 (the canvas follows the fingers).
+    let (x0, _, z0) = vp(&mut uwc);
+    uwc.ok("swipe-begin 3");
+    uwc.ok("swipe-update -50 0");
+    uwc.ok("swipe-end");
+    assert_eq!(vp(&mut uwc).0, x0 + 100.0, "3-finger swipe panned the view");
+    // A pinch reported with 3 fingers is that same swipe: libinput reports 3-finger swipes as
+    // pinches on some trackpads (the Magic Trackpad does).
+    let x1 = vp(&mut uwc).0;
+    uwc.ok("pinch-begin 3");
+    uwc.ok("pinch-update -25 0 1.0");
+    uwc.ok("pinch-end");
+    assert_eq!(vp(&mut uwc).0, x1 + 50.0, "a 3-finger 'pinch' panned like a swipe");
+    // A 2-finger pinch zooms the view.
+    uwc.ok("pinch-begin 2");
+    uwc.ok("pinch-update 0 0 2.0");
+    uwc.ok("pinch-end");
+    assert_eq!(vp(&mut uwc).2, z0 * 2.0, "2-finger pinch doubled the zoom");
+    // A 4-finger swipe left focuses the window to the right (the canvas follows the fingers).
+    uwc.ok("swipe-begin 4");
+    uwc.ok("swipe-update -100 0");
+    uwc.ok("swipe-end");
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], b, "swipe left focused the right-hand window");
+    // A swipe that did not travel swipe-threshold far enough does nothing, nor a cancelled one,
+    // nor one with an unbound finger count.
+    uwc.ok("swipe-begin 4");
+    uwc.ok("swipe-update 10 0");
+    uwc.ok("swipe-end");
+    uwc.ok("swipe-begin 4");
+    uwc.ok("swipe-update -100 0");
+    uwc.ok("swipe-end 1");
+    uwc.ok("swipe-begin 5");
+    uwc.ok("swipe-update -100 0");
+    uwc.ok("swipe-end");
+    assert_eq!(uwc.state()["keyboard_focus"]["window"], b);
+}
+
+#[test]
 fn a_released_swipe_glides_on_and_slows_down() {
     let mut uwc = Uwc::start("fling", None);
     let x0 = uwc.state()["monitors"][0]["viewport"]["x"].as_f64().unwrap();

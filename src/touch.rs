@@ -161,6 +161,8 @@ impl Uwc {
 
     pub fn touch_motion(&mut self, slot: i32, pos: Point<f64, Logical>, time: u32) {
         self.idle_notifier.notify_activity(&self.seat);
+        // The finger may have crossed onto another monitor; local coordinates are per-monitor.
+        self.cur = self.mon_at(pos);
         let local = pos - self.origin_of(self.cur);
         if self.touch.pinch.owns(slot) {
             if let Some(s) = self.touch.pinch.motion(slot, (local.x, local.y)) {

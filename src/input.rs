@@ -170,101 +170,32 @@ impl Uwc {
             InputEvent::TouchMotion { event } => self.touch_input_motion::<B>(event),
             InputEvent::TouchUp { event } => self.touch_input_up::<B>(event),
             InputEvent::TouchCancel { .. } => self.touch_cancel(),
-            // Touchpad gestures. Three fingers are the compositor's: a swipe pans the view, a
-            // pinch zooms it. Anything else goes to the client under the pointer.
+            // Touchpad gestures. What a gesture does is bound in `gestures { }` (by default a
+            // 3-finger swipe pans the view, a 4-finger swipe focuses a neighbour, a 2-finger pinch
+            // zooms); a gesture with no bind goes to the client under the pointer. libinput reports
+            // 3/4-finger swipes as pinches on some trackpads (the Magic Trackpad does), so a pinch
+            // whose finger count has swipe binds is treated as that swipe (Config::pinch_plan).
             InputEvent::GestureSwipeBegin { event } => {
-                let (time, fingers) = (Event::time_msec(&event), event.fingers());
-                if fingers == 3 && !self.is_locked() {
-                    self.gesture = Some(Gesture::Swipe);
-                    self.fling = None;
-                    self.pan_vel = (0.0, 0.0);
-                    self.pan_sampled = std::time::Instant::now();
-                } else if !self.is_locked() {
-                    self.pointer().gesture_swipe_begin(
-                        self,
-                        &GestureSwipeBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
-                    );
-                }
+                self.gesture_swipe_begin(event.fingers(), Event::time_msec(&event))
             }
             InputEvent::GestureSwipeUpdate { event } => {
-                let time = Event::time_msec(&event);
-                match self.gesture {
-                    Some(Gesture::Swipe) => {
-                        self.with_viewport(|v, _| v.pan_screen(event.delta_x(), event.delta_y()));
-                        self.pan_sample(event.delta_x(), event.delta_y());
-                        self.refresh_pointer();
-                        self.damage();
-                    }
-                    _ if !self.is_locked() => {
-                        self.pointer().gesture_swipe_update(
-                            self,
-                            &smithay::input::pointer::GestureSwipeUpdateEvent { time, delta: event.delta() },
-                        );
-                    }
-                    _ => {}
-                }
+                self.gesture_swipe_update(event.delta_x(), event.delta_y(), Event::time_msec(&event))
             }
             InputEvent::GestureSwipeEnd { event } => {
-                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
-                if self.gesture == Some(Gesture::Swipe) {
-                    self.gesture = None;
-                    if !cancelled {
-                        self.pan_release();
-                    }
-                } else if !self.is_locked() {
-                    self.pointer().gesture_swipe_end(
-                        self,
-                        &GestureSwipeEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
-                    );
-                }
+                self.gesture_swipe_end(event.cancelled(), Event::time_msec(&event))
             }
             InputEvent::GesturePinchBegin { event } => {
-                let (time, fingers) = (Event::time_msec(&event), event.fingers());
-                if fingers == 3 && !self.is_locked() {
-                    self.gesture = Some(Gesture::Pinch { last: 1.0 });
-                } else if !self.is_locked() {
-                    self.pointer().gesture_pinch_begin(
-                        self,
-                        &GesturePinchBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers },
-                    );
-                }
+                self.gesture_pinch_begin(event.fingers(), Event::time_msec(&event))
             }
-            InputEvent::GesturePinchUpdate { event } => {
-                let time = Event::time_msec(&event);
-                match self.gesture {
-                    Some(Gesture::Pinch { last }) => {
-                        // The pinch's scale is absolute since the begin; each update zooms by
-                        // what changed since the last one.
-                        let scale = event.scale();
-                        if last > 0.0 && (scale / last).is_finite() {
-                            self.zoom_by(scale / last);
-                        }
-                        self.gesture = Some(Gesture::Pinch { last: scale });
-                    }
-                    _ if !self.is_locked() => {
-                        self.pointer().gesture_pinch_update(
-                            self,
-                            &smithay::input::pointer::GesturePinchUpdateEvent {
-                                time,
-                                delta: event.delta(),
-                                scale: event.scale(),
-                                rotation: event.rotation(),
-                            },
-                        );
-                    }
-                    _ => {}
-                }
-            }
+            InputEvent::GesturePinchUpdate { event } => self.gesture_pinch_update(
+                event.delta_x(),
+                event.delta_y(),
+                event.scale(),
+                event.rotation(),
+                Event::time_msec(&event),
+            ),
             InputEvent::GesturePinchEnd { event } => {
-                let (time, cancelled) = (Event::time_msec(&event), event.cancelled());
-                if matches!(self.gesture, Some(Gesture::Pinch { .. })) {
-                    self.gesture = None;
-                } else if !self.is_locked() {
-                    self.pointer().gesture_pinch_end(
-                        self,
-                        &GesturePinchEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
-                    );
-                }
+                self.gesture_pinch_end(event.cancelled(), Event::time_msec(&event))
             }
             InputEvent::GestureHoldBegin { event } => {
                 let (time, fingers) = (Event::time_msec(&event), event.fingers());
@@ -286,6 +217,180 @@ impl Uwc {
             }
             _ => {}
         }
+    }
+
+    /// A swipe with `fingers` fingers began: take it if `gestures { }` binds it, else send it to the
+    /// client under the pointer. On a locked screen nothing happens; during a drag or grab the
+    /// client gets it.
+    pub(crate) fn gesture_swipe_begin(&mut self, fingers: u32, time: u32) {
+        if self.is_locked() {
+            return;
+        }
+        if self.drag.is_some() || self.pointer().is_grabbed() {
+            return self.forward_swipe_begin(fingers, time);
+        }
+        match self.config.swipe_plan(fingers) {
+            Some(g) => {
+                tracing::debug!("swipe begin: {fingers} fingers -> {g:?}");
+                self.gesture = Some(g);
+                self.fling = None;
+                self.pan_vel = (0.0, 0.0);
+                self.pan_sampled = std::time::Instant::now();
+            }
+            None => self.forward_swipe_begin(fingers, time),
+        }
+    }
+
+    pub(crate) fn gesture_swipe_update(&mut self, dx: f64, dy: f64, time: u32) {
+        if self.is_locked() {
+            self.gesture = None;
+            return;
+        }
+        match self.gesture.take() {
+            Some(Gesture::Pan) => {
+                self.gesture_pan(dx, dy);
+                self.gesture = Some(Gesture::Pan);
+            }
+            Some(Gesture::Dir { dirs, dx: ax, dy: ay }) => {
+                self.gesture = Some(Gesture::Dir { dirs, dx: ax + dx, dy: ay + dy });
+            }
+            Some(g) => self.gesture = Some(g), // End/Zoom: nothing happens mid-gesture
+            None => self.pointer().gesture_swipe_update(
+                self,
+                &smithay::input::pointer::GestureSwipeUpdateEvent { time, delta: (dx, dy).into() },
+            ),
+        }
+    }
+
+    pub(crate) fn gesture_swipe_end(&mut self, cancelled: bool, time: u32) {
+        if self.gesture.is_none() {
+            if !self.is_locked() {
+                self.pointer().gesture_swipe_end(
+                    self,
+                    &GestureSwipeEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                );
+            }
+            return;
+        }
+        if self.is_locked() {
+            self.gesture = None;
+            return;
+        }
+        self.gesture_end(cancelled);
+    }
+
+    pub(crate) fn gesture_pinch_begin(&mut self, fingers: u32, time: u32) {
+        if self.is_locked() {
+            return;
+        }
+        if self.drag.is_some() || self.pointer().is_grabbed() {
+            return self.forward_pinch_begin(fingers, time);
+        }
+        match self.config.pinch_plan(fingers) {
+            Some(g) => {
+                tracing::debug!("pinch begin: {fingers} fingers -> {g:?}");
+                self.gesture = Some(g);
+                self.fling = None;
+                self.pan_vel = (0.0, 0.0);
+                self.pan_sampled = std::time::Instant::now();
+            }
+            None => self.forward_pinch_begin(fingers, time),
+        }
+    }
+
+    pub(crate) fn gesture_pinch_update(&mut self, dx: f64, dy: f64, scale: f64, rotation: f64, time: u32) {
+        if self.is_locked() {
+            self.gesture = None;
+            return;
+        }
+        match self.gesture.take() {
+            Some(Gesture::Zoom { last }) => {
+                // The pinch's scale is absolute since the begin; each update zooms by what it
+                // changed since the last one, and pans with the fingers' drift so the content
+                // stays under them.
+                if last > 0.0 && (scale / last).is_finite() {
+                    self.zoom_by(scale / last);
+                }
+                if dx != 0.0 || dy != 0.0 {
+                    self.with_viewport(|v, _| v.pan_screen(dx, dy));
+                    self.refresh_pointer();
+                    self.damage();
+                }
+                self.gesture = Some(Gesture::Zoom { last: scale });
+            }
+            // A swipe the device reported as a pinch: the deltas are the swipe's.
+            Some(Gesture::Pan) => {
+                self.gesture_pan(dx, dy);
+                self.gesture = Some(Gesture::Pan);
+            }
+            Some(Gesture::Dir { dirs, dx: ax, dy: ay }) => {
+                self.gesture = Some(Gesture::Dir { dirs, dx: ax + dx, dy: ay + dy });
+            }
+            Some(g) => self.gesture = Some(g),
+            None => self.pointer().gesture_pinch_update(
+                self,
+                &smithay::input::pointer::GesturePinchUpdateEvent { time, delta: (dx, dy).into(), scale, rotation },
+            ),
+        }
+    }
+
+    pub(crate) fn gesture_pinch_end(&mut self, cancelled: bool, time: u32) {
+        if self.gesture.is_none() {
+            if !self.is_locked() {
+                self.pointer().gesture_pinch_end(
+                    self,
+                    &GesturePinchEndEvent { serial: SERIAL_COUNTER.next_serial(), time, cancelled },
+                );
+            }
+            return;
+        }
+        if self.is_locked() {
+            self.gesture = None;
+            return;
+        }
+        self.gesture_end(cancelled);
+    }
+
+    /// The fingers lifted: finish a taken gesture (coast a pan on, run a bound action), unless the
+    /// gesture was cancelled.
+    fn gesture_end(&mut self, cancelled: bool) {
+        let Some(g) = self.gesture.take() else { return };
+        if cancelled {
+            return;
+        }
+        match g {
+            Gesture::Pan => self.pan_release(),
+            Gesture::Dir { dirs, dx, dy } => {
+                if let Some(dir) = crate::config::swipe_direction(dx, dy, self.config.swipe_threshold) {
+                    if let Some((_, action)) = dirs.iter().find(|(d, _)| *d == dir) {
+                        tracing::debug!("swipe end ({dx:.1}, {dy:.1}) -> {dir:?} {action:?}");
+                        self.run_action(action);
+                    }
+                }
+            }
+            Gesture::End(action) => self.run_action(&action),
+            Gesture::Zoom { .. } => {}
+        }
+    }
+
+    /// Pan the view by a swipe delta (scaled by `swipe-gain`), remembering the speed for a fling.
+    fn gesture_pan(&mut self, dx: f64, dy: f64) {
+        let g = self.config.swipe_gain;
+        let (dx, dy) = (dx * g, dy * g);
+        self.with_viewport(|v, _| v.pan_screen(dx, dy));
+        self.pan_sample(dx, dy);
+        self.refresh_pointer();
+        self.damage();
+    }
+
+    fn forward_swipe_begin(&mut self, fingers: u32, time: u32) {
+        self.pointer()
+            .gesture_swipe_begin(self, &GestureSwipeBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers });
+    }
+
+    fn forward_pinch_begin(&mut self, fingers: u32, time: u32) {
+        self.pointer()
+            .gesture_pinch_begin(self, &GesturePinchBeginEvent { serial: SERIAL_COUNTER.next_serial(), time, fingers });
     }
 
     /// The pointer moved by `(dx, dy)` (a mouse, or a virtual pointer).

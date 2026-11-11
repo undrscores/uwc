@@ -270,15 +270,19 @@ impl Client {
     }
 }
 
-/// A touchpad gesture the compositor takes (3 fingers): a swipe pans the view, a pinch zooms.
-/// Gestures with fewer fingers go to the client under the pointer (zwp-pointer-gestures-v1).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A touchpad gesture the compositor is taking (see `gestures { }` in the config); gestures with no
+/// bind go to the client under the pointer (zwp-pointer-gestures-v1).
+#[derive(Debug, Clone, PartialEq)]
 pub enum Gesture {
-    Swipe,
-    /// `last` is the scale the previous update reported (the pinch's is absolute).
-    Pinch {
-        last: f64,
-    },
+    /// A swipe that pans the view with the fingers; releasing while moving coasts on (fling).
+    Pan,
+    /// A swipe with direction binds: when the fingers lift, run the action of the direction the
+    /// swipe went (if it went far enough), with the total travel in `dx`/`dy`.
+    Dir { dirs: Vec<(Dir, Action)>, dx: f64, dy: f64 },
+    /// Run this action when the fingers lift (a swipe or pinch bound to an action).
+    End(Action),
+    /// A pinch that zooms the view; `last` is the scale the previous update reported (absolute).
+    Zoom { last: f64 },
 }
 
 /// A touchpad or touch pan that was let go while moving: the view keeps gliding, slowing down

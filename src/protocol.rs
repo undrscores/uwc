@@ -45,6 +45,15 @@ pub enum Request {
     Jump(String),
     /// Start a glide at this velocity in screen px/s (what letting go of a touchpad swipe does).
     Fling(f64, f64),
+    /// Simulate a touchpad gesture (tests; no backend in CI produces them):
+    /// `swipe-begin N`, `swipe-update DX DY`, `swipe-end [CANCELLED]`,
+    /// `pinch-begin N`, `pinch-update DX DY SCALE`, `pinch-end [CANCELLED]`.
+    SwipeBegin(u32),
+    SwipeUpdate(f64, f64),
+    SwipeEnd(bool),
+    PinchBegin(u32),
+    PinchUpdate(f64, f64, f64),
+    PinchEnd(bool),
     Zoom(f64, Option<(f64, f64)>),
     View(usize),
     ToggleView(usize),
@@ -101,6 +110,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "focus and reveal the window whose app-id and title best match (fuzzy), on any tag; #ID for a window id",
     ),
     ("fling VX VY", "glide the view like a released swipe: screen px/s, slowing down over pan-momentum-ms"),
+    (
+        "swipe-begin N | swipe-update DX DY | swipe-end [CANCELLED] | pinch-begin N | pinch-update DX DY SCALE | pinch-end [CANCELLED]",
+        "simulate a touchpad gesture (no test backend produces them); what they do is bound in gestures { }",
+    ),
     ("panto X Y", "put canvas point X,Y at the top-left of the screen"),
     ("zoom Z [X Y]", "set the zoom, keeping screen point X,Y (default: the centre) fixed"),
     ("view TAG | toggleview TAG", "show only TAG / show or hide TAG as well"),
@@ -145,6 +158,14 @@ impl Request {
                 Err("a window id is a whole number".into())
             }
         };
+        let flag = |i: usize| -> Result<bool, String> {
+            match args.get(i).copied() {
+                None => Ok(false),
+                Some("0") | Some("false") => Ok(false),
+                Some("1") | Some("true") => Ok(true),
+                Some(a) => Err(format!("`{cmd}` takes 0 or 1 here, got `{a}`")),
+            }
+        };
         let tag = |i: usize| -> Result<usize, String> {
             let t = num(i)?;
             if t.fract() == 0.0 && (1.0..=TAGCOUNT as f64).contains(&t) {
@@ -170,6 +191,12 @@ impl Request {
             "pan" => Request::Pan(num(0)?, num(1)?),
             "panto" => Request::PanTo(num(0)?, num(1)?),
             "fling" => Request::Fling(num(0)?, num(1)?),
+            "swipe-begin" => Request::SwipeBegin(id(0)?),
+            "swipe-update" => Request::SwipeUpdate(num(0)?, num(1)?),
+            "swipe-end" => Request::SwipeEnd(flag(0)?),
+            "pinch-begin" => Request::PinchBegin(id(0)?),
+            "pinch-update" => Request::PinchUpdate(num(0)?, num(1)?, num(2)?),
+            "pinch-end" => Request::PinchEnd(flag(0)?),
             "crash" => none(Request::Crash)?,
             "layout" => match args.first().copied() {
                 Some("next") => Request::Layout(None),
@@ -506,6 +533,14 @@ mod tests {
         assert_eq!(Request::parse("bookmark goto 9"), Ok(Request::Bookmark { save: false, n: 8 }));
         assert_eq!(Request::parse("set focus-color \"#ff8800\""), Ok(Request::Set("focus-color \"#ff8800\"".into())));
         assert_eq!(Request::parse("rule clear"), Ok(Request::Rule("rule clear".into())));
+        assert_eq!(Request::parse("swipe-begin 3"), Ok(Request::SwipeBegin(3)));
+        assert_eq!(Request::parse("swipe-update -1.5 2"), Ok(Request::SwipeUpdate(-1.5, 2.0)));
+        assert_eq!(Request::parse("swipe-end"), Ok(Request::SwipeEnd(false)));
+        assert_eq!(Request::parse("swipe-end 1"), Ok(Request::SwipeEnd(true)));
+        assert_eq!(Request::parse("swipe-end 0"), Ok(Request::SwipeEnd(false)));
+        assert_eq!(Request::parse("pinch-begin 2"), Ok(Request::PinchBegin(2)));
+        assert_eq!(Request::parse("pinch-update 0 0 1.5"), Ok(Request::PinchUpdate(0.0, 0.0, 1.5)));
+        assert_eq!(Request::parse("pinch-end true"), Ok(Request::PinchEnd(true)));
     }
 
     #[test]
@@ -532,6 +567,14 @@ mod tests {
             "mode DP-1 1920",
             "mode DP-1 0 1080",
             "scale DP-1 0",
+            "swipe-begin",
+            "swipe-begin x",
+            "swipe-update 1",
+            "swipe-end 2",
+            "swipe-end maybe",
+            "pinch-begin -1",
+            "pinch-update 0 0",
+            "pinch-end 2",
         ] {
             assert!(Request::parse(bad).is_err(), "should reject: {bad:?}");
         }
@@ -551,6 +594,12 @@ mod tests {
             "pan",
             "panto",
             "fling",
+            "swipe-begin",
+            "swipe-update",
+            "swipe-end",
+            "pinch-begin",
+            "pinch-update",
+            "pinch-end",
             "jump",
             "crash",
             "layout",

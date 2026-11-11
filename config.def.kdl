@@ -78,6 +78,8 @@ options {
     close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
     focus-ms 0                  // the focus look (border, shadow, dim) crossfades between the old and the new window over this long; 0 = jumps at once
     pan-momentum-ms 600         // let go of a touchpad swipe or a touch drag while moving and the view glides on, losing most of its speed in about this long; 0 = stops dead. Not uwm's option
+    swipe-gain 2.0              // screen px the view pans per unit of swipe finger travel (the canvas follows the fingers)
+    swipe-threshold 60          // finger travel before a directional swipe (gestures { swipe N left ... }) counts as that direction
     // Dragging a window snaps its edges and centre lines to other windows within this many screen px
     // (so it feels the same at any zoom), drawing a guide line; hold Ctrl to drag freely. 0 = off. Not uwm's option.
     snap-distance 8
@@ -349,4 +351,30 @@ binds {
     Ctrl+Alt+XF86Switch_VT_10 { switch-vt 10; }
     Ctrl+Alt+XF86Switch_VT_11 { switch-vt 11; }
     Ctrl+Alt+XF86Switch_VT_12 { switch-vt 12; }
+}
+
+// Touchpad gestures: `swipe N` / `pinch N` with N fingers, a swipe optionally with a direction.
+// Handlers: pan = drag the view with the fingers (coasts on if you let go while moving);
+// zoom = pinch-zoom the view about the pointer; client = send the gesture to the app under the
+// pointer (zwp-pointer-gestures-v1, e.g. a browser's two-finger pinch; in a directional entry it
+// just makes that direction a no-op, since the gesture is already taken when the fingers go
+// down); swipe = treat the pinch as a swipe; any other action runs when the fingers lift. A
+// directional swipe runs its action only if the swipe went that way at least swipe-threshold.
+// A pinch whose finger count has swipe binds but no `pinch N` entry is treated as that swipe
+// (libinput reports 3/4-finger swipes as pinches on some trackpads, the Magic Trackpad does),
+// so the defaults below make a 3-finger swipe pan even when the trackpad reports it as a pinch.
+// A direction-less entry replaces all entries for that kind and finger count: `swipe 4 { client; }`
+// turns the 4-finger swipes off.
+gestures {
+    swipe 3 { pan; }
+    // The canvas follows the fingers, so a swipe left acts on what was to the right:
+    swipe 4 left  { focus-direction right; }
+    swipe 4 right { focus-direction left; }
+    swipe 4 up    { focus-direction down; }
+    swipe 4 down  { focus-direction up; }
+    pinch 2 { zoom; }
+    // pinch 2 { client; }      // give two-finger pinches to the app (browser zoom) instead of zooming the view
+    // swipe 4 left { toggle-overview; }   // rebind one direction; `focus-direction` with no argument takes it
+    // swipe 3 { client; }      // hand 3-finger swipes to the app too
+    // pinch 3 { zoom; }        // a real 3-finger pinch zooms (instead of panning like a swipe)
 }

@@ -518,6 +518,12 @@ impl Uwc {
                 self.pan_sampled = std::time::Instant::now();
                 self.pan_release();
             }
+            R::SwipeBegin(n) => self.gesture_swipe_begin(n, 0),
+            R::SwipeUpdate(dx, dy) => self.gesture_swipe_update(dx, dy, 0),
+            R::SwipeEnd(cancelled) => self.gesture_swipe_end(cancelled, 0),
+            R::PinchBegin(n) => self.gesture_pinch_begin(n, 0),
+            R::PinchUpdate(dx, dy, scale) => self.gesture_pinch_update(dx, dy, scale, 0.0, 0),
+            R::PinchEnd(cancelled) => self.gesture_pinch_end(cancelled, 0),
             R::PanTo(x, y) => self.with_viewport_eased(|v, _| {
                 v.x = x;
                 v.y = y;
