@@ -488,6 +488,8 @@ pub struct Uwc {
     /// linux-drm-syncobj-v1 (explicit sync), when the GPU supports it.
     pub syncobj_state: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
     pub dmabuf_global: Option<DmabufGlobal>,
+    /// The render node and formats output captures can be written to as dmabufs; set by the udev backend.
+    pub capture_dmabuf: Option<crate::capture::DmabufOffer>,
     pub backend: Backend,
 
     pub config: Config,
@@ -680,6 +682,7 @@ impl Uwc {
             dmabuf_state: DmabufState::new(),
             syncobj_state: None,
             dmabuf_global: None,
+            capture_dmabuf: None,
             backend: Backend::None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_theme: crate::cursor::CursorTheme::new(&config.cursor_theme, config.cursor_size),
@@ -924,6 +927,11 @@ impl Uwc {
     }
 
     /// Whether the window is drawn anywhere at all.
+    /// What output captures may be written into besides shm: only with `capture-dmabuf` on and a udev backend.
+    pub fn dmabuf_offer(&self) -> Option<&crate::capture::DmabufOffer> {
+        self.config.capture_dmabuf.then_some(self.capture_dmabuf.as_ref()).flatten()
+    }
+
     pub fn visible(&self, c: &Client) -> bool {
         c.mapped && c.minimized == 0 && (c.pin.is_some() || c.tags & self.tagset != 0)
     }

@@ -230,6 +230,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "hardware-cursor" => hardware_cursor,
     "direct-scanout" => direct_scanout,
     "explicit-sync" => explicit_sync,
+    "capture-dmabuf" => capture_dmabuf,
     "background-shader" => background_shader,
     "session-restore" => session_restore,
     "xwayland" => xwayland,

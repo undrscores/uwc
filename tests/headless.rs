@@ -86,6 +86,22 @@ impl Uwc {
     }
 
     fn start_full(name: &str, config: Option<&str>, state: &std::path::Path, screens: &str) -> Uwc {
+        Uwc::start_full_env(name, config, state, screens, &[])
+    }
+
+    /// Like `start`, with extra environment variables for the compositor.
+    fn start_env(name: &str, config: Option<&str>, env: &[(&str, &str)]) -> Uwc {
+        let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
+        Uwc::start_full_env(name, config, &dir.join("state"), "1000x600", env)
+    }
+
+    fn start_full_env(
+        name: &str,
+        config: Option<&str>,
+        state: &std::path::Path,
+        screens: &str,
+        env: &[(&str, &str)],
+    ) -> Uwc {
         let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uwc"));
@@ -94,6 +110,7 @@ impl Uwc {
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
             .env("UWC_DEBUG_PANIC", "1")
+            .envs(env.iter().copied())
             .stdout(Stdio::from(std::fs::File::create(dir.join("uwc.log")).unwrap()))
             .stderr(Stdio::from(std::fs::OpenOptions::new().append(true).open(dir.join("uwc.log")).unwrap()));
         if let Some(c) = config {
@@ -266,6 +283,8 @@ struct App {
     /// wp_presentation_feedback outcomes ("presented", "discarded") and finished frame callbacks.
     presentation: Vec<String>,
     frames_done: u32,
+    /// wlr-screencopy's linux_dmabuf offers: (fourcc, width, height).
+    linux_dmabuf: Vec<(u32, u32, u32)>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -346,6 +365,7 @@ impl Client {
             cap_events: Vec::new(),
             presentation: Vec::new(),
             frames_done: 0,
+            linux_dmabuf: Vec::new(),
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -851,6 +871,7 @@ impl Dispatch<sc_frame::ZwlrScreencopyFrameV1, ()> for App {
             sc_frame::Event::Buffer { format, width, height, stride } => {
                 app.export_buffer = Some((format.into(), width, height, stride))
             }
+            sc_frame::Event::LinuxDmabuf { format, width, height } => app.linux_dmabuf.push((format, width, height)),
             sc_frame::Event::BufferDone => app.export_done = true,
             sc_frame::Event::Failed => app.export_failed = true,
             sc_frame::Event::Ready { .. } => app.export_ready = true,
@@ -1118,6 +1139,13 @@ impl Dispatch<ext_session::ExtImageCopyCaptureSessionV1, ()> for App {
         match e {
             ext_session::Event::BufferSize { width, height } => app.cap_events.push(format!("size {width}x{height}")),
             ext_session::Event::ShmFormat { .. } => app.cap_events.push("shm".into()),
+            ext_session::Event::DmabufDevice { device } => {
+                app.cap_events.push(format!("dmabuf device {:#x}", u64::from_ne_bytes(device.try_into().unwrap())))
+            }
+            ext_session::Event::DmabufFormat { format, modifiers } => {
+                let mods: Vec<u64> = modifiers.chunks(8).map(|m| u64::from_ne_bytes(m.try_into().unwrap())).collect();
+                app.cap_events.push(format!("dmabuf {format:#x} {mods:x?}"))
+            }
             ext_session::Event::Done => app.cap_events.push("done".into()),
             ext_session::Event::Stopped => app.cap_events.push("stopped".into()),
             _ => {}
@@ -3783,4 +3811,62 @@ fn blur_radius_is_an_option_and_a_per_window_rule() {
     // Headless has no renderer: a blurred window must not break anything there.
     uwc.ok(&format!("focus {glass}"));
     c.sync();
+}
+
+#[test]
+fn output_captures_offer_dmabufs_only_when_asked_for() {
+    // Argb8888 and Xrgb8888 as fourcc codes; the fake GPU also has Rgb565, which is never offered.
+    let (argb, xrgb) = (0x3432_5241_u32, 0x3432_5258_u32);
+    for (config, offered) in [(Some("options { capture-dmabuf true }"), true), (None, false)] {
+        let uwc = Uwc::start_env("dmabuf-offer", config, &[("UWC_DEBUG_DMABUF", "1")]);
+        let mut c = uwc.connect();
+        let qh = c.queue.handle();
+        let _w = c.window("shared", 320, 200);
+        let sources: ext_tl_source_manager::ExtForeignToplevelImageCaptureSourceManagerV1 =
+            c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let list: ext_tl_list::ExtForeignToplevelListV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let out_sources: ext_output_source_manager::ExtOutputImageCaptureSourceManagerV1 =
+            c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let copy: ext_copy_manager::ExtImageCopyCaptureManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let output = c.bind_output();
+        c.sync();
+        c.sync();
+        let handle = c.app.ext_tl.iter().find(|t| t.2 == "shared").expect("window announced").0.clone();
+
+        // The output: the device and each format with its modifiers, before `done`.
+        let osrc = out_sources.create_source(&output, &qh, ());
+        let _osession = copy.create_session(&osrc, ext_copy_manager::Options::empty(), &qh, ());
+        c.sync();
+        let want: Vec<String> = if offered {
+            vec![
+                "size 1000x600".into(),
+                "shm".into(),
+                "dmabuf device 0x102030405060708".into(),
+                format!("dmabuf {argb:#x} [0, ffffffffffffff]"),
+                format!("dmabuf {xrgb:#x} [0]"),
+                "done".into(),
+            ]
+        } else {
+            vec!["size 1000x600".into(), "shm".into(), "done".into()]
+        };
+        assert_eq!(c.app.cap_events, want, "offered: {offered}");
+
+        // A window capture stays shm either way.
+        c.app.cap_events.clear();
+        let src = sources.create_source(&handle, &qh, ());
+        let _session = copy.create_session(&src, ext_copy_manager::Options::empty(), &qh, ());
+        c.sync();
+        assert_eq!(c.app.cap_events, ["size 320x200", "shm", "done"]);
+
+        // wlr-screencopy: a linux_dmabuf per format, before buffer_done.
+        let sc: sc_manager::ZwlrScreencopyManagerV1 = c.globals.bind(&qh, 1..=3, ()).unwrap();
+        let wl_out: wl_output::WlOutput = c.globals.bind(&qh, 1..=4, ()).unwrap();
+        let _f = sc.capture_output(0, &wl_out, &qh, ());
+        c.sync();
+        let formats: Vec<u32> = c.app.linux_dmabuf.iter().map(|f| f.0).collect();
+        assert_eq!(formats, if offered { vec![argb, xrgb] } else { vec![] });
+        assert!(c.app.linux_dmabuf.iter().all(|f| (f.1, f.2) == (1000, 600)));
+        assert!(c.app.export_done);
+        let _ = list;
+    }
 }

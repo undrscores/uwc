@@ -165,9 +165,16 @@ impl Uwc {
         }
     }
 
-    fn announce_constraints(&self, session: &ExtImageCopyCaptureSessionV1, size: Size<i32, Physical>) {
+    fn announce_constraints(&self, session: &ExtImageCopyCaptureSessionV1, size: Size<i32, Physical>, source: &Source) {
         session.buffer_size(size.w as u32, size.h as u32);
         session.shm_format(capture::FORMAT);
+        // Dmabufs for whole outputs only; a window capture stays shm.
+        if let (Source::Output(_), Some(offer)) = (source, self.dmabuf_offer()) {
+            session.dmabuf_device(offer.device_bytes());
+            for (code, mods) in &offer.formats {
+                session.dmabuf_format(*code as u32, capture::DmabufOffer::modifier_bytes(mods));
+            }
+        }
         session.done();
     }
 
@@ -201,7 +208,7 @@ impl Uwc {
                 // The source was resized: new constraints, and this frame cannot be filled.
                 s.size = size;
                 drop(s);
-                self.announce_constraints(session_res, size);
+                self.announce_constraints(session_res, size, &session.source);
                 frame.failed(FailureReason::BufferConstraints);
                 return true;
             }
@@ -209,7 +216,11 @@ impl Uwc {
                 return false;
             }
         }
-        if let Err(e) = capture::check_buffer(&buffer, size) {
+        let checked = match &session.source {
+            Source::Output(_) => capture::check_output_buffer(&buffer, size, self.dmabuf_offer()),
+            Source::Window(_) => capture::check_buffer(&buffer, size),
+        };
+        if let Err(e) = checked {
             tracing::debug!("image copy capture: {e}");
             frame.failed(FailureReason::BufferConstraints);
             return true;
@@ -407,7 +418,7 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for Uwc {
                 let session = init.init(session, data.clone());
                 let _ = data.resource.set(session.clone());
                 match size.filter(|_| !state.is_locked()) {
-                    Some(size) => state.announce_constraints(&session, size),
+                    Some(size) => state.announce_constraints(&session, size, &src.clone()),
                     None => session.stopped(),
                 }
             }

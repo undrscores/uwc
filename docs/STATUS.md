@@ -60,9 +60,10 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Edge pan: dragging a window against a screen edge pans the view that way with the window under the pointer (`edge-pan-size`, `edge-pan-speed`) | done |
 | Momentum: let go of a three-finger swipe or a touch drag while moving and the view glides on (`pan-momentum-ms`, IPC `fling VX VY`) | done |
 | Sandboxed apps (sandbox.rs): `wp_security_context_v1` (Flatpak and others get a restricted socket); a client that came in through one is not shown the privileged globals (layer shell, screen/window capture, virtual keyboard and pointer, input methods, data control, session lock, output management, workspaces, toplevel lists), see docs/SECURITY.md | done, tested with a hand-made socket, not with a real Flatpak |
+| Output capture into dmabufs (`capture-dmabuf`, off by default; udev only): wlr-screencopy (`linux_dmabuf`) and ext-image-copy-capture (`dmabuf_device`, `dmabuf_format`) offer the render node and the 8-bit RGB formats with the modifiers the renderer draws to; a client's dmabuf (checked for size, format and modifier) is rendered into directly and waited for. Window captures stay shm | written against smithay's API, builds, and the announcements are tested with a fake GPU; **the rendering into a dmabuf has never run** (no GPU here), which is why it is off |
 | Background blur (blur.rs): `blur-radius` (per window through rules, or global): what is behind a window is drawn into a texture, blurred with a dual Kawase filter and shown through its translucent parts, clipped to the rounded corners; windows stacked on each other blur through each other; scales with zoom | done, pixel-checked nested under software GL (sharp without, smooth with, right way up); a closing window fades without it, and layer surfaces cannot ask for it |
 | Frame pacing (presentation.rs): presentation-time (`wp_presentation`, CLOCK_MONOTONIC: answered with the kernel's flip time and sequence at the vblank on udev, at once on winit/headless; superseded commits are `discarded`), `wp_fifo_v1` (every presented frame signals the barriers of every window, hidden ones too, so a client waiting on one runs at the refresh rate and never hangs) and `wp_commit_timing_v1` (a timed commit is applied by the first frame at or after its time; a timer wakes the loop when nothing is drawn) | done; the udev vblank timestamps are untested on hardware |
-| Screen capture for portals: ext-foreign-toplevel-list, ext-image-capture-source, ext-image-copy-capture (outputs and windows, shm, `paint_cursors`); with wlr-screencopy this is what xdg-desktop-portal-wlr, OBS and browsers' screen sharing use. `uwc-portals.conf` (installed by `make install`) picks the wlr portal for ScreenCast and Screenshot | done, no dmabuf yet |
+| Screen capture for portals: ext-foreign-toplevel-list, ext-image-capture-source, ext-image-copy-capture (outputs and windows, shm, `paint_cursors`); with wlr-screencopy this is what xdg-desktop-portal-wlr, OBS and browsers' screen sharing use. `uwc-portals.conf` (installed by `make install`) picks the wlr portal for ScreenCast and Screenshot | done; dmabuf for outputs behind `capture-dmabuf` (next row) |
 
 **The udev backend has not been run on hardware yet.** It builds against smithay 0.7's real DRM/GBM/libinput/libseat
 types and was reviewed against smithay's source, but the machine it was written on has no GPU or seat. Expect the first
@@ -78,8 +79,8 @@ Not yet (roughly in the order to do them):
 
 0. **Run it on real hardware**: the udev backend, NVIDIA, a portal for screen sharing, touch and tablet devices.
    Everything above is tested against headless and nested runs only.
-1. **A dmabuf path for screen capture** (ext-image-copy-capture offers shm only). It needs the renderer's DRM node and
-   a GPU to test, so it waits for item 0.
+1. **Try the dmabuf capture path** (`capture-dmabuf true`) with OBS, wf-recorder and a portal screen share on a real
+   GPU, fix what it turns up and make it the default. Window captures are shm only.
 2. **tablet-v2** (pressure and tilt reach clients; pens act as a mouse today). Needs a tablet to test.
 3. **More blur**: ext-background-effect (bars and other layer surfaces asking for it), blur on a closing window's
    ghost, brightness/saturation/noise tweaks, and caching a blur whose backdrop did not change (it is redone on every

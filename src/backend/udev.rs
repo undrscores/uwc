@@ -394,6 +394,11 @@ impl Uwc {
         }
         self.dmabuf_global =
             Some(self.dmabuf_state.create_global_with_default_feedback::<Uwc>(&self.display_handle, &feedback));
+        // Output captures into a client's dmabuf: what the renderer can draw to, on this device (`capture-dmabuf`).
+        self.capture_dmabuf = Some(crate::capture::DmabufOffer::new(
+            node.dev_id(),
+            renderer.egl_context().dmabuf_render_formats().iter().copied(),
+        ));
 
         // Explicit sync, when the kernel driver can do syncobj eventfds (NVIDIA 560+, recent Mesa drivers).
         if explicit_sync && self.syncobj_state.is_none() {

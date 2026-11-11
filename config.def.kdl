@@ -131,6 +131,12 @@ options {
     hardware-cursor true        // draw the pointer on the GPU's cursor plane; false = composite it
     direct-scanout true         // show a client buffer that covers the output without compositing
     explicit-sync true          // linux-drm-syncobj-v1, needed for flicker-free GL/Vulkan apps on NVIDIA
+    // Screen capture of a whole output (OBS, wf-recorder, portal screen sharing, grim) normally goes through
+    // shared memory: the GPU draws, the CPU copies. With this on, capture clients are also offered dmabuf
+    // buffers, which stay on the GPU (much cheaper for recording and sharing at high resolution). Off by
+    // default because it has not been tried on real hardware yet; if a capture client fails or shows garbage
+    // with it on, turn it off. Window captures stay shm. Applies to new captures at once.
+    capture-dmabuf false
 }
 
 // Outputs (in a real session). Not listed: preferred mode, scale 1. Only one output is used for now:

@@ -308,6 +308,8 @@ pub struct Config {
     pub direct_scanout: bool,
     /// Real session only: offer linux-drm-syncobj-v1 when the GPU supports it.
     pub explicit_sync: bool,
+    /// Real session only: offer dmabuf buffers to output capture clients (wlr-screencopy, ext-image-copy-capture).
+    pub capture_dmabuf: bool,
     /// A GLSL file drawing the background behind everything ("" = root-color).
     pub background_shader: String,
     /// Remember the canvas (views, window layouts) across restarts.
@@ -442,6 +444,7 @@ impl Config {
             hardware_cursor: true,
             direct_scanout: true,
             explicit_sync: true,
+            capture_dmabuf: false,
             background_shader: String::new(),
             session_restore: true,
             xwayland: true,
