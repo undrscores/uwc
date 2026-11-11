@@ -3355,3 +3355,165 @@ fn tiling_leaves_rule_floated_windows_and_dialogs_alone() {
     assert_eq!(win(&s, "Dialog")["floating"], true);
     assert_eq!(rect4(&s, "A"), (10, 10, 980, 580));
 }
+
+fn tiling_pointer_config() -> &'static str {
+    "options {\n tile-gap 10\n tile-inner-gap 10\n tile-ratio 0.5\n}\nbinds {\n MouseLeft { drag-move; }\n MouseRight { drag-resize; }\n}\n"
+}
+
+/// Let the open and move animations settle: hit-testing follows what is drawn.
+fn settle(uwc: &mut Uwc) {
+    for _ in 0..200 {
+        if uwc.state()["monitors"][0]["animating"] == false {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("animations did not settle");
+}
+
+/// A virtual pointer on `c`'s connection that presses `button` at `from`, moves to `to` and lets go
+/// (screen px on the 1000x600 output).
+fn pointer_drag(c: &mut Client, button: u32, from: (u32, u32), to: (u32, u32)) {
+    use wayland_client::protocol::wl_pointer::ButtonState;
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    let qh = c.queue.handle();
+    let m: ZwlrVirtualPointerManagerV1 = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let p: ZwlrVirtualPointerV1 = m.create_virtual_pointer(None, &qh, ());
+    p.motion_absolute(0, from.0, from.1, 1000, 600);
+    p.frame();
+    p.button(1, button, ButtonState::Pressed);
+    p.frame();
+    c.sync();
+    // In steps, like a hand.
+    for k in 1..=4u32 {
+        let at = |a: u32, b: u32| (a as i64 + (b as i64 - a as i64) * k as i64 / 4) as u32;
+        p.motion_absolute(1 + k, at(from.0, to.0), at(from.1, to.1), 1000, 600);
+        p.frame();
+        c.sync();
+    }
+    p.button(10, button, ButtonState::Released);
+    p.frame();
+    c.sync();
+}
+
+#[test]
+fn a_tile_that_will_not_shrink_gets_room_and_a_fixed_size_window_floats() {
+    let mut uwc = tiling_uwc("tilemin");
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B", "C"] {
+        apps.open(&mut uwc, t);
+    }
+    // C announces a minimum height: it gets it, and B takes the rest of the stack.
+    apps.0[2].1.toplevel.set_min_size(300, 450);
+    apps.0[2].1.surface.commit();
+    apps.0[2].0.sync();
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 120));
+    apps.wait_rect(&mut uwc, "C", (505, 140, 485, 450));
+
+    // A client that announces nothing but draws bigger than it was told is given the room too.
+    uwc.ok("tile off");
+    apps.0[2].1.toplevel.set_min_size(0, 0);
+    apps.0[2].1.surface.commit();
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    let (c, w, _) = &mut apps.0[2];
+    let big = c.buffer("C-big", 485, 400);
+    w.surface.attach(Some(&big), 0, 0);
+    w.surface.commit();
+    w._buf = big;
+    c.sync();
+    apps.wait_rect(&mut uwc, "C", (505, 190, 485, 400));
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 170));
+
+    // A window with one fixed size is not tiled.
+    apps.open(&mut uwc, "F");
+    apps.0[3].1.toplevel.set_min_size(300, 200);
+    apps.0[3].1.toplevel.set_max_size(300, 200);
+    apps.0[3].1.surface.commit();
+    apps.0[3].0.sync();
+    let s = uwc.wait("F floats", |s| win(s, "F")["floating"] == true);
+    assert_eq!(win(&s, "C")["floating"], false);
+    // The others have closed up around it: three tiles, not four.
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 170));
+}
+
+#[test]
+fn dropping_a_tile_on_another_swaps_them_and_resizing_moves_the_split() {
+    let mut uwc = Uwc::start("tiledrag", Some(tiling_pointer_config()));
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B", "C"] {
+        apps.open(&mut uwc, t);
+    }
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "A", (10, 10, 485, 580));
+    apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    settle(&mut uwc);
+
+    // Carry A (the master) onto C: the two swap places.
+    pointer_drag(&mut apps.0[0].0, 0x110, (250, 300), (750, 450));
+    let s = apps.wait_rect(&mut uwc, "A", (505, 305, 485, 285));
+    assert_eq!(rect4(&s, "C"), (10, 10, 485, 580));
+    assert_eq!(rect4(&s, "B"), (505, 10, 485, 285));
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == false));
+    settle(&mut uwc);
+
+    // Dropped in a gap or anywhere inside the area: back into its slot.
+    pointer_drag(&mut apps.0[1].0, 0x110, (750, 150), (500, 300));
+    let s = apps.wait_rect(&mut uwc, "B", (505, 10, 485, 285));
+    assert_eq!(win(&s, "B")["floating"], false);
+    settle(&mut uwc);
+
+    // Resizing a tile with the mouse moves the split with the pointer's horizontal travel.
+    pointer_drag(&mut apps.0[2].0, 0x111, (700, 400), (798, 400));
+    let s = uwc.state();
+    let ratio = s["monitors"][0]["tags"][0]["tiling"]["ratio"].as_f64().unwrap();
+    assert!((ratio - 0.601).abs() < 0.005, "ratio {ratio}");
+    apps.wait_rect(&mut uwc, "C", (10, 10, 583, 580));
+    assert_eq!(win(&uwc.state(), "A")["floating"], false);
+}
+
+#[test]
+fn a_frame_can_own_a_layout() {
+    let mut uwc = Uwc::start("tileframe", Some(tiling_pointer_config()));
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B"] {
+        apps.open(&mut uwc, t);
+    }
+    // Both windows open centred, so they are inside this frame; its strip is 22 px tall.
+    uwc.ok("frame add 100 100 800 450 work");
+    uwc.ok("frame layout 1 master-stack");
+    assert!(uwc.cmd("frame layout 1 nonsense").get("error").is_some());
+    assert!(uwc.cmd("frame layout 99 dwindle").get("error").is_some());
+    apps.wait_rect(&mut uwc, "A", (110, 132, 385, 408));
+    let s = apps.wait_rect(&mut uwc, "B", (505, 132, 385, 408));
+    assert_eq!(s["frames"][0]["tiling"]["layout"], "master-stack");
+    assert!(s["monitors"][0]["tags"][0]["tiling"].is_null(), "the tag itself is not tiled");
+
+    // A window that opens while a tile of the frame has the focus joins the frame.
+    apps.open(&mut uwc, "C");
+    apps.wait_rect(&mut uwc, "B", (505, 132, 385, 199));
+    apps.wait_rect(&mut uwc, "C", (505, 341, 385, 199));
+
+    // Moving the frame takes the layout with it.
+    uwc.ok("frame move 1 300 50");
+    apps.wait_rect(&mut uwc, "A", (310, 82, 385, 408));
+    apps.wait_rect(&mut uwc, "C", (705, 291, 385, 199));
+    uwc.ok("frame move 1 100 100");
+    apps.wait_rect(&mut uwc, "A", (110, 132, 385, 408));
+    settle(&mut uwc);
+
+    // Carrying a tile out of the frame floats it where it is dropped, and the rest close up.
+    pointer_drag(&mut apps.0[2].0, 0x110, (700, 440), (950, 580));
+    let s = uwc.wait("C floats", |s| win(s, "C")["floating"] == true);
+    assert_eq!((rect4(&s, "C").0, rect4(&s, "C").1), (505 + 250, 341 + 140));
+    apps.wait_rect(&mut uwc, "B", (505, 132, 385, 408));
+
+    // Off again, and the frame lets its windows go.
+    uwc.ok("frame layout 1 off");
+    let s = uwc.state();
+    assert!(s["frames"][0]["tiling"].is_null());
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == true));
+}

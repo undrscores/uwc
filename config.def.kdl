@@ -71,8 +71,13 @@ options {
     // Tiling: everything floats until you tile a tag. `tile "master-stack"` (or dwindle, spiral, columns) lays the
     // tag's windows out over what the screen shows now and keeps doing it as windows open and close; the area is fixed
     // on the canvas, so panning moves and resizes nothing (run `tile` again to re-anchor it where you are). A window
-    // you move or resize by hand, or float (toggle-float, `open { float }` in a rule), leaves the layout. `tile-once`
-    // arranges once and leaves the windows floating. `uwc msg tile ...` does the same from a script. Not uwm's.
+    // float (toggle-float, `open { float }` in a rule), or move or resize with the keys, leaves the layout; so does a
+    // window with one fixed size. With the mouse a tile is lifted: drop it on another tile to swap, inside the area to
+    // put it back, on a frame with a layout to join that, anywhere else to float it; resizing one moves the main split
+    // (the ratio) with the pointer. A window that cannot get as small as its slot is given the room it needs.
+    // `tile-once` arranges once and leaves the windows floating. A frame can have a layout of its own (frame-tile): the
+    // windows inside it are tiled in it, new ones join while one of its windows has the focus. `uwc msg tile ...` and
+    // `uwc msg frame layout ID LAYOUT` do the same from a script. Not uwm's.
     tile-gap 12                 // px between the windows and the edge of the tile area
     tile-inner-gap 12           // px between neighbouring tiled windows
     tile-ratio 0.55             // the share the master column (or the first split) takes, 0.1 to 0.9; tile-ratio in binds changes it per tag
@@ -236,6 +241,7 @@ binds {
     Mod+B { frame-new; }                // a frame around the focused window
     Mod+Shift+B { frame-remove; }       // remove the focused window's frame
     Mod+Ctrl+B { frame-fit; }           // fit the view to the focused window's frame
+    Mod+Alt+B { frame-tile-cycle; }     // tile the windows inside the focused window's frame: master-stack, dwindle, ... off
     Mod+bracketright { frame-next; }    // fit the next frame, in reading order
     Mod+bracketleft { frame-previous; }
     // A VM or remote desktop can ask for every key (keyboard-shortcuts-inhibit); this takes them back, and

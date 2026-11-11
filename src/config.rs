@@ -94,6 +94,10 @@ pub enum Action {
     TileOnce(crate::layout::Layout),
     TileOff,
     TileCycle,
+    /// The same for the focused window's frame (frames.rs): its windows are tiled inside it.
+    FrameTile(crate::layout::Layout),
+    FrameTileOff,
+    FrameTileCycle,
     /// Change the share the master column / first split takes, or the number of masters, by this much.
     TileRatio(f64),
     TileMasters(i32),
@@ -881,6 +885,15 @@ fn parse_action(n: &Node) -> Result<Action> {
                 Action::TileOnce(l)
             }
         }
+        "frame-tile" => {
+            let name = args.first().and_then(Val::as_str).unwrap_or("");
+            Action::FrameTile(
+                crate::layout::Layout::parse(name)
+                    .ok_or_else(|| anyhow!("frame-tile needs a layout: {}", crate::layout::Layout::names()))?,
+            )
+        }
+        "frame-tile-off" => Action::FrameTileOff,
+        "frame-tile-cycle" => Action::FrameTileCycle,
         "tile-off" => Action::TileOff,
         "tile-cycle" => Action::TileCycle,
         "tile-ratio" => {

@@ -171,6 +171,14 @@ pub struct Client {
     pub minimized: u32,
     /// Kept out of the tiling layouts (tiling.rs): by a rule, `toggle-float`, or being moved by hand.
     pub floating: bool,
+    /// The layout frame it is tiled in (tiling.rs), if any.
+    pub tile_frame: Option<u32>,
+    /// Its announced (min, max) size, 0 = none; read at every commit.
+    pub limits: crate::tiling::Limits,
+    /// The size it showed it needs when it drew bigger than the slot it was told.
+    pub tile_min: (i32, i32),
+    /// The size its layout last asked for.
+    pub tile_want: Option<(i32, i32)>,
     /// What the rules' `open { }` blocks said, decided at the first configure, used when it maps.
     pub open: crate::rules::Open,
     /// The window's own scale on the canvas (1 = normal), on top of the view's zoom.
@@ -302,6 +310,14 @@ pub enum Drag {
         orig: Size<i32, Logical>,
     },
     Pan,
+    /// Resizing a tile moves its region's main split: `ratio0` is the ratio when the drag began.
+    TileResize {
+        region: crate::tiling::Region,
+        start: Point<f64, Logical>,
+        ratio0: f64,
+        /// Screen px per canvas px of the window being dragged.
+        zoom: f64,
+    },
     /// Dragging a frame by its title strip; the windows it carries are in `frames.carrying`.
     FrameMove {
         id: u32,
@@ -1929,6 +1945,17 @@ impl Uwc {
             Action::JumpHints => self.hints_toggle(),
             Action::NextLayout => self.set_layout(None),
             Action::Tile(l) => self.tile_set(Some(*l)),
+            Action::FrameTile(l) => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_tile_set(f, Some(*l));
+                }
+            }
+            Action::FrameTileOff => {
+                if let Some(f) = self.frame_of_focus() {
+                    self.frame_tile_set(f, None);
+                }
+            }
+            Action::FrameTileCycle => self.frame_tile_cycle(),
             Action::TileOnce(l) => self.tile_once(*l),
             Action::TileOff => self.tile_set(None),
             Action::TileCycle => self.tile_cycle(),

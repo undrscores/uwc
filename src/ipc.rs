@@ -240,10 +240,10 @@ impl Uwc {
                                 .enumerate()
                                 .filter_map(|(n, b)| b.as_ref().map(|v| P::Bookmark { n: n + 1, view: view(v) }))
                                 .collect(),
-                            tiling: self.tiling.tags[i].layout.map(|l| P::Tiling {
+                            tiling: self.tiling.tags[i].state.layout.map(|l| P::Tiling {
                                 layout: l.name(),
-                                ratio: self.tile_opts(i).ratio,
-                                masters: self.tile_opts(i).masters,
+                                ratio: self.tile_opts(crate::tiling::Region::Tag(i)).ratio,
+                                masters: self.tile_opts(crate::tiling::Region::Tag(i)).masters,
                                 area: {
                                     let a = self.tiling.tags[i].area;
                                     P::Rect {
@@ -277,7 +277,7 @@ impl Uwc {
                     monitor: name.clone(),
                     tags: c.tags,
                     focused: self.focus == Some(c.id),
-                    floating: self.client_index(c.id).is_none_or(|i| self.tile_tag(i).is_none()),
+                    floating: self.client_index(c.id).is_none_or(|i| self.tile_region(i).is_none()),
                     fullscreen: c.fullscreen,
                     urgent: c.urgent,
                     // The client's own size (what `resize` sets); the footprint is that times `scale`.
@@ -326,6 +326,11 @@ impl Uwc {
                         height: f.rect.size.h.round() as i64,
                     },
                     windows: self.frame_members(f.id),
+                    tiling: f.tile.layout.map(|l| P::FrameTiling {
+                        layout: l.name(),
+                        ratio: self.tile_opts(crate::tiling::Region::Frame(f.id)).ratio,
+                        masters: self.tile_opts(crate::tiling::Region::Frame(f.id)).masters,
+                    }),
                 })
                 .collect(),
         }
@@ -461,6 +466,10 @@ impl Uwc {
                     F::Fit(id) => {
                         known(self, id)?;
                         self.frame_fit(id);
+                    }
+                    F::Layout(id, layout) => {
+                        known(self, id)?;
+                        self.frame_tile_set(id, layout);
                     }
                 }
             }

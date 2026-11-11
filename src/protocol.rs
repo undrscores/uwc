@@ -23,6 +23,8 @@ pub enum FrameCmd {
     Resize(u32, f64, f64),
     Remove(u32),
     Fit(u32),
+    /// Tile the windows inside the frame with a layout, or stop.
+    Layout(u32, Option<crate::layout::Layout>),
 }
 
 /// `tile ...`: the tiling of the tag in use (tiling.rs).
@@ -100,8 +102,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("get-window ID", "a window's decoration with its rules applied"),
     ("pan DX DY", "move the view by canvas px"),
     (
-        "frame add|label|move|resize|remove|fit ...",
-        "labelled regions of the canvas: add X Y W H [LABEL], label ID TEXT, move ID X Y (its windows go too), resize ID W H, remove ID, fit ID",
+        "frame add|label|move|resize|remove|fit|layout ...",
+        "labelled regions of the canvas: add X Y W H [LABEL], label ID TEXT, move ID X Y (its windows go too), resize ID W H, remove ID, fit ID, layout ID LAYOUT|off (tile the windows inside it)",
     ),
     (
         "tile LAYOUT|off|cycle|once LAYOUT|ratio R|masters N",
@@ -198,7 +200,17 @@ impl Request {
                     "resize" => FrameCmd::Resize(id(1)?, num(2)?, num(3)?),
                     "remove" => FrameCmd::Remove(id(1)?),
                     "fit" => FrameCmd::Fit(id(1)?),
-                    _ => return Err("frame needs add X Y W H [LABEL], label ID TEXT, move ID X Y, resize ID W H, remove ID or fit ID".into()),
+                    "layout" => FrameCmd::Layout(
+                        id(1)?,
+                        match args.get(2).copied() {
+                            Some("off") => None,
+                            Some(l) => Some(crate::layout::Layout::parse(l).ok_or_else(|| {
+                                format!("a layout is off or one of: {}", crate::layout::Layout::names())
+                            })?),
+                            None => return Err("frame layout ID LAYOUT|off".into()),
+                        },
+                    ),
+                    _ => return Err("frame needs add X Y W H [LABEL], label ID TEXT, move ID X Y, resize ID W H, remove ID fit ID or layout ID LAYOUT|off".into()),
                 })
             }
             "tile" => {
@@ -391,6 +403,15 @@ pub struct Frame {
     pub rect: Rect,
     /// The windows whose centre is inside it (what moves with it).
     pub windows: Vec<u32>,
+    /// The layout its windows are tiled with, if any.
+    pub tiling: Option<FrameTiling>,
+}
+
+#[derive(Serialize)]
+pub struct FrameTiling {
+    pub layout: &'static str,
+    pub ratio: f64,
+    pub masters: usize,
 }
 
 #[derive(Serialize)]
