@@ -122,6 +122,10 @@ impl Uwc {
 }
 
 impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for Uwc {
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::sandbox::is_sandboxed(&client)
+    }
+
     fn bind(
         _: &mut Uwc,
         _: &DisplayHandle,

@@ -40,6 +40,7 @@ use wayland_protocols::wp::{
     idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
     pointer_constraints::zv1::client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    security_context::v1::client::{wp_security_context_manager_v1, wp_security_context_v1},
     text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -987,6 +988,7 @@ noop!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 noop!(wp_fifo_manager_v1::WpFifoManagerV1, wp_fifo_v1::WpFifoV1);
 noop!(wp_commit_timing_manager_v1::WpCommitTimingManagerV1, wp_commit_timer_v1::WpCommitTimerV1);
 noop!(wp_presentation::WpPresentation);
+noop!(wp_security_context_manager_v1::WpSecurityContextManagerV1, wp_security_context_v1::WpSecurityContextV1);
 
 impl Dispatch<wl_callback::WlCallback, ()> for App {
     fn event(
@@ -3680,4 +3682,80 @@ fn a_commit_with_a_timestamp_is_applied_at_that_time() {
     let took = start.elapsed();
     assert!(took >= Duration::from_millis(300), "not before its time ({took:?})");
     assert!(took < Duration::from_millis(1500), "but not much after ({took:?})");
+}
+
+/// The interfaces a connection's registry offers.
+fn offered_globals(conn: &Connection) -> Vec<String> {
+    struct Probe;
+    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Probe {
+        fn event(
+            _: &mut Self,
+            _: &wl_registry::WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+    let (globals, _queue) = registry_queue_init::<Probe>(conn).unwrap();
+    globals.contents().with_list(|l| l.iter().map(|g| g.interface.clone()).collect())
+}
+
+#[test]
+fn sandboxed_clients_do_not_see_the_privileged_globals() {
+    use std::os::unix::net::UnixListener;
+    let uwc = Uwc::start("sandbox", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let mgr: wp_security_context_manager_v1::WpSecurityContextManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let path = uwc.dir.join("sandbox.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let (close, _other_end) = UnixStream::pair().unwrap();
+    let ctx = mgr.create_listener(listener.as_fd(), close.as_fd(), &qh, ());
+    ctx.set_sandbox_engine("org.flatpak".into());
+    ctx.set_app_id("org.example.App".into());
+    ctx.commit();
+    c.sync();
+    // Give the compositor a turn to start listening, then connect the way the sandboxed app would.
+    let sandboxed = {
+        let start = Instant::now();
+        loop {
+            match UnixStream::connect(&path) {
+                Ok(s) => break Connection::from_socket(s).unwrap(),
+                Err(e) => assert!(start.elapsed() < Duration::from_secs(3), "connecting to the sandbox socket: {e}"),
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let ordinary = offered_globals(&c.conn);
+    let inside = offered_globals(&sandboxed);
+    let privileged = [
+        "zwlr_layer_shell_v1",
+        "zwlr_screencopy_manager_v1",
+        "zwlr_virtual_pointer_manager_v1",
+        "zwp_virtual_keyboard_manager_v1",
+        "zwlr_data_control_manager_v1",
+        "ext_data_control_manager_v1",
+        "ext_session_lock_manager_v1",
+        "zwlr_output_manager_v1",
+        "zwlr_output_power_manager_v1",
+        "ext_image_copy_capture_manager_v1",
+        "ext_output_image_capture_source_manager_v1",
+        "ext_foreign_toplevel_image_capture_source_manager_v1",
+        "ext_foreign_toplevel_list_v1",
+        "zwlr_foreign_toplevel_manager_v1",
+        "hyprland_toplevel_export_manager_v1",
+        "ext_workspace_manager_v1",
+        "zwp_input_method_manager_v2",
+        "wp_security_context_manager_v1",
+    ];
+    for g in privileged {
+        assert!(ordinary.iter().any(|i| i == g), "an ordinary client sees {g}: {ordinary:?}");
+        assert!(!inside.iter().any(|i| i == g), "a sandboxed client must not see {g}");
+    }
+    // What an app needs is still there.
+    for g in ["wl_compositor", "wl_shm", "xdg_wm_base", "wl_seat", "wl_data_device_manager", "wl_output"] {
+        assert!(inside.iter().any(|i| i == g), "a sandboxed client sees {g}: {inside:?}");
+    }
 }

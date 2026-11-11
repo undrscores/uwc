@@ -47,8 +47,11 @@ use crate::{
     ipc::Ipc,
 };
 
+#[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Set for clients that connected through a `wp_security_context_v1` socket (sandboxed apps).
+    pub security: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
 impl ClientData for ClientState {
@@ -561,6 +564,9 @@ pub struct Uwc {
     pub fifo_state: smithay::wayland::fifo::FifoManagerState,
     #[allow(dead_code)]
     pub commit_timing_state: smithay::wayland::commit_timing::CommitTimingManagerState,
+    /// wp_security_context_v1 (sandbox.rs); held so the global stays alive.
+    #[allow(dead_code)]
+    pub security_context_state: smithay::wayland::security_context::SecurityContextState,
     /// CLOCK_MONOTONIC, the clock presentation timestamps are given on.
     pub present_clock: crate::presentation::PresentClock,
     /// A timer for a commit that waits for a time is pending / a hidden window's fifo barrier is queued.
@@ -642,7 +648,7 @@ impl Uwc {
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
             primary_selection,
             popups: PopupManager::default(),
-            layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
+            layer_shell_state: WlrLayerShellState::new_with_filter::<Uwc, _>(&dh, |c| !crate::sandbox::is_sandboxed(c)),
             ipc_rules: Vec::new(),
             workspaces: crate::workspace::WorkspaceState::new(&dh),
             toplevels: crate::toplevels::ForeignToplevels::new(&dh),
@@ -659,7 +665,9 @@ impl Uwc {
             or_windows: Vec::new(),
             pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState::new::<Uwc>(&dh),
             text_input: smithay::wayland::text_input::TextInputManagerState::new::<Uwc>(&dh),
-            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |_| true),
+            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |c| {
+                !crate::sandbox::is_sandboxed(c)
+            }),
             ime_popups: Vec::new(),
             output_management: Default::default(),
             output_power: crate::output_power::OutputPower::new(&dh),
@@ -722,6 +730,7 @@ impl Uwc {
             ),
             fifo_state: smithay::wayland::fifo::FifoManagerState::new::<Uwc>(&dh),
             commit_timing_state: smithay::wayland::commit_timing::CommitTimingManagerState::new::<Uwc>(&dh),
+            security_context_state: crate::sandbox::create_state(&dh),
             present_clock: crate::presentation::PresentClock::new(),
             commit_timer_armed: false,
             pace_idle: false,
@@ -742,10 +751,7 @@ impl Uwc {
         let name = source.socket_name().to_os_string();
         handle
             .insert_source(source, |stream, _, state| {
-                if let Err(e) = state
-                    .display_handle
-                    .insert_client(stream, Arc::new(ClientState { compositor_state: Default::default() }))
-                {
+                if let Err(e) = state.display_handle.insert_client(stream, Arc::new(ClientState::default())) {
                     tracing::warn!("rejecting client: {e}");
                 }
             })

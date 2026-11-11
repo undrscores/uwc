@@ -95,7 +95,11 @@ impl ExtCapture {
         dh.create_global::<Uwc, ExtOutputImageCaptureSourceManagerV1, ()>(1, ());
         dh.create_global::<Uwc, ExtForeignToplevelImageCaptureSourceManagerV1, ()>(1, ());
         dh.create_global::<Uwc, ExtImageCopyCaptureManagerV1, ()>(1, ());
-        ExtCapture { list: ForeignToplevelListState::new::<Uwc>(dh), windows: Vec::new(), pending: Vec::new() }
+        ExtCapture {
+            list: ForeignToplevelListState::new_with_filter::<Uwc>(dh, |c| !crate::sandbox::is_sandboxed(c)),
+            windows: Vec::new(),
+            pending: Vec::new(),
+        }
     }
 }
 
@@ -254,6 +258,10 @@ impl Uwc {
 // ---- sources --------------------------------------------------------------------------------
 
 impl GlobalDispatch<ExtOutputImageCaptureSourceManagerV1, ()> for Uwc {
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::sandbox::is_sandboxed(&client)
+    }
+
     fn bind(
         _: &mut Uwc,
         _: &DisplayHandle,
@@ -291,6 +299,10 @@ impl Dispatch<ExtOutputImageCaptureSourceManagerV1, ()> for Uwc {
 }
 
 impl GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ()> for Uwc {
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::sandbox::is_sandboxed(&client)
+    }
+
     fn bind(
         _: &mut Uwc,
         _: &DisplayHandle,
@@ -343,6 +355,10 @@ impl Dispatch<ExtImageCaptureSourceV1, SourceData> for Uwc {
 // ---- sessions and frames ------------------------------------------------------------------
 
 impl GlobalDispatch<ExtImageCopyCaptureManagerV1, ()> for Uwc {
+    fn can_view(client: smithay::reexports::wayland_server::Client, _: &()) -> bool {
+        !crate::sandbox::is_sandboxed(&client)
+    }
+
     fn bind(
         _: &mut Uwc,
         _: &DisplayHandle,

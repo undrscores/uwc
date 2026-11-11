@@ -34,7 +34,10 @@ pub struct Locked {
 
 impl SessionLock {
     pub fn new(dh: &DisplayHandle) -> Self {
-        SessionLock { manager: SessionLockManagerState::new::<Uwc, _>(dh, |_| true), locked: None }
+        SessionLock {
+            manager: SessionLockManagerState::new::<Uwc, _>(dh, |c| !crate::sandbox::is_sandboxed(c)),
+            locked: None,
+        }
     }
 }
 

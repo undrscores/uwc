@@ -33,6 +33,7 @@ mod protocol;
 mod protocols;
 mod render;
 mod rules;
+mod sandbox;
 mod scale;
 mod screencopy;
 mod session;
