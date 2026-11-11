@@ -2998,6 +2998,47 @@ fn the_canvas_comes_back_after_a_restart() {
 }
 
 #[test]
+fn a_tags_tiling_layout_comes_back_after_a_restart() {
+    let state = std::env::temp_dir().join(format!("uwc-test-{}-tiling-state", std::process::id()));
+    {
+        let mut uwc = Uwc::start_with_state("tile-session1", None, &state);
+        uwc.ok("set tile-gap 10");
+        uwc.ok("set tile-inner-gap 10");
+        uwc.ok("tile dwindle");
+        uwc.ok("tile ratio 0.6");
+        uwc.ok("session save");
+        uwc.ok("quit");
+        let start = Instant::now();
+        while uwc.child.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let mut uwc = Uwc::start_with_state("tile-session2", None, &state);
+    let s = uwc.state();
+    let t = &s["monitors"][0]["tags"][0]["tiling"];
+    assert_eq!((t["layout"].clone(), t["ratio"].clone()), ("dwindle".into(), 0.6.into()), "layout and split");
+    assert_eq!(
+        (t["x"].clone(), t["y"].clone(), t["width"].clone(), t["height"].clone()),
+        (0.into(), 0.into(), 1000.into(), 600.into()),
+        "and the area it works in"
+    );
+    assert!(s["monitors"][0]["tags"][1]["tiling"].is_null(), "untiled tags stay untiled");
+    // Windows tile into it as they open: the first fills the area, the second takes the 0.4 side.
+    uwc.ok("set tile-gap 10");
+    uwc.ok("set tile-inner-gap 10");
+    let mut apps = Apps(vec![]);
+    apps.open(&mut uwc, "A");
+    apps.open(&mut uwc, "B");
+    let s = uwc.state();
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == false));
+    assert_eq!(rect4(&s, "A").0, 10, "tiled into the restored layout");
+    drop(apps);
+    drop(uwc);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
 fn taskbars_list_and_control_windows() {
     const ACTIVATED: u32 = 2;
     const MINIMIZED: u32 = 1;

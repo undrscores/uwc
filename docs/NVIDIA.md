@@ -12,7 +12,7 @@ The proprietary driver works through the same GBM/KMS path as Mesa drivers, with
 - Shaders (for the decoration work) are written for NVIDIA's stricter GLSL compiler: no implicit int/float conversion,
   no redefined builtins (uwm hit this with scenefx's `clamp`).
 
-None of this has run on NVIDIA hardware yet.
+This has been run on NVIDIA hardware by the author; other cards and driver versions are untested.
 
 Config: `-c FILE`, else `$UWC_CONFIG`, else `~/.config/uwc/config.kdl`. `config.def.kdl` is the built-in default and the
 documentation; a file only needs what it changes, and it is reloaded when saved. Control socket: `$UWC_SOCKET`

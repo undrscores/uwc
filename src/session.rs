@@ -72,6 +72,21 @@ pub struct SavedMonitor {
     pub bookmarks: Vec<Vec<Option<SavedView>>>,
 }
 
+/// One tag's tiling (tiling.rs): the layout, its split, and the canvas rect it works in. Window
+/// order is not saved (window ids do not outlive the compositor); windows tile in as their apps open.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedTiling {
+    pub layout: String,
+    #[serde(default)]
+    pub ratio: Option<f64>,
+    #[serde(default)]
+    pub masters: Option<usize>,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
@@ -84,6 +99,9 @@ pub struct Session {
     pub viewports: Vec<SavedView>,
     #[serde(default)]
     pub bookmarks: Vec<Vec<Option<SavedView>>>,
+    /// Per tag, `None` when nothing is tiled there. Absent in sessions written before it existed.
+    #[serde(default)]
+    pub tiling: Vec<Option<SavedTiling>>,
     pub windows: Vec<SavedWindow>,
 }
 
@@ -171,6 +189,22 @@ impl Uwc {
                 .collect(),
             viewports: Vec::new(),
             bookmarks: Vec::new(),
+            tiling: self
+                .tiling
+                .tags
+                .iter()
+                .map(|t| {
+                    t.state.layout.map(|l| SavedTiling {
+                        layout: l.name().to_string(),
+                        ratio: t.state.ratio,
+                        masters: t.state.masters,
+                        x: t.area.loc.x,
+                        y: t.area.loc.y,
+                        w: t.area.size.w,
+                        h: t.area.size.h,
+                    })
+                })
+                .collect(),
             windows,
         }
     }
@@ -241,6 +275,15 @@ impl Uwc {
         if s.tagset & crate::canvas::ALLTAGS != 0 {
             self.tagset = s.tagset & crate::canvas::ALLTAGS;
         }
+        for (tag, saved) in s.tiling.iter().take(TAGCOUNT).enumerate() {
+            let Some(st) = saved else { continue };
+            let Some(layout) = crate::layout::Layout::parse(&st.layout) else { continue };
+            let t = &mut self.tiling.tags[tag];
+            t.state.layout = Some(layout);
+            t.state.ratio = st.ratio.map(|r| r.clamp(crate::tiling::MIN_RATIO, crate::tiling::MAX_RATIO));
+            t.state.masters = st.masters.map(|n| n.clamp(1, crate::tiling::MAX_MASTERS));
+            t.area = smithay::utils::Rectangle::new((st.x, st.y).into(), (st.w.max(1), st.h.max(1)).into());
+        }
         tracing::info!("session: {} remembered windows from {}", s.windows.len(), path.display());
         self.session_pool = s.windows;
         self.session_written = Some(text);
@@ -302,6 +345,18 @@ mod tests {
             }],
             viewports: Vec::new(),
             bookmarks: Vec::new(),
+            tiling: vec![
+                None,
+                Some(SavedTiling {
+                    layout: "dwindle".into(),
+                    ratio: Some(0.6),
+                    masters: None,
+                    x: -10,
+                    y: 20,
+                    w: 1920,
+                    h: 1080,
+                }),
+            ],
             windows: vec![w("foot", "a")],
         };
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
@@ -314,5 +369,6 @@ mod tests {
         let s: Session = serde_json::from_str(old).unwrap();
         assert!(s.monitors.is_empty());
         assert_eq!(s.viewports.len(), 1);
+        assert!(s.tiling.is_empty(), "sessions from before tiling was saved load with no layouts");
     }
 }

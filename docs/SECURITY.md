@@ -45,4 +45,4 @@ does not. Report problems privately to the repository owner rather than in a pub
 
 - A panic inside a Wayland protocol handler is caught like any other (see docs/STATUS.md); three in ten seconds end the session, with the session file saved.
 - Dependencies are not audited here: run `cargo audit` in CI or before a release.
-- The udev backend, NVIDIA and real input devices are untested on hardware.
+- Sandboxing is tested with a hand-made socket, not with a real Flatpak.
