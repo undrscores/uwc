@@ -35,6 +35,13 @@ options {
     opacity 1                   // 0-1: focused windows (the surface only, not the border or shadow)
     inactive-opacity 1          // 0-1: windows that do not have focus
     inactive-dim 0              // 0-1: how much windows without focus are darkened
+    // Background blur: what is behind a window is blurred and shown through its translucent parts (a
+    // terminal at opacity 0.8). The number is how far the blur reaches, in px of canvas (it scales with
+    // zoom); 0 = none. Costs a little GPU per blurred window on every frame that is drawn. Best set
+    // per window with a rule (match app-id="foot"; opacity 0.85; blur-radius 12). The window's
+    // corner-radius clips it. Windows stacked on each other blur through each other; a closing window
+    // fades without it.
+    blur-radius 0
     // Border gradients replace the border / focus color: 2 to 6 colors, angle in CSS degrees
     // (0 = first color at the bottom, last at the top; 90 = first at the left; the default).
     // No colors turns it off. Needs border-width > 0.
@@ -171,7 +178,7 @@ options {
 //       focus false        it does not take the keyboard
 //       scale 0.5          its own scale on the canvas (also scale-window / Mod+Ctrl+scroll)
 // - any decoration option (border-width, border-color, focus-color, focus-gradient, corner-radius,
-//   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, border-spin-ms,
+//   shadow-*, focus-shadow-*, backdrop-color, opacity, inactive-opacity, inactive-dim, blur-radius, border-spin-ms,
 //   urgent-*): it applies to these windows live, and follows their state (e.g. match focused=false).
 // IPC: `rule { ... }` adds one until the next reload, `rule clear` removes those.
 //

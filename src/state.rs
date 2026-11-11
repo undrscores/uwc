@@ -571,6 +571,8 @@ pub struct Uwc {
     pub present_clock: crate::presentation::PresentClock,
     /// A timer for a commit that waits for a time is pending / a hidden window's fifo barrier is queued.
     pub commit_timer_armed: bool,
+    /// Textures the background blur keeps between frames (blur.rs).
+    pub blur: crate::blur::BlurCache,
     pub pace_idle: bool,
     /// Counts minimize calls, so the newest minimized window comes back first.
     pub minimize_stamp: u32,
@@ -733,6 +735,7 @@ impl Uwc {
             security_context_state: crate::sandbox::create_state(&dh),
             present_clock: crate::presentation::PresentClock::new(),
             commit_timer_armed: false,
+            blur: Default::default(),
             pace_idle: false,
             fullscreen_bg_id: Id::new(),
             user_shaders: Default::default(),

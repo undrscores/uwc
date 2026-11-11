@@ -285,6 +285,33 @@ cmd("view 2"); time.sleep(0.5)
 check("tag 2 has its own root colour", px(640, 400), (0,0x33,0x66))
 cmd("view 1"); time.sleep(0.5)
 check("and tag 1 has the global one again", px(1270, 700), (32,32,32))
+# Background blur: a half-transparent black window (K) straddles the corner of a red one (W). Without
+# blur the corner is sharp through it; with blur-radius it is smooth, and the right way up (the red
+# is above the edge, so the pixel above the edge is the redder one). K's 10 px frame and its white
+# strip are avoided, and W's own frame makes the red side lighter, so the checks are relative.
+cmd("view 3"); time.sleep(0.4)
+spawn(["./target/debug/examples/paint","W","400","300","d03030"], env=wenv); time.sleep(0.8)
+spawn(["./target/debug/examples/paint","K","300","300","000000"], env=wenv); time.sleep(0.8)
+vp = cmd("state")["monitors"][0]["viewport"]
+kx, ky = 200+400-75, 150+300-120       # W is 400x300 at 200,150: its right edge is a quarter into K, its bottom 0.4
+cmd(f"move {win('W')['id']} {vp['x']+200} {vp['y']+150}")
+cmd(f"move {win('K')['id']} {vp['x']+kx} {vp['y']+ky}")
+cmd('rule { match title="K"; opacity 0.5; corner-radius 0; shadow-size 0; border-width 0 }'); time.sleep(0.6)
+ex, ey = kx+75, ky+120   # the corner of W, in screen px at zoom 1
+def around():
+    return (px(ex-8, ky+45)[0], px(ex+8, ky+45)[0], px(kx+30, ey-8)[0], px(kx+30, ey+8)[0])
+l0, r0, t0, b0 = around()
+check("without blur the edge is sharp (red side, root side; right edge)", (l0 > 100, r0 < 20), (True, True))
+check("without blur the edge is sharp (red side, root side; bottom edge)", (t0 > 100, b0 < 20), (True, True))
+cmd('rule { match title="K"; blur-radius 30 }'); time.sleep(0.8)
+l, r_, t, b = around()
+check("blur: the red side gets less red and the root side lighter (right edge)", (l < l0 - 10, r_ > r0 + 10), (True, True))
+check("blur: and the red side is still the redder one", l > r_ + 6, True)
+check("blur is the right way up (red above the edge, not below)", (t < t0 - 10, b > b0 + 10, t > b + 6), (True, True, True))
+cmd('rule { match title="K"; blur-radius 0 }'); time.sleep(0.6)
+check("blur-radius 0 turns it off again", around(), (l0, r0, t0, b0))
+for t_ in ("W","K"): cmd(f"close {win(t_)['id']}")
+cmd("view 1"); time.sleep(0.4)
 # Popup grabs: a menu (a grabbed popup) closes when a click lands outside it, and that click is not
 # also a drag or a focus change; a click on the popup itself keeps it open.
 p3 = subprocess.Popen(["./target/debug/examples/paint","--popup"], env=wenv,

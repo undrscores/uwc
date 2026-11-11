@@ -3,6 +3,7 @@
 
 mod activation;
 mod backend;
+mod blur;
 mod canvas;
 mod capture;
 mod config;

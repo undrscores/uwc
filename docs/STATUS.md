@@ -60,6 +60,7 @@ What works (covered by `cargo test`; rendering also checked by eye nested under 
 | Edge pan: dragging a window against a screen edge pans the view that way with the window under the pointer (`edge-pan-size`, `edge-pan-speed`) | done |
 | Momentum: let go of a three-finger swipe or a touch drag while moving and the view glides on (`pan-momentum-ms`, IPC `fling VX VY`) | done |
 | Sandboxed apps (sandbox.rs): `wp_security_context_v1` (Flatpak and others get a restricted socket); a client that came in through one is not shown the privileged globals (layer shell, screen/window capture, virtual keyboard and pointer, input methods, data control, session lock, output management, workspaces, toplevel lists), see docs/SECURITY.md | done, tested with a hand-made socket, not with a real Flatpak |
+| Background blur (blur.rs): `blur-radius` (per window through rules, or global): what is behind a window is drawn into a texture, blurred with a dual Kawase filter and shown through its translucent parts, clipped to the rounded corners; windows stacked on each other blur through each other; scales with zoom | done, pixel-checked nested under software GL (sharp without, smooth with, right way up); a closing window fades without it, and layer surfaces cannot ask for it |
 | Frame pacing (presentation.rs): presentation-time (`wp_presentation`, CLOCK_MONOTONIC: answered with the kernel's flip time and sequence at the vblank on udev, at once on winit/headless; superseded commits are `discarded`), `wp_fifo_v1` (every presented frame signals the barriers of every window, hidden ones too, so a client waiting on one runs at the refresh rate and never hangs) and `wp_commit_timing_v1` (a timed commit is applied by the first frame at or after its time; a timer wakes the loop when nothing is drawn) | done; the udev vblank timestamps are untested on hardware |
 | Screen capture for portals: ext-foreign-toplevel-list, ext-image-capture-source, ext-image-copy-capture (outputs and windows, shm, `paint_cursors`); with wlr-screencopy this is what xdg-desktop-portal-wlr, OBS and browsers' screen sharing use. `uwc-portals.conf` (installed by `make install`) picks the wlr portal for ScreenCast and Screenshot | done, no dmabuf yet |
 
@@ -80,9 +81,10 @@ Not yet (roughly in the order to do them):
 1. **A dmabuf path for screen capture** (ext-image-copy-capture offers shm only). It needs the renderer's DRM node and
    a GPU to test, so it waits for item 0.
 2. **tablet-v2** (pressure and tilt reach clients; pens act as a mouse today). Needs a tablet to test.
-3. **Blur** (and ext-background-effect for bars), the headline missing visual effect: it needs a render pass that
-   captures what is behind a window, blurs it and draws it under the window. The canvas grid is covered by `snap-grid`
-   and the example shaders; uwm's themes (which set `grid`) are still rejected as a whole.
+3. **More blur**: ext-background-effect (bars and other layer surfaces asking for it), blur on a closing window's
+   ghost, brightness/saturation/noise tweaks, and caching a blur whose backdrop did not change (it is redone on every
+   drawn frame today). The canvas grid is covered by `snap-grid` and the example shaders; uwm's themes (which set
+   `grid`) are still rejected as a whole.
 4. Protocols still missing: alpha-modifier, xdg-toplevel-icon.
 5. A minimap or overview strip for Quickshell (the window previews it needs already work), and `focus-ms` fades.
 6. Multi-GPU.

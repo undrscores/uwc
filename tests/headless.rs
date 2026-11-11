@@ -3759,3 +3759,28 @@ fn sandboxed_clients_do_not_see_the_privileged_globals() {
         assert!(inside.iter().any(|i| i == g), "a sandboxed client sees {g}: {inside:?}");
     }
 }
+
+#[test]
+fn blur_radius_is_an_option_and_a_per_window_rule() {
+    let mut uwc = Uwc::start("blur-option", Some("rule { match title=\"Glass\"; blur-radius 14 }"));
+    let mut c = uwc.connect();
+    let _a = c.window("Glass", 300, 200);
+    let _b = c.window("Solid", 300, 200);
+    let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (glass, solid) = (win(&s, "Glass")["id"].as_u64().unwrap(), win(&s, "Solid")["id"].as_u64().unwrap());
+    let radius = |uwc: &mut Uwc, id: u64| uwc.cmd(&format!("get-window {id}"))["options"]["blur-radius"].clone();
+    assert_eq!(uwc.cmd("get blur-radius")["value"], 0.0, "off by default");
+    assert_eq!((radius(&mut uwc, glass), radius(&mut uwc, solid)), (14.0.into(), 0.0.into()));
+    uwc.ok("set blur-radius 6");
+    assert_eq!(
+        (radius(&mut uwc, glass), radius(&mut uwc, solid)),
+        (14.0.into(), 6.0.into()),
+        "a rule beats the option"
+    );
+    for bad in ["set blur-radius -1", "set blur-radius 1000", "set blur-radius wide"] {
+        assert!(uwc.cmd(bad).get("error").is_some(), "{bad}");
+    }
+    // Headless has no renderer: a blurred window must not break anything there.
+    uwc.ok(&format!("focus {glass}"));
+    c.sync();
+}

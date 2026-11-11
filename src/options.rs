@@ -182,6 +182,7 @@ pub static DECO: &[Opt<Deco>] = option_table!(Deco;
     "opacity" => opacity (0, 1),
     "inactive-opacity" => inactive_opacity (0, 1),
     "inactive-dim" => inactive_dim (0, 1),
+    "blur-radius" => blur_radius (0, 128),
     "border-shader" => border_shader,
 );
 
