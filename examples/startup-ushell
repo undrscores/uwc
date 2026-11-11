@@ -1,0 +1,14 @@
+#!/bin/sh
+# Run by uwc (-s). Copy to ~/.config/uwc/startup and make it executable.
+# ushell reads $UWM_SOCKET; uwc exports $UWC_SOCKET, so bridge it.
+export UWM_SOCKET="${UWM_SOCKET:-$UWC_SOCKET}"
+# Keep the shell alive: if quickshell exits for any reason, start it again (at most 5 quick restarts in a
+# row, then give up so a broken config does not spin). A deliberate `qs kill` exits 0 and stays down.
+fails=0
+while :; do
+    start=$(date +%s)
+    qs -c ushell && exit 0
+    [ $(( $(date +%s) - start )) -ge 30 ] && fails=0 || fails=$((fails + 1))
+    [ "$fails" -ge 5 ] && exit 1
+    sleep 1
+done
