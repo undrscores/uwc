@@ -47,8 +47,11 @@ use crate::{
     ipc::Ipc,
 };
 
+#[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Set for clients that connected through a `wp_security_context_v1` socket (sandboxed apps).
+    pub security: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
 impl ClientData for ClientState {
@@ -485,6 +488,8 @@ pub struct Uwc {
     /// linux-drm-syncobj-v1 (explicit sync), when the GPU supports it.
     pub syncobj_state: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
     pub dmabuf_global: Option<DmabufGlobal>,
+    /// The render node and formats output captures can be written to as dmabufs; set by the udev backend.
+    pub capture_dmabuf: Option<crate::capture::DmabufOffer>,
     pub backend: Backend,
 
     pub config: Config,
@@ -554,6 +559,23 @@ pub struct Uwc {
     pub fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState,
     #[allow(dead_code)]
     pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
+    /// wp_presentation, wp_fifo_v1 and wp_commit_timing_v1 (presentation.rs); held so the globals stay alive.
+    #[allow(dead_code)]
+    pub presentation_state: smithay::wayland::presentation::PresentationState,
+    #[allow(dead_code)]
+    pub fifo_state: smithay::wayland::fifo::FifoManagerState,
+    #[allow(dead_code)]
+    pub commit_timing_state: smithay::wayland::commit_timing::CommitTimingManagerState,
+    /// wp_security_context_v1 (sandbox.rs); held so the global stays alive.
+    #[allow(dead_code)]
+    pub security_context_state: smithay::wayland::security_context::SecurityContextState,
+    /// CLOCK_MONOTONIC, the clock presentation timestamps are given on.
+    pub present_clock: crate::presentation::PresentClock,
+    /// A timer for a commit that waits for a time is pending / a hidden window's fifo barrier is queued.
+    pub commit_timer_armed: bool,
+    /// Textures the background blur keeps between frames (blur.rs).
+    pub blur: crate::blur::BlurCache,
+    pub pace_idle: bool,
     /// Counts minimize calls, so the newest minimized window comes back first.
     pub minimize_stamp: u32,
     /// Compiled user shaders by kind and file (None: it failed), and why the failed ones failed
@@ -603,7 +625,8 @@ impl Uwc {
                 ),
                 |_, display, state| {
                     // Safety: the display is not dropped while it is being dispatched.
-                    unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+                    let display = unsafe { display.get_mut() };
+                    dispatch_surviving_panics(display, state);
                     Ok(smithay::reexports::calloop::PostAction::Continue)
                 },
             )
@@ -629,7 +652,7 @@ impl Uwc {
             data_device_state: DataDeviceState::new::<Uwc>(&dh),
             primary_selection,
             popups: PopupManager::default(),
-            layer_shell_state: WlrLayerShellState::new::<Uwc>(&dh),
+            layer_shell_state: WlrLayerShellState::new_with_filter::<Uwc, _>(&dh, |c| !crate::sandbox::is_sandboxed(c)),
             ipc_rules: Vec::new(),
             workspaces: crate::workspace::WorkspaceState::new(&dh),
             toplevels: crate::toplevels::ForeignToplevels::new(&dh),
@@ -646,7 +669,9 @@ impl Uwc {
             or_windows: Vec::new(),
             pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState::new::<Uwc>(&dh),
             text_input: smithay::wayland::text_input::TextInputManagerState::new::<Uwc>(&dh),
-            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |_| true),
+            input_method: smithay::wayland::input_method::InputMethodManagerState::new::<Uwc, _>(&dh, |c| {
+                !crate::sandbox::is_sandboxed(c)
+            }),
             ime_popups: Vec::new(),
             output_management: Default::default(),
             output_power: crate::output_power::OutputPower::new(&dh),
@@ -657,6 +682,7 @@ impl Uwc {
             dmabuf_state: DmabufState::new(),
             syncobj_state: None,
             dmabuf_global: None,
+            capture_dmabuf: None,
             backend: Backend::None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_theme: crate::cursor::CursorTheme::new(&config.cursor_theme, config.cursor_size),
@@ -703,6 +729,17 @@ impl Uwc {
             scale_gen: 0,
             fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Uwc>(&dh),
             viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Uwc>(&dh),
+            presentation_state: smithay::wayland::presentation::PresentationState::new::<Uwc>(
+                &dh,
+                smithay::reexports::rustix::time::ClockId::Monotonic as u32,
+            ),
+            fifo_state: smithay::wayland::fifo::FifoManagerState::new::<Uwc>(&dh),
+            commit_timing_state: smithay::wayland::commit_timing::CommitTimingManagerState::new::<Uwc>(&dh),
+            security_context_state: crate::sandbox::create_state(&dh),
+            present_clock: crate::presentation::PresentClock::new(),
+            commit_timer_armed: false,
+            blur: Default::default(),
+            pace_idle: false,
             fullscreen_bg_id: Id::new(),
             user_shaders: Default::default(),
             shader_errors: Default::default(),
@@ -720,10 +757,7 @@ impl Uwc {
         let name = source.socket_name().to_os_string();
         handle
             .insert_source(source, |stream, _, state| {
-                if let Err(e) = state
-                    .display_handle
-                    .insert_client(stream, Arc::new(ClientState { compositor_state: Default::default() }))
-                {
+                if let Err(e) = state.display_handle.insert_client(stream, Arc::new(ClientState::default())) {
                     tracing::warn!("rejecting client: {e}");
                 }
             })
@@ -893,6 +927,11 @@ impl Uwc {
     }
 
     /// Whether the window is drawn anywhere at all.
+    /// What output captures may be written into besides shm: only with `capture-dmabuf` on and a udev backend.
+    pub fn dmabuf_offer(&self) -> Option<&crate::capture::DmabufOffer> {
+        self.config.capture_dmabuf.then_some(self.capture_dmabuf.as_ref()).flatten()
+    }
+
     pub fn visible(&self, c: &Client) -> bool {
         c.mapped && c.minimized == 0 && (c.pin.is_some() || c.tags & self.tagset != 0)
     }
@@ -2112,6 +2151,40 @@ impl Uwc {
             }
         }
     }
+}
+
+/// Dispatch the clients' requests. A panic in a protocol handler unwinds out of `dispatch_clients` (uwc uses
+/// the pure Rust wayland backend, see Cargo.toml), leaving the requests that client had sent after the
+/// guilty one buffered in the backend: the socket is empty, so nothing would wake the loop for them and the
+/// client would hang waiting for its reply. So after a panic every client is dispatched again, then the panic
+/// goes on to `serve` (main.rs), which counts it and drops the half-done state.
+fn dispatch_surviving_panics(display: &mut Display<Uwc>, state: &mut Uwc) {
+    use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+    let Err(first) = catch_unwind(AssertUnwindSafe(|| display.dispatch_clients(state).unwrap())) else {
+        return;
+    };
+    state.recover_after_panic();
+    // A bounded number of rounds: each one that panics again has used up a request, but a client could
+    // send a lot of them.
+    for _ in 0..16 {
+        let mut ids = Vec::new();
+        display.backend().handle().with_all_clients(|id| ids.push(id));
+        let mut more = false;
+        for id in ids {
+            match catch_unwind(AssertUnwindSafe(|| display.backend().dispatch_single_client(state, id))) {
+                Ok(Ok(n)) => more |= n > 0,
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    state.recover_after_panic();
+                    more = true;
+                }
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    resume_unwind(first);
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 smithay = { version = "0.7", default-features = false, features = [
-    "backend_winit", "backend_egl", "renderer_gl", "wayland_frontend", "desktop", "use_system_lib",
+    "backend_winit", "backend_egl", "renderer_gl", "wayland_frontend", "desktop",
     "backend_drm", "backend_gbm", "backend_libinput", "backend_session_libseat", "backend_udev",
     "xwayland",
 ] }
@@ -30,9 +30,14 @@ wayland-protocols = { version = "0.32", features = ["client", "staging", "unstab
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 # smithay's debug assertions and overflow checks panic on client-controlled numbers (a layer surface's
-# margins, a positioner's offsets), and a panic inside a libwayland callback aborts the process. Release
-# builds, which is what a session runs, do not have those checks; keep dev builds the same for smithay
-# (uwc's own crate keeps them on).
+# margins, a positioner's offsets). Release builds, which is what a session runs, do not have those checks;
+# keep dev builds the same for smithay (uwc's own crate keeps them on).
+#
+# smithay's `use_system_lib` is off on purpose: it switches wayland-backend to libwayland, which calls every
+# protocol handler through C, and a panic cannot unwind through C (the process aborts). The pure Rust
+# backend dispatches in plain Rust, so `serve` in main.rs catches a panic in a handler like any other.
+# (`use_system_lib` would also allow `bind_wl_display`, the legacy wl_drm path for EGL clients; uwc offers
+# linux-dmabuf only, which every current Mesa and NVIDIA driver uses.)
 [profile.dev.package.smithay]
 debug-assertions = false
 overflow-checks = false

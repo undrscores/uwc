@@ -13,7 +13,7 @@ use serde_json::Value;
 use wayland_client::{
     globals::GlobalList,
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_buffer, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
+    protocol::{wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
@@ -34,9 +34,13 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_manager_v1 as ws_manager,
 };
 use wayland_protocols::wp::{
+    commit_timing::v1::client::{wp_commit_timer_v1, wp_commit_timing_manager_v1},
+    fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
     pointer_constraints::zv1::client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    security_context::v1::client::{wp_security_context_manager_v1, wp_security_context_v1},
     text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -82,6 +86,22 @@ impl Uwc {
     }
 
     fn start_full(name: &str, config: Option<&str>, state: &std::path::Path, screens: &str) -> Uwc {
+        Uwc::start_full_env(name, config, state, screens, &[])
+    }
+
+    /// Like `start`, with extra environment variables for the compositor.
+    fn start_env(name: &str, config: Option<&str>, env: &[(&str, &str)]) -> Uwc {
+        let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
+        Uwc::start_full_env(name, config, &dir.join("state"), "1000x600", env)
+    }
+
+    fn start_full_env(
+        name: &str,
+        config: Option<&str>,
+        state: &std::path::Path,
+        screens: &str,
+        env: &[(&str, &str)],
+    ) -> Uwc {
         let dir = std::env::temp_dir().join(format!("uwc-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uwc"));
@@ -90,6 +110,7 @@ impl Uwc {
             .env("XDG_RUNTIME_DIR", &dir)
             .env("XDG_STATE_HOME", state)
             .env("UWC_DEBUG_PANIC", "1")
+            .envs(env.iter().copied())
             .stdout(Stdio::from(std::fs::File::create(dir.join("uwc.log")).unwrap()))
             .stderr(Stdio::from(std::fs::OpenOptions::new().append(true).open(dir.join("uwc.log")).unwrap()));
         if let Some(c) = config {
@@ -259,6 +280,11 @@ struct App {
     ext_tl: Vec<(ext_tl_handle::ExtForeignToplevelHandleV1, String, String, String, bool)>,
     /// ext-image-copy-capture: what the session offered and how frames ended.
     cap_events: Vec<String>,
+    /// wp_presentation_feedback outcomes ("presented", "discarded") and finished frame callbacks.
+    presentation: Vec<String>,
+    frames_done: u32,
+    /// wlr-screencopy's linux_dmabuf offers: (fourcc, width, height).
+    linux_dmabuf: Vec<(u32, u32, u32)>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -337,6 +363,9 @@ impl Client {
             ti_leave: false,
             ext_tl: Vec::new(),
             cap_events: Vec::new(),
+            presentation: Vec::new(),
+            frames_done: 0,
+            linux_dmabuf: Vec::new(),
         };
         queue.roundtrip(&mut app).unwrap();
         Client { conn, queue, app, globals, _dir: runtime_dir.to_path_buf() }
@@ -842,6 +871,7 @@ impl Dispatch<sc_frame::ZwlrScreencopyFrameV1, ()> for App {
             sc_frame::Event::Buffer { format, width, height, stride } => {
                 app.export_buffer = Some((format.into(), width, height, stride))
             }
+            sc_frame::Event::LinuxDmabuf { format, width, height } => app.linux_dmabuf.push((format, width, height)),
             sc_frame::Event::BufferDone => app.export_done = true,
             sc_frame::Event::Failed => app.export_failed = true,
             sc_frame::Event::Ready { .. } => app.export_ready = true,
@@ -976,6 +1006,43 @@ impl Dispatch<ws_handle::ExtWorkspaceHandleV1, ()> for App {
 }
 noop!(wl_compositor::WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_buffer::WlBuffer);
 noop!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+noop!(wp_fifo_manager_v1::WpFifoManagerV1, wp_fifo_v1::WpFifoV1);
+noop!(wp_commit_timing_manager_v1::WpCommitTimingManagerV1, wp_commit_timer_v1::WpCommitTimerV1);
+noop!(wp_presentation::WpPresentation);
+noop!(wp_security_context_manager_v1::WpSecurityContextManagerV1, wp_security_context_v1::WpSecurityContextV1);
+
+impl Dispatch<wl_callback::WlCallback, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        app.frames_done += 1;
+    }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wp_presentation_feedback::WpPresentationFeedback,
+        e: wp_presentation_feedback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match e {
+            wp_presentation_feedback::Event::Presented { tv_sec_hi, tv_sec_lo, tv_nsec, refresh, .. } => {
+                let secs = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
+                app.presentation.push(format!("presented {secs}.{tv_nsec:09} refresh {refresh}"));
+            }
+            wp_presentation_feedback::Event::Discarded => app.presentation.push("discarded".into()),
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<ext_tl_list::ExtForeignToplevelListV1, ()> for App {
     fn event(
@@ -1072,6 +1139,13 @@ impl Dispatch<ext_session::ExtImageCopyCaptureSessionV1, ()> for App {
         match e {
             ext_session::Event::BufferSize { width, height } => app.cap_events.push(format!("size {width}x{height}")),
             ext_session::Event::ShmFormat { .. } => app.cap_events.push("shm".into()),
+            ext_session::Event::DmabufDevice { device } => {
+                app.cap_events.push(format!("dmabuf device {:#x}", u64::from_ne_bytes(device.try_into().unwrap())))
+            }
+            ext_session::Event::DmabufFormat { format, modifiers } => {
+                let mods: Vec<u64> = modifiers.chunks(8).map(|m| u64::from_ne_bytes(m.try_into().unwrap())).collect();
+                app.cap_events.push(format!("dmabuf {format:#x} {mods:x?}"))
+            }
             ext_session::Event::Done => app.cap_events.push("done".into()),
             ext_session::Event::Stopped => app.cap_events.push("stopped".into()),
             _ => {}
@@ -1520,6 +1594,16 @@ fn a_panic_in_a_handler_does_not_take_the_session_down() {
     assert_eq!(uwc.state()["windows"].as_array().unwrap().len(), before);
     uwc.ok(&format!("focus {id}"));
     c.sync();
+    // A panic inside a Wayland protocol handler (a toplevel set_title, here) is survived too: uwc uses the pure
+    // Rust wayland backend, so it unwinds out of the dispatch instead of aborting through libwayland's C.
+    let victim = c.window("Victim", 200, 150);
+    victim.toplevel.set_title("uwc-debug-panic".into());
+    let _ = c.queue.roundtrip(&mut c.app);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(uwc.child.try_wait().unwrap().is_none(), "uwc survived a panic in a protocol handler");
+    let mut c2 = uwc.connect();
+    let _w2 = c2.window("After the handler panic", 200, 150);
+    assert!(uwc.state()["windows"].as_array().unwrap().iter().any(|w| w["title"] == "After the handler panic"));
     // Three in a row mean something is badly wrong: the session is saved and uwc exits non-zero.
     let mut held = Vec::new();
     for _ in 0..3 {
@@ -3516,4 +3600,273 @@ fn a_frame_can_own_a_layout() {
     let s = uwc.state();
     assert!(s["frames"][0]["tiling"].is_null());
     assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == true));
+}
+
+/// Commit a fresh buffer on `w` asking for a frame callback, and wait (bounded) for it.
+fn commit_and_wait_for_frame(c: &mut Client, w: &Window, name: &str, size: (i32, i32)) -> bool {
+    let qh = c.queue.handle();
+    let before = c.app.frames_done;
+    w.surface.frame(&qh, ());
+    let buf = c.buffer(name, size.0, size.1);
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let start = Instant::now();
+    while c.app.frames_done == before {
+        if start.elapsed() > Duration::from_secs(2) {
+            return false;
+        }
+        c.dispatch_pending();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+#[test]
+fn presentation_feedback_is_answered_with_a_monotonic_time() {
+    let uwc = Uwc::start("presentation", None);
+    let mut c = uwc.connect();
+    let w = c.window("Video", 200, 150);
+    let qh = c.queue.handle();
+    let pres: wp_presentation::WpPresentation = c.globals.bind(&qh, 1..=2, ()).unwrap();
+    let _fb = pres.feedback(&w.surface, &qh, ());
+    assert!(commit_and_wait_for_frame(&mut c, &w, "video-a", (200, 150)), "the frame callback arrives");
+    c.sync();
+    assert_eq!(c.app.presentation.len(), 1, "one feedback, one answer: {:?}", c.app.presentation);
+    let said = c.app.presentation[0].clone();
+    assert!(said.starts_with("presented "), "{said}");
+    // The clock is CLOCK_MONOTONIC: seconds since boot, not since 1970.
+    let secs: u64 = said["presented ".len()..].split('.').next().unwrap().parse().unwrap();
+    assert!(secs < 365 * 24 * 3600 * 20, "a monotonic time, not the wall clock: {said}");
+    // Feedback for a commit that another commit replaces before it is shown is discarded, never lost.
+    let _a = pres.feedback(&w.surface, &qh, ());
+    let buf = c.buffer("video-b", 200, 150);
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let _b = pres.feedback(&w.surface, &qh, ());
+    w.surface.attach(Some(&buf), 0, 0);
+    w.surface.commit();
+    let start = Instant::now();
+    while c.app.presentation.len() < 3 && start.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(20));
+        c.sync();
+    }
+    assert_eq!(c.app.presentation.len(), 3, "every request is answered: {:?}", c.app.presentation);
+}
+
+#[test]
+fn a_client_waiting_on_fifo_barriers_keeps_running() {
+    let mut uwc = Uwc::start("fifo", None);
+    let mut c = uwc.connect();
+    let w = c.window("Fifo", 200, 150);
+    let qh = c.queue.handle();
+    let mgr: wp_fifo_manager_v1::WpFifoManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let fifo = mgr.get_fifo(&w.surface, &qh, ());
+    // Every commit waits for the previous one's barrier and sets its own, the way a vsynced game does.
+    for i in 0..12 {
+        fifo.wait_barrier();
+        fifo.set_barrier();
+        assert!(commit_and_wait_for_frame(&mut c, &w, "fifo", (200, 150)), "commit {i} was held for good");
+    }
+    // A hidden window is never drawn, and must not stall either.
+    uwc.ok("view 2");
+    for i in 0..6 {
+        fifo.wait_barrier();
+        fifo.set_barrier();
+        let buf = c.buffer("fifo-hidden", 200, 150);
+        w.surface.attach(Some(&buf), 0, 0);
+        w.surface.commit();
+        c.sync();
+        std::thread::sleep(Duration::from_millis(40));
+        let _ = i;
+    }
+    uwc.ok("view 1");
+    assert!(commit_and_wait_for_frame(&mut c, &w, "fifo-back", (200, 150)), "back on screen it still runs");
+}
+
+#[test]
+fn a_commit_with_a_timestamp_is_applied_at_that_time() {
+    let uwc = Uwc::start("commit-timing", None);
+    let mut c = uwc.connect();
+    let w = c.window("Timed", 200, 150);
+    let qh = c.queue.handle();
+    let mgr: wp_commit_timing_manager_v1::WpCommitTimingManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let timer = mgr.get_timer(&w.surface, &qh, ());
+    // CLOCK_MONOTONIC now, from the same clock the compositor uses.
+    let now = {
+        let mut ts = std::mem::MaybeUninit::<[i64; 2]>::uninit();
+        // Safety: clock_gettime fills the two words of a timespec.
+        unsafe {
+            extern "C" {
+                fn clock_gettime(clk: i32, ts: *mut [i64; 2]) -> i32;
+            }
+            assert_eq!(clock_gettime(1, ts.as_mut_ptr()), 0);
+            ts.assume_init()
+        }
+    };
+    let target = Duration::new(now[0] as u64, now[1] as u32) + Duration::from_millis(400);
+    timer.set_timestamp((target.as_secs() >> 32) as u32, target.as_secs() as u32, target.subsec_nanos());
+    let start = Instant::now();
+    assert!(commit_and_wait_for_frame(&mut c, &w, "timed", (200, 150)), "the timed commit is applied in the end");
+    let took = start.elapsed();
+    assert!(took >= Duration::from_millis(300), "not before its time ({took:?})");
+    assert!(took < Duration::from_millis(1500), "but not much after ({took:?})");
+}
+
+/// The interfaces a connection's registry offers.
+fn offered_globals(conn: &Connection) -> Vec<String> {
+    struct Probe;
+    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Probe {
+        fn event(
+            _: &mut Self,
+            _: &wl_registry::WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+    let (globals, _queue) = registry_queue_init::<Probe>(conn).unwrap();
+    globals.contents().with_list(|l| l.iter().map(|g| g.interface.clone()).collect())
+}
+
+#[test]
+fn sandboxed_clients_do_not_see_the_privileged_globals() {
+    use std::os::unix::net::UnixListener;
+    let uwc = Uwc::start("sandbox", None);
+    let mut c = uwc.connect();
+    let qh = c.queue.handle();
+    let mgr: wp_security_context_manager_v1::WpSecurityContextManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+    let path = uwc.dir.join("sandbox.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let (close, _other_end) = UnixStream::pair().unwrap();
+    let ctx = mgr.create_listener(listener.as_fd(), close.as_fd(), &qh, ());
+    ctx.set_sandbox_engine("org.flatpak".into());
+    ctx.set_app_id("org.example.App".into());
+    ctx.commit();
+    c.sync();
+    // Give the compositor a turn to start listening, then connect the way the sandboxed app would.
+    let sandboxed = {
+        let start = Instant::now();
+        loop {
+            match UnixStream::connect(&path) {
+                Ok(s) => break Connection::from_socket(s).unwrap(),
+                Err(e) => assert!(start.elapsed() < Duration::from_secs(3), "connecting to the sandbox socket: {e}"),
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let ordinary = offered_globals(&c.conn);
+    let inside = offered_globals(&sandboxed);
+    let privileged = [
+        "zwlr_layer_shell_v1",
+        "zwlr_screencopy_manager_v1",
+        "zwlr_virtual_pointer_manager_v1",
+        "zwp_virtual_keyboard_manager_v1",
+        "zwlr_data_control_manager_v1",
+        "ext_data_control_manager_v1",
+        "ext_session_lock_manager_v1",
+        "zwlr_output_manager_v1",
+        "zwlr_output_power_manager_v1",
+        "ext_image_copy_capture_manager_v1",
+        "ext_output_image_capture_source_manager_v1",
+        "ext_foreign_toplevel_image_capture_source_manager_v1",
+        "ext_foreign_toplevel_list_v1",
+        "zwlr_foreign_toplevel_manager_v1",
+        "hyprland_toplevel_export_manager_v1",
+        "ext_workspace_manager_v1",
+        "zwp_input_method_manager_v2",
+        "wp_security_context_manager_v1",
+    ];
+    for g in privileged {
+        assert!(ordinary.iter().any(|i| i == g), "an ordinary client sees {g}: {ordinary:?}");
+        assert!(!inside.iter().any(|i| i == g), "a sandboxed client must not see {g}");
+    }
+    // What an app needs is still there.
+    for g in ["wl_compositor", "wl_shm", "xdg_wm_base", "wl_seat", "wl_data_device_manager", "wl_output"] {
+        assert!(inside.iter().any(|i| i == g), "a sandboxed client sees {g}: {inside:?}");
+    }
+}
+
+#[test]
+fn blur_radius_is_an_option_and_a_per_window_rule() {
+    let mut uwc = Uwc::start("blur-option", Some("rule { match title=\"Glass\"; blur-radius 14 }"));
+    let mut c = uwc.connect();
+    let _a = c.window("Glass", 300, 200);
+    let _b = c.window("Solid", 300, 200);
+    let s = uwc.wait("two", |s| s["windows"].as_array().unwrap().len() == 2);
+    let (glass, solid) = (win(&s, "Glass")["id"].as_u64().unwrap(), win(&s, "Solid")["id"].as_u64().unwrap());
+    let radius = |uwc: &mut Uwc, id: u64| uwc.cmd(&format!("get-window {id}"))["options"]["blur-radius"].clone();
+    assert_eq!(uwc.cmd("get blur-radius")["value"], 0.0, "off by default");
+    assert_eq!((radius(&mut uwc, glass), radius(&mut uwc, solid)), (14.0.into(), 0.0.into()));
+    uwc.ok("set blur-radius 6");
+    assert_eq!(
+        (radius(&mut uwc, glass), radius(&mut uwc, solid)),
+        (14.0.into(), 6.0.into()),
+        "a rule beats the option"
+    );
+    for bad in ["set blur-radius -1", "set blur-radius 1000", "set blur-radius wide"] {
+        assert!(uwc.cmd(bad).get("error").is_some(), "{bad}");
+    }
+    // Headless has no renderer: a blurred window must not break anything there.
+    uwc.ok(&format!("focus {glass}"));
+    c.sync();
+}
+
+#[test]
+fn output_captures_offer_dmabufs_only_when_asked_for() {
+    // Argb8888 and Xrgb8888 as fourcc codes; the fake GPU also has Rgb565, which is never offered.
+    let (argb, xrgb) = (0x3432_5241_u32, 0x3432_5258_u32);
+    for (config, offered) in [(Some("options { capture-dmabuf true }"), true), (None, false)] {
+        let uwc = Uwc::start_env("dmabuf-offer", config, &[("UWC_DEBUG_DMABUF", "1")]);
+        let mut c = uwc.connect();
+        let qh = c.queue.handle();
+        let _w = c.window("shared", 320, 200);
+        let sources: ext_tl_source_manager::ExtForeignToplevelImageCaptureSourceManagerV1 =
+            c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let list: ext_tl_list::ExtForeignToplevelListV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let out_sources: ext_output_source_manager::ExtOutputImageCaptureSourceManagerV1 =
+            c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let copy: ext_copy_manager::ExtImageCopyCaptureManagerV1 = c.globals.bind(&qh, 1..=1, ()).unwrap();
+        let output = c.bind_output();
+        c.sync();
+        c.sync();
+        let handle = c.app.ext_tl.iter().find(|t| t.2 == "shared").expect("window announced").0.clone();
+
+        // The output: the device and each format with its modifiers, before `done`.
+        let osrc = out_sources.create_source(&output, &qh, ());
+        let _osession = copy.create_session(&osrc, ext_copy_manager::Options::empty(), &qh, ());
+        c.sync();
+        let want: Vec<String> = if offered {
+            vec![
+                "size 1000x600".into(),
+                "shm".into(),
+                "dmabuf device 0x102030405060708".into(),
+                format!("dmabuf {argb:#x} [0, ffffffffffffff]"),
+                format!("dmabuf {xrgb:#x} [0]"),
+                "done".into(),
+            ]
+        } else {
+            vec!["size 1000x600".into(), "shm".into(), "done".into()]
+        };
+        assert_eq!(c.app.cap_events, want, "offered: {offered}");
+
+        // A window capture stays shm either way.
+        c.app.cap_events.clear();
+        let src = sources.create_source(&handle, &qh, ());
+        let _session = copy.create_session(&src, ext_copy_manager::Options::empty(), &qh, ());
+        c.sync();
+        assert_eq!(c.app.cap_events, ["size 320x200", "shm", "done"]);
+
+        // wlr-screencopy: a linux_dmabuf per format, before buffer_done.
+        let sc: sc_manager::ZwlrScreencopyManagerV1 = c.globals.bind(&qh, 1..=3, ()).unwrap();
+        let wl_out: wl_output::WlOutput = c.globals.bind(&qh, 1..=4, ()).unwrap();
+        let _f = sc.capture_output(0, &wl_out, &qh, ());
+        c.sync();
+        let formats: Vec<u32> = c.app.linux_dmabuf.iter().map(|f| f.0).collect();
+        assert_eq!(formats, if offered { vec![argb, xrgb] } else { vec![] });
+        assert!(c.app.linux_dmabuf.iter().all(|f| (f.1, f.2) == (1000, 600)));
+        assert!(c.app.export_done);
+        let _ = list;
+    }
 }

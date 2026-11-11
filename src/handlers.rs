@@ -121,6 +121,7 @@ impl CompositorHandler for Uwc {
         }
 
         self.layer_commit(&root);
+        self.pace_hidden_window(&root);
 
         self.popups.commit(surface);
         if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
@@ -434,7 +435,19 @@ impl XdgShellHandler for Uwc {
         }
     }
 
-    fn title_changed(&mut self, _surface: ToplevelSurface) {
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        // `UWC_DEBUG_PANIC=1`: a window titled "uwc-debug-panic" panics here, inside a protocol handler,
+        // to test that the session survives one (see `serve` in main.rs).
+        if std::env::var_os("UWC_DEBUG_PANIC").is_some() {
+            let title = smithay::wayland::compositor::with_states(surface.wl_surface(), |s| {
+                s.data_map
+                    .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                    .and_then(|d| d.lock().ok().and_then(|d| d.title.clone()))
+            });
+            if title.as_deref() == Some("uwc-debug-panic") {
+                panic!("uwc-debug-panic title");
+            }
+        }
         self.ipc.dirty = true;
     }
 

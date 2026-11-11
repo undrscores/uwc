@@ -182,6 +182,7 @@ pub static DECO: &[Opt<Deco>] = option_table!(Deco;
     "opacity" => opacity (0, 1),
     "inactive-opacity" => inactive_opacity (0, 1),
     "inactive-dim" => inactive_dim (0, 1),
+    "blur-radius" => blur_radius (0, 128),
     "border-shader" => border_shader,
 );
 
@@ -229,6 +230,7 @@ pub static GLOBAL: &[Opt<Config>] = option_table!(Config;
     "hardware-cursor" => hardware_cursor,
     "direct-scanout" => direct_scanout,
     "explicit-sync" => explicit_sync,
+    "capture-dmabuf" => capture_dmabuf,
     "background-shader" => background_shader,
     "session-restore" => session_restore,
     "xwayland" => xwayland,

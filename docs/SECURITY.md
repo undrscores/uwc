@@ -5,14 +5,22 @@ does not. Report problems privately to the repository owner rather than in a pub
 
 ## Trust boundaries
 
-- **Wayland clients are not sandboxed from each other.** Any program that can connect to the Wayland socket (it lives
-  in your private `$XDG_RUNTIME_DIR`) can use every protocol uwc offers, including the privileged ones: screen and
-  window capture (wlr-screencopy, ext-image-copy-capture, hyprland-toplevel-export), reading and setting the
-  clipboard (data-control), typing and clicking for you (virtual keyboard and pointer), becoming the input method,
-  locking the session (ext-session-lock), changing outputs (output-management, power management), and taking
-  the keyboard with a layer surface or a shortcuts inhibitor. This matches the other wlroots-style compositors. A
-  Flatpak or other sandbox must not be handed the real socket; uwc does not yet implement security-context to give
-  sandboxed apps a restricted one. Treat "can reach the socket" as "is you".
+- **Wayland clients on the normal socket are not sandboxed from each other.** Any program that can connect to the
+  Wayland socket (it lives in your private `$XDG_RUNTIME_DIR`) can use every protocol uwc offers, including the
+  privileged ones: screen and window capture (wlr-screencopy, ext-image-copy-capture, hyprland-toplevel-export),
+  reading and setting the clipboard (data-control), typing and clicking for you (virtual keyboard and pointer),
+  becoming the input method, locking the session (ext-session-lock), changing outputs (output-management, power
+  management), and taking the keyboard with a layer surface or a shortcuts inhibitor. This matches the other
+  wlroots-style compositors. Treat "can reach the socket" as "is you".
+- **Sandboxed apps get a restricted socket** (`wp_security_context_v1`: Flatpak, bubblewrap setups, anything that
+  speaks it). A client that connected through one is not shown the privileged globals at all: layer shell, screencopy,
+  both image-capture families and the toplevel lists and export, virtual keyboard and pointer, input methods, data
+  control, session lock, output and power management, workspaces, and security-context itself. It keeps what an
+  ordinary app needs (xdg-shell, seat, clipboard and drag and drop through the data device, dmabuf, ...).
+  `tests/headless.rs` checks the list. A **new privileged global must hide itself from sandboxed clients** (a
+  smithay filter, or `can_view` on the `GlobalDispatch`, with `sandbox::is_sandboxed`). Not hidden, because
+  they are not dangerous enough to break apps for: idle-notify, xdg-activation, pointer constraints, shortcuts
+  inhibit. Screen sharing for a sandboxed app goes through the portal, which runs outside the sandbox.
 - **The control socket** (`$XDG_RUNTIME_DIR/uwc-*.sock`, mode 0600 in a private directory) can move, resize and
   close windows and change options. It cannot run programs: hooks and key binds come from the config file only.
   Anything that can write your config can run commands as you, as with any compositor.
@@ -35,6 +43,6 @@ does not. Report problems privately to the repository owner rather than in a pub
 
 ## Known limits
 
-- A panic inside a Wayland protocol handler aborts uwc (see docs/STATUS.md); the session file is at most 5 s old.
+- A panic inside a Wayland protocol handler is caught like any other (see docs/STATUS.md); three in ten seconds end the session, with the session file saved.
 - Dependencies are not audited here: run `cargo audit` in CI or before a release.
 - The udev backend, NVIDIA and real input devices are untested on hardware.

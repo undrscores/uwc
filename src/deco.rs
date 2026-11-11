@@ -273,11 +273,70 @@ void main() {
 }
 "#;
 
+/// The two passes of the dual Kawase blur (blur.rs): taps around each pixel, at `u_halfpixel * u_offset`.
+const BLUR_HEAD: &str = r#"
+//_DEFINES
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec2 u_halfpixel;
+uniform float u_offset;
+"#;
+
+const BLUR_DOWN: &str = r#"
+void main() {
+    vec2 hp = u_halfpixel * u_offset;
+    vec4 sum = texture2D(tex, v_coords) * 4.0;
+    sum += texture2D(tex, v_coords - hp);
+    sum += texture2D(tex, v_coords + hp);
+    sum += texture2D(tex, v_coords + vec2(hp.x, -hp.y));
+    sum += texture2D(tex, v_coords - vec2(hp.x, -hp.y));
+    gl_FragColor = sum / 8.0 * alpha;
+}
+"#;
+
+const BLUR_UP: &str = r#"
+void main() {
+    vec2 hp = u_halfpixel * u_offset;
+    vec4 sum = texture2D(tex, v_coords + vec2(-hp.x * 2.0, 0.0));
+    sum += texture2D(tex, v_coords + vec2(-hp.x, hp.y)) * 2.0;
+    sum += texture2D(tex, v_coords + vec2(0.0, hp.y * 2.0));
+    sum += texture2D(tex, v_coords + vec2(hp.x, hp.y)) * 2.0;
+    sum += texture2D(tex, v_coords + vec2(hp.x * 2.0, 0.0));
+    sum += texture2D(tex, v_coords + vec2(hp.x, -hp.y)) * 2.0;
+    sum += texture2D(tex, v_coords + vec2(0.0, -hp.y * 2.0));
+    sum += texture2D(tex, v_coords + vec2(-hp.x, -hp.y)) * 2.0;
+    gl_FragColor = sum / 12.0 * alpha;
+}
+"#;
+
 #[derive(Clone)]
 pub struct Shaders {
     pub boxes: GlesPixelProgram,
     pub shadow: GlesPixelProgram,
     pub round: GlesTexProgram,
+    /// (down, up) passes of the blur; `None` if they did not compile (windows then show no blur).
+    pub blur: Option<(GlesTexProgram, GlesTexProgram)>,
 }
 
 /// Cached per GL context; `None` once compiling failed.
@@ -383,15 +442,28 @@ impl Shaders {
             &[f4("u_box"), f1("u_radius"), f1("u_sigma"), f4("u_color"), f4("u_clip"), f1("u_clip_radius")],
         )?;
         let round = r.compile_custom_texture_shader(ROUND, &[f4("u_dst"), f4("u_rect"), f1("u_radius")])?;
-        Ok(Shaders { boxes, shadow, round })
+        let f2 = |n| UniformName::new(n, UniformType::_2f);
+        let uniforms = [f2("u_halfpixel"), f1("u_offset")];
+        let blur = match (
+            r.compile_custom_texture_shader(format!("{BLUR_HEAD}{BLUR_DOWN}"), &uniforms),
+            r.compile_custom_texture_shader(format!("{BLUR_HEAD}{BLUR_UP}"), &uniforms),
+        ) {
+            (Ok(d), Ok(u)) => Some((d, u)),
+            (a, b) => {
+                let e = a.err().or(b.err()).map(|e| e.to_string()).unwrap_or_default();
+                tracing::error!("blur shaders failed to compile, windows show no blur: {e}");
+                None
+            }
+        };
+        Ok(Shaders { boxes, shadow, round, blur })
     }
 }
 
-fn u4(name: &'static str, v: [f32; 4]) -> Uniform<'static> {
+pub fn u4(name: &'static str, v: [f32; 4]) -> Uniform<'static> {
     Uniform::new(name, UniformValue::_4f(v[0], v[1], v[2], v[3]))
 }
 
-fn u1(name: &'static str, v: f32) -> Uniform<'static> {
+pub fn u1(name: &'static str, v: f32) -> Uniform<'static> {
     Uniform::new(name, UniformValue::_1f(v))
 }
 

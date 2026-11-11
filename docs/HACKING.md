@@ -40,6 +40,9 @@ src/rules.rs       window rules and the per-window decoration settings (`Deco`)
 shaders/           example user shaders (border, background)
 src/deco.rs        decoration shaders: rounded box/ring with gradients, shadow, rounded window content
 src/toplevels.rs   wlr-foreign-toplevel-management (the window list for taskbars and shells)
+src/blur.rs        background blur: a pre-pass draws what is behind a window, dual Kawase filter, element under the window
+src/presentation.rs  frame pacing: presentation-time, fifo, commit-timing
+src/sandbox.rs     security-context: sandboxed clients and the globals hidden from them
 src/capture.rs     drawing into a client's buffer (offscreen render, read back into shm)
 src/export.rs      hyprland-toplevel-export-v1: window previews
 src/protocols.rs   protocols no crate has, generated from protocols/*.xml

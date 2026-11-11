@@ -34,6 +34,7 @@ render_elements! {
     pub UwcElement<=GlesRenderer>;
     Surface=RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     Rounded=RoundedElement,
+    Blur=crate::blur::BlurElement,
     Shader=ShaderElement,
     Solid=SolidColorRenderElement,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
@@ -123,6 +124,13 @@ impl Uwc {
             self.animating = true;
         }
         let shaders = Shaders::get(renderer);
+        let blurred: Vec<u32> = self
+            .clients
+            .iter()
+            .filter(|c| self.visible_on(m, c) && !c.fullscreen && self.deco_for(c).blur_radius > 0.0)
+            .map(|c| c.id)
+            .collect();
+        self.blur.ensure(&blurred);
         // User border shaders the visible windows use, compiled (once) before drawing.
         let mut user: HashMap<String, GlesPixelProgram> = HashMap::new();
         let wanted: Vec<String> = self
@@ -209,6 +217,9 @@ impl Uwc {
             );
         }
         out.extend(self.ime_popup_elements(renderer, m, scale));
+        // Blurred backdrops need the whole scene, so they are made last (blur.rs).
+        let clear = self.tag_look().0;
+        self.fill_blurs(renderer, &mut out, scale, clear);
         out
     }
 
@@ -425,6 +436,19 @@ impl Uwc {
                         ShaderElement::rounded_box(s, border_id, commit, outer.to_i32_round(), radius, bw, &look.border)
                     }
                 }));
+            }
+            // The blurred backdrop sits under the content, border and backdrop colour, over the shadow;
+            // `fill_blurs` makes it once the whole scene is known.
+            if o.blur_radius > 0.0 && c.fx.alpha > 0.0 && s.blur.is_some() {
+                out.push(UwcElement::from(crate::blur::BlurElement::new(
+                    &self.blur,
+                    s,
+                    c.id,
+                    content.to_i32_round(),
+                    o.blur_radius * k,
+                    inner_radius,
+                    c.fx.alpha as f32,
+                )));
             }
             if look.shadow_size > 0.0 && look.shadow_color[3] > 0.0 {
                 let spread = o.shadow_spread * k;
