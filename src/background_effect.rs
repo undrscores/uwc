@@ -1,6 +1,6 @@
 //! ext-background-effect-v1: a surface (a bar, through wlr-layer-shell) asks for the background
 //! behind it to be blurred (the `blur` capability). The radius is uwc's own `blur-radius` option;
-//! the client only says which part of its surface (`set_blur_region`, null = the whole surface).
+//! the client only says which part of its surface (`set_blur_region`; null or empty = no blur).
 //! uwc blurs that region's bounding box under the surface, the same way as a blurred window
 //! (blur.rs), so bars and the like can be translucent with a real backdrop.
 
@@ -19,7 +19,7 @@ use wayland_protocols::ext::background_effect::v1::server::{
 use crate::state::Uwc;
 
 /// What one surface asked for: a key for blur.rs's per-surface textures, and the region to blur
-/// (surface-local, logical px; `None` = the whole surface).
+/// (surface-local, logical px; `None` = empty = no blur, as the protocol says).
 pub struct BgEffect {
     pub key: u32,
     pub region: Option<Rectangle<i32, Logical>>,

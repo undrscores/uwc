@@ -41,3 +41,9 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 [profile.dev.package.smithay]
 debug-assertions = false
 overflow-checks = false
+
+# smithay 0.7.0 kills a client that commits a null buffer right after destroying a layer surface (the usual
+# way a bar, overlay or dropdown closes): its size check runs on the state the destroy just reset. The vendored
+# copy is smithay 0.7.0 plus a guard in wlr_layer/handlers.rs; drop it once smithay fixes this upstream.
+[patch.crates-io]
+smithay = { path = "vendor/smithay" }
