@@ -59,6 +59,7 @@ impl Uwc {
             tags: ALLTAGS,
             mapped: true,
             ever_mapped: true,
+            floating: false,
             urgent: false,
             pin: Some(pin),
             pin_mon: m,

@@ -88,6 +88,17 @@ pub enum Action {
     JumpHints,
     /// Switch to the next keyboard layout.
     NextLayout,
+    /// Tile the tag in use with a layout (and keep it tiled), tile it once, stop tiling it, or step to
+    /// the next layout (tiling.rs).
+    Tile(crate::layout::Layout),
+    TileOnce(crate::layout::Layout),
+    TileOff,
+    TileCycle,
+    /// Change the share the master column / first split takes, or the number of masters, by this much.
+    TileRatio(f64),
+    TileMasters(i32),
+    /// Keep the focused window out of the layouts, or put it back.
+    ToggleFloat,
     /// A frame around the focused window / remove the focused window's frame / fit the view to it
     /// / fit the next or previous frame (frames.rs).
     FrameNew,
@@ -255,6 +266,10 @@ pub struct Config {
     pub edge_pan_size: f64,
     pub hint_keys: String,
     pub frame_color: Color,
+    pub tile_gap: i32,
+    pub tile_inner_gap: i32,
+    pub tile_ratio: f64,
+    pub tile_masters: u32,
     pub snap_distance: f64,
     pub snap_grid: f64,
     pub snap_color: Color,
@@ -395,6 +410,10 @@ impl Config {
             edge_pan_size: 12.0,
             hint_keys: "asdfghjkl".into(),
             frame_color: [0.478, 0.635, 0.969, 1.0],
+            tile_gap: 12,
+            tile_inner_gap: 12,
+            tile_ratio: 0.55,
+            tile_masters: 1,
             snap_distance: 8.0,
             snap_grid: 0.0,
             snap_color: [1.0, 0.416, 0.757, 1.0],
@@ -852,6 +871,28 @@ fn parse_action(n: &Node) -> Result<Action> {
         "toggle-shortcuts-inhibit" => Action::ToggleShortcutsInhibit,
         "jump-hints" => Action::JumpHints,
         "next-layout" => Action::NextLayout,
+        "tile" | "tile-once" => {
+            let name = args.first().and_then(Val::as_str).unwrap_or("");
+            let l = crate::layout::Layout::parse(name)
+                .ok_or_else(|| anyhow!("{} needs a layout: {}", n.name, crate::layout::Layout::names()))?;
+            if n.name == "tile" {
+                Action::Tile(l)
+            } else {
+                Action::TileOnce(l)
+            }
+        }
+        "tile-off" => Action::TileOff,
+        "tile-cycle" => Action::TileCycle,
+        "tile-ratio" => {
+            let d =
+                args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("tile-ratio needs a change, e.g. 0.05"))?;
+            Action::TileRatio(range(d, -0.8, 0.8)?)
+        }
+        "tile-masters" => {
+            let d = args.first().and_then(Val::as_num).ok_or_else(|| anyhow!("tile-masters needs a change, e.g. 1"))?;
+            Action::TileMasters(range(d.round(), -16.0, 16.0)? as i32)
+        }
+        "toggle-float" => Action::ToggleFloat,
         "frame-new" => Action::FrameNew,
         "frame-remove" => Action::FrameRemove,
         "frame-fit" => Action::FrameFit,

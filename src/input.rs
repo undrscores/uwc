@@ -437,8 +437,10 @@ impl Uwc {
         if c.fullscreen {
             return;
         }
-        let orig = c.pin.unwrap_or(c.canvas);
-        self.drag = Some(Drag::Move { id: c.id, start: self.cursor, orig });
+        let (id, orig) = (c.id, c.pin.unwrap_or(c.canvas));
+        // Taking a tile by hand takes it out of the layout.
+        self.release_from_tiling(id);
+        self.drag = Some(Drag::Move { id, start: self.cursor, orig });
         self.drag_last = self.cursor;
     }
 
@@ -447,7 +449,9 @@ impl Uwc {
         if c.fullscreen {
             return;
         }
-        self.drag = Some(Drag::Resize { id: c.id, start: self.cursor, orig: c.size() });
+        let (id, orig) = (c.id, c.size());
+        self.release_from_tiling(id);
+        self.drag = Some(Drag::Resize { id, start: self.cursor, orig });
         self.drag_last = self.cursor;
     }
 

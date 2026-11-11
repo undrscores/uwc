@@ -3154,3 +3154,204 @@ fn text_input_follows_the_keyboard_focus() {
     c.wait_ti_leave();
     assert!(c.app.ti_leave, "text input left with the focus");
 }
+
+// ---- tiling --------------------------------------------------------------------------------------
+
+/// A window's (x, y, width, height) over IPC.
+fn rect4(s: &Value, title: &str) -> (i64, i64, i64, i64) {
+    let w = win(s, title);
+    let n = |k: &str| w[k].as_i64().unwrap();
+    (n("x"), n("y"), n("width"), n("height"))
+}
+
+/// One client per window, so each follows its own configure.
+struct Apps(Vec<(Client, Window, String)>);
+
+impl Apps {
+    fn open(&mut self, uwc: &mut Uwc, title: &str) {
+        let mut c = uwc.connect();
+        let w = c.window(title, 300, 200);
+        let n = self.0.len() + 1;
+        uwc.wait(title, |s| s["windows"].as_array().unwrap().len() == n);
+        self.0.push((c, w, title.to_string()));
+        self.follow();
+    }
+
+    /// Draw every window at the size it was last asked for, like a toolkit.
+    fn follow(&mut self) {
+        for (c, w, name) in &mut self.0 {
+            c.follow_configure(name, w);
+        }
+    }
+
+    /// Follow configures until `title` has `want`, since sizes arrive a round trip after the move.
+    fn wait_rect(&mut self, uwc: &mut Uwc, title: &str, want: (i64, i64, i64, i64)) -> Value {
+        let start = Instant::now();
+        loop {
+            self.follow();
+            let s = uwc.state();
+            if rect4(&s, title) == want {
+                return s;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "{title} is {:?}, wanted {want:?}", rect4(&s, title));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+fn tiling_uwc(name: &str) -> Uwc {
+    let mut uwc = Uwc::start(name, None);
+    uwc.ok("set tile-gap 10");
+    uwc.ok("set tile-inner-gap 10");
+    uwc.ok("set tile-ratio 0.5");
+    uwc
+}
+
+#[test]
+fn tiling_lays_windows_out_and_keeps_them_there() {
+    // The screen is 1000x600 at the origin: with gaps of 10 the master column is 485 wide, and the
+    // stack beside it shares 580 px of height.
+    let mut uwc = tiling_uwc("tiling");
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B", "C"] {
+        apps.open(&mut uwc, t);
+    }
+    let ids: Vec<u64> = ["A", "B", "C"].iter().map(|t| win(&uwc.state(), t)["id"].as_u64().unwrap()).collect();
+
+    uwc.ok("tile master-stack");
+    apps.wait_rect(&mut uwc, "A", (10, 10, 485, 580));
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 285));
+    let s = apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    let t = &s["monitors"][0]["tags"][0]["tiling"];
+    assert_eq!(
+        (t["layout"].clone(), t["ratio"].clone(), t["masters"].clone()),
+        ("master-stack".into(), 0.5.into(), 1.into())
+    );
+    assert_eq!(
+        (t["x"].clone(), t["y"].clone(), t["width"].clone(), t["height"].clone()),
+        (0.into(), 0.into(), 1000.into(), 600.into())
+    );
+    assert!(s["monitors"][0]["tags"][1]["tiling"].is_null(), "only the tag in use is tiled");
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == false));
+
+    // Panning only moves the camera: the tiles stay where they are on the canvas.
+    uwc.ok("pan 300 0");
+    let s = uwc.state();
+    assert_eq!(rect4(&s, "B"), (505, 10, 485, 285));
+    assert_eq!(s["monitors"][0]["tags"][0]["tiling"]["x"], 0);
+    uwc.ok("home");
+
+    // A new window joins the layout: the stack now has three.
+    apps.open(&mut uwc, "D");
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 187));
+    apps.wait_rect(&mut uwc, "C", (505, 207, 485, 187));
+    apps.wait_rect(&mut uwc, "D", (505, 404, 485, 186));
+    assert_eq!(rect4(&uwc.state(), "A"), (10, 10, 485, 580));
+
+    // Minimizing one closes the gap; restoring puts it back in.
+    let id_d = win(&uwc.state(), "D")["id"].as_u64().unwrap();
+    uwc.ok(&format!("minimize {id_d}"));
+    apps.wait_rect(&mut uwc, "C", (505, 305, 485, 285));
+    uwc.ok(&format!("restore {id_d}"));
+    apps.wait_rect(&mut uwc, "D", (505, 404, 485, 186));
+
+    // Moving a tile by hand takes it out of the layout, and the others close up around the gap.
+    uwc.ok(&format!("move {} 300 250", ids[1]));
+    let s = apps.wait_rect(&mut uwc, "C", (505, 10, 485, 285));
+    assert_eq!(rect4(&s, "B").0, 300);
+    assert_eq!((win(&s, "B")["floating"].clone(), win(&s, "C")["floating"].clone()), (true.into(), false.into()));
+    apps.wait_rect(&mut uwc, "D", (505, 305, 485, 285));
+    // Floated windows can be put back.
+    uwc.ok(&format!("unfloat {}", ids[1]));
+    apps.wait_rect(&mut uwc, "B", (505, 10, 485, 187));
+    uwc.ok(&format!("float {}", ids[1]));
+    apps.wait_rect(&mut uwc, "D", (505, 305, 485, 285));
+    uwc.ok(&format!("unfloat {}", ids[1]));
+
+    // Layout options re-place everything: two masters, and a wider master column.
+    uwc.ok("tile masters 2");
+    apps.wait_rect(&mut uwc, "B", (10, 305, 485, 285));
+    uwc.ok("tile masters 1");
+    uwc.ok("tile ratio 0.6");
+    let s = apps.wait_rect(&mut uwc, "A", (10, 10, 582, 580));
+    assert_eq!(s["monitors"][0]["tags"][0]["tiling"]["ratio"], 0.6);
+    assert!(uwc.cmd("tile ratio 2").get("error").is_some());
+    assert!(uwc.cmd("tile nonsense").get("error").is_some());
+    assert!(uwc.cmd("float 9999").get("error").is_some());
+
+    // Stepping through the layouts ends in off, which leaves the windows where they are.
+    uwc.ok("tile ratio 0.5");
+    let mut seen = vec![];
+    for _ in 0..5 {
+        uwc.ok("tile cycle");
+        seen.push(uwc.state()["monitors"][0]["tags"][0]["tiling"]["layout"].clone());
+    }
+    let want: Vec<Value> =
+        vec!["dwindle".into(), "spiral".into(), "columns".into(), Value::Null, "master-stack".into()];
+    assert_eq!(seen, want);
+    uwc.ok("tile off");
+    apps.follow();
+    let s = uwc.state();
+    assert!(s["monitors"][0]["tags"][0]["tiling"].is_null());
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == true));
+    let before = rect4(&s, "C");
+    apps.open(&mut uwc, "E");
+    assert_eq!(rect4(&uwc.state(), "C"), before, "nothing is tiled any more");
+}
+
+#[test]
+fn tile_once_arranges_and_leaves_the_windows_floating() {
+    let mut uwc = tiling_uwc("tileonce");
+    let mut apps = Apps(vec![]);
+    for t in ["A", "B"] {
+        apps.open(&mut uwc, t);
+    }
+    uwc.ok("tile once columns");
+    apps.wait_rect(&mut uwc, "A", (10, 10, 485, 580));
+    let s = apps.wait_rect(&mut uwc, "B", (505, 10, 485, 580));
+    assert!(s["monitors"][0]["tags"][0]["tiling"].is_null(), "nothing stays on");
+    assert!(s["windows"].as_array().unwrap().iter().all(|w| w["floating"] == true));
+    // A third window is left alone, and moving one is just moving it.
+    apps.open(&mut uwc, "C");
+    assert_eq!(rect4(&uwc.state(), "A"), (10, 10, 485, 580));
+    let ia = win(&uwc.state(), "A")["id"].as_u64().unwrap();
+    uwc.ok(&format!("move {ia} 40 40"));
+    assert_eq!(rect4(&uwc.state(), "B"), (505, 10, 485, 580));
+}
+
+#[test]
+fn the_tile_area_is_what_the_view_shows_when_the_layout_is_turned_on() {
+    let mut uwc = tiling_uwc("tilearea");
+    let mut apps = Apps(vec![]);
+    apps.open(&mut uwc, "A");
+    uwc.ok("pan 500 100");
+    uwc.ok("tile columns");
+    let s = apps.wait_rect(&mut uwc, "A", (510, 110, 980, 580));
+    assert_eq!(s["monitors"][0]["tags"][0]["tiling"]["x"], 500);
+    // Zoomed out it covers more canvas; run `tile` again to re-anchor.
+    uwc.ok("zoom 0.5");
+    uwc.ok("tile columns");
+    let s = uwc.state();
+    let t = &s["monitors"][0]["tags"][0]["tiling"];
+    assert_eq!((t["width"].clone(), t["height"].clone()), (2000.into(), 1200.into()));
+}
+
+#[test]
+fn tiling_leaves_rule_floated_windows_and_dialogs_alone() {
+    let cfg = "options {\n tile-gap 10\n tile-inner-gap 10\n tile-ratio 0.5\n}\nrule {\n match title=\"Float*\"\n open { float }\n}\n";
+    let mut uwc = Uwc::start("tilefloat", Some(cfg));
+    let mut apps = Apps(vec![]);
+    apps.open(&mut uwc, "A");
+    apps.open(&mut uwc, "Float1");
+    uwc.ok("tile master-stack");
+    let s = apps.wait_rect(&mut uwc, "A", (10, 10, 980, 580));
+    assert_eq!(win(&s, "Float1")["floating"], true);
+    assert_eq!(rect4(&s, "Float1").2, 300, "the floating window keeps its own size");
+
+    // A dialog opens over its parent instead of taking a slot.
+    let (c, parent, _) = &mut apps.0[0];
+    let _dlg = c.window_with_parent("Dialog", 200, 100, Some(&*parent));
+    let s = uwc.wait("dialog", |s| s["windows"].as_array().unwrap().len() == 3);
+    assert_eq!(win(&s, "Dialog")["floating"], true);
+    assert_eq!(rect4(&s, "A"), (10, 10, 980, 580));
+}

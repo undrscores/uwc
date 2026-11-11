@@ -181,6 +181,7 @@ impl Uwc {
         if !self.clients[i].ever_mapped {
             self.clients[i].ever_mapped = true;
             let open = self.clients[i].open.clone();
+            self.clients[i].floating = open.float;
             let size = self.clients[i].size();
             let vp = self.viewport();
             let (ax, ay, aw, ah) = self.work_area();
@@ -253,12 +254,13 @@ impl Uwc {
         if first_map {
             self.run_hook(crate::hooks::Hook::WindowOpen, self.client_index(id));
         }
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
 
     /// The window `i` is a dialog of, if any.
-    fn parent_of(&self, i: usize) -> Option<usize> {
+    pub fn parent_of(&self, i: usize) -> Option<usize> {
         let parent = match &self.clients[i].shell {
             Shell::Wayland(w) => w.toplevel()?.parent().and_then(|s| self.client_by_surface(&s)),
             Shell::X11(s) => {
@@ -284,6 +286,7 @@ impl Uwc {
                 self.drag = None;
             }
         }
+        self.retile_all();
         self.refresh_pointer();
         self.damage();
     }
@@ -314,6 +317,7 @@ impl XdgShellHandler for Uwc {
             tags: self.tagset(),
             mapped: false,
             ever_mapped: false,
+            floating: false,
             urgent: false,
             pin: None,
             pin_mon: 0,
