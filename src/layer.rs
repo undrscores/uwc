@@ -199,6 +199,7 @@ impl Uwc {
     /// A commit on a layer surface: lay the layers out again, configure, and follow its keyboard wishes.
     /// Returns false if `root` is not a layer surface.
     pub fn layer_commit(&mut self, root: &WlSurface) -> bool {
+        clamp_layer_state(root);
         let Some(o) = self
             .monitors
             .iter()
@@ -371,3 +372,26 @@ impl WlrLayerShellHandler for Uwc {
 }
 
 delegate_layer_shell!(Uwc);
+
+/// The numbers a layer surface asked for are the client's: margins, size and exclusive zone far beyond any
+/// screen are cut back before the layout maths (smithay's, which overflows on them) sees them.
+fn clamp_layer_state(root: &WlSurface) {
+    use smithay::wayland::shell::wlr_layer::{ExclusiveZone, LayerSurfaceCachedState, LAYER_SURFACE_ROLE};
+    const LIMIT: i32 = 100_000;
+    if smithay::wayland::compositor::get_role(root) != Some(LAYER_SURFACE_ROLE) {
+        return;
+    }
+    with_states(root, |s| {
+        let mut guard = s.cached_state.get::<LayerSurfaceCachedState>();
+        let st = guard.current();
+        let c = |v: i32| v.clamp(-LIMIT, LIMIT);
+        st.margin.top = c(st.margin.top);
+        st.margin.bottom = c(st.margin.bottom);
+        st.margin.left = c(st.margin.left);
+        st.margin.right = c(st.margin.right);
+        st.size = (st.size.w.clamp(0, LIMIT), st.size.h.clamp(0, LIMIT)).into();
+        if let ExclusiveZone::Exclusive(z) = st.exclusive_zone {
+            st.exclusive_zone = ExclusiveZone::Exclusive(z.min(LIMIT as u32));
+        }
+    });
+}

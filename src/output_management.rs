@@ -164,9 +164,13 @@ impl Uwc {
         }
         for h in &heads {
             if let Some((w, hh, _)) = h.mode {
-                if w < 1 || hh < 1 {
+                // A client picks these: keep them to what a display can be.
+                if !(1..=16384).contains(&w) || !(1..=16384).contains(&hh) {
                     return false;
                 }
+            }
+            if h.mode.is_some_and(|(_, _, r)| !(0..=1_000_000).contains(&r)) {
+                return false;
             }
             if let Some(s) = h.scale {
                 if !(0.1..=10.0).contains(&s) {

@@ -119,10 +119,11 @@ impl Request {
         let num = |i: usize| -> Result<f64, String> {
             let a = args.get(i).ok_or_else(|| format!("`{cmd}` needs more arguments"))?;
             let v: f64 = a.parse().map_err(|_| format!("`{a}` is not a number"))?;
-            if v.is_finite() {
+            // Far beyond any canvas, and small enough that arithmetic on it cannot overflow to infinity.
+            if v.is_finite() && v.abs() <= 1e9 {
                 Ok(v)
             } else {
-                Err(format!("`{a}` is not a finite number"))
+                Err(format!("`{a}` is not a number between -1000000000 and 1000000000"))
             }
         };
         let id = |i: usize| -> Result<u32, String> {

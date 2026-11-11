@@ -37,8 +37,8 @@ IPC, improved where uwm was awkward.
 - **Hot corners.** Any action when the pointer rests in a screen corner or edge.
 - **Scriptable.** `hooks { }` runs a command on window open, close, focus, tag change or urgency. A control socket (`uwc msg`) speaks one JSON object per line: state, subscribe, get/set options,
   move and focus windows, pan and zoom.
-- **Doesn't fall over.** `uwc doctor` checks your seat, GPU and libraries before the first run; a bug in a handler is
-  logged and survived instead of taking every window down.
+- **Doesn't fall over.** `uwc doctor` checks your seat, GPU and libraries before the first run; a bug in the IPC, input or
+  drawing code is logged and survived instead of taking every window down.
 - **Session restore.** Window positions, sizes, tags and views come back when the apps do.
 
 ## Installation
@@ -104,6 +104,7 @@ or `uwc msg subscribe`. Your own shaders are documented in `config.def.kdl`, wit
 - [INSTALL.md](INSTALL.md): installing, first start, startup script, screen sharing, troubleshooting
 - [docs/STATUS.md](docs/STATUS.md): what works, what is untested, the roadmap
 - [docs/NVIDIA.md](docs/NVIDIA.md): kernel and driver requirements
+- [docs/SECURITY.md](docs/SECURITY.md): what uwc trusts and what it defends against
 - [docs/HACKING.md](docs/HACKING.md): building and testing, source layout, coming from uwm
 - [config.def.kdl](config.def.kdl): the default config and every option
 

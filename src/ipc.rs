@@ -40,12 +40,43 @@ impl Drop for Ipc {
     }
 }
 
+/// Where the control socket lives: `$XDG_RUNTIME_DIR` (which logind makes private), else a directory
+/// of our own under the temp dir, created for the owner alone and refused if it is anyone else's
+/// (a shared /tmp is where another user could plant a socket or a symlink).
+pub fn socket_dir() -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return Ok(PathBuf::from(d));
+    }
+    // Safety-free uid lookup: the owner of our own /proc entry.
+    let uid = std::fs::metadata("/proc/self")?.uid();
+    let dir = std::env::temp_dir().join(format!("uwc-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    let meta = std::fs::symlink_metadata(&dir)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0 {
+        anyhow::bail!(
+            "{} exists but is not a private directory of yours: set XDG_RUNTIME_DIR (a login through logind does) or remove it",
+            dir.display()
+        );
+    }
+    Ok(dir)
+}
+
 impl Ipc {
     pub fn new(handle: &LoopHandle<'static, Uwc>, wayland_display: &OsStr) -> anyhow::Result<Ipc> {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let dir = socket_dir()?;
         let path = dir.join(format!("uwc-{}.sock", wayland_display.to_string_lossy()));
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
+        // The control socket can move and close windows and change options: only its owner may connect.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         listener.set_nonblocking(true)?;
         handle
             .insert_source(Generic::new(listener, Interest::READ, Mode::Level), |_, listener, state| {
@@ -91,7 +122,15 @@ impl Uwc {
                             state.ipc_drop(id);
                             return Ok(PostAction::Remove);
                         }
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            // Stop reading a line that cannot be a command: a writer faster than this loop
+                            // must not be able to grow the buffer without bound.
+                            if buf.len() > MAX_LINE && !buf.contains(&b'\n') {
+                                state.ipc_drop(id);
+                                return Ok(PostAction::Remove);
+                            }
+                        }
                         Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                         Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                         Err(_) => {
@@ -379,6 +418,12 @@ impl Uwc {
                 };
                 match cmd {
                     F::Add { x, y, w, h, label } => {
+                        if w <= 0.0 || h <= 0.0 {
+                            return Err("a frame needs a positive width and height".into());
+                        }
+                        if self.frames.list.len() >= crate::frames::MAX_FRAMES {
+                            return Err(format!("at most {} frames", crate::frames::MAX_FRAMES));
+                        }
                         let tags = self.tagset;
                         self.frame_add(smithay::utils::Rectangle::new((x, y).into(), (w, h).into()), &label, tags);
                     }

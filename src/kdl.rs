@@ -61,12 +61,17 @@ struct Parser<'a> {
     s: &'a [u8],
     p: usize,
     line: usize,
+    /// How many blocks deep we are.
+    depth: usize,
 }
+
+/// No real config nests this deep; without a limit a pasted `{{{{...` recurses until the stack is gone.
+const MAX_DEPTH: usize = 32;
 
 type R<T> = Result<T, String>;
 
 pub fn parse(src: &str) -> R<Vec<Node>> {
-    let mut p = Parser { s: src.as_bytes(), p: 0, line: 1 };
+    let mut p = Parser { s: src.as_bytes(), p: 0, line: 1, depth: 0 };
     p.nodes(false).map_err(|m| format!("line {}: {m}", p.line))
 }
 
@@ -207,7 +212,13 @@ impl Parser<'_> {
             }
             if self.at(0) == b'{' {
                 self.p += 1;
-                let kids = self.nodes(true)?;
+                if self.depth >= MAX_DEPTH {
+                    return Err(format!("blocks nested more than {MAX_DEPTH} deep"));
+                }
+                self.depth += 1;
+                let kids = self.nodes(true);
+                self.depth -= 1;
+                let kids = kids?;
                 if !slash {
                     node.kids.extend(kids);
                 }
@@ -289,6 +300,14 @@ mod tests {
         assert_eq!(n[0].kids.len(), 2);
         assert_eq!(n[0].kids[1].arg_str(0), Some("x"));
         assert_eq!(n[1].name, "d");
+    }
+
+    #[test]
+    fn deep_nesting_is_an_error_not_a_stack_overflow() {
+        let ok = format!("{}{}", "a {".repeat(32), "}".repeat(32));
+        assert!(parse(&ok).is_ok());
+        let deep = format!("{}{}", "a {".repeat(100_000), "}".repeat(100_000));
+        assert!(parse(&deep).unwrap_err().contains("nested more than"));
     }
 
     #[test]

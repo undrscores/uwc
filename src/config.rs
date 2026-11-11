@@ -911,6 +911,83 @@ mod tests {
         assert!((c.deco.focus_color[0] - 1.0).abs() < 1e-6 && (c.deco.focus_color[1] - 0.533).abs() < 1e-3);
     }
 
+    /// Garbage must be an error, never a panic or a stack overflow: configs come from files a user pastes
+    /// from the internet, and `rule { }` lines arrive over the control socket.
+    #[test]
+    fn random_text_never_crashes_the_parsers() {
+        let tokens = [
+            "options",
+            "binds",
+            "rule",
+            "match",
+            "open",
+            "tag",
+            "hot-zones",
+            "hooks",
+            "input",
+            "keyboard",
+            "monitor",
+            "include",
+            "vars",
+            "{",
+            "}",
+            "{",
+            "}",
+            ";",
+            "\n",
+            " ",
+            "\"",
+            "\"x\"",
+            "\\",
+            "//",
+            "/*",
+            "*/",
+            "1",
+            "-1",
+            "1e999",
+            "nan",
+            "0x10",
+            "#ff0000",
+            "\"#zzzz\"",
+            "Mod+Q",
+            "Mod+",
+            "spawn",
+            "zoom",
+            "app-id=",
+            "title=\"*\"",
+            "corner-radius",
+            "border-width",
+            "99999999999",
+            "\u{0}",
+            "\u{1F600}",
+            "$accent",
+            "=",
+            "r#\"raw\"#",
+        ];
+        let mut x: u64 = 0x2545F4914F6CDD1D;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..3000 {
+            let n = (next() % 40) as usize;
+            let text: String = (0..n).map(|_| tokens[(next() % tokens.len() as u64) as usize]).collect();
+            if let Ok(nodes) = kdl::parse(&text) {
+                for n in &nodes {
+                    let _ = crate::rules::Rule::parse(n, &HashMap::new());
+                }
+            }
+            let _ = Config::parse(&text, Some(Path::new("/x/c.kdl")));
+        }
+        // Deep nesting is refused, not recursed into until the stack is gone.
+        for depth in [100, 10_000, 200_000] {
+            let deep = format!("{}{}", "a {".repeat(depth), "}".repeat(depth));
+            let _ = kdl::parse(&deep);
+        }
+    }
+
     #[test]
     fn the_shipped_themes_are_valid_configs() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");

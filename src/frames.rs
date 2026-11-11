@@ -55,6 +55,8 @@ pub enum FrameHit {
 }
 
 const MIN_SIZE: f64 = 80.0;
+/// More than anyone lays out by hand; stops a script from filling memory.
+pub const MAX_FRAMES: usize = 500;
 
 impl Uwc {
     fn frame_index(&self, id: u32) -> Option<usize> {

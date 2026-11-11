@@ -226,19 +226,25 @@ impl XwmHandler for Uwc {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        // Grant the request, in our coordinates for a managed window.
+        // Grant the request, in our coordinates for a managed window. An X client controls these
+        // numbers: sizes are kept to what a window can sensibly be (a u32 above i32::MAX would be
+        // negative here, and a negative `Size` is a bug).
+        let clamp = |v: u32| v.clamp(1, 16384) as i32;
         let g = s.geometry();
         let rect = match self.x11_client(&s) {
             Some(i) => {
                 let at = self.x11_screen_pos(&self.clients[i]);
                 Rectangle::new(
                     (x.unwrap_or(at.x), y.unwrap_or(at.y)).into(),
-                    Size::from((w.unwrap_or(g.size.w as u32) as i32, h.unwrap_or(g.size.h as u32) as i32)),
+                    Size::from((
+                        clamp(w.unwrap_or(g.size.w.max(1) as u32)),
+                        clamp(h.unwrap_or(g.size.h.max(1) as u32)),
+                    )),
                 )
             }
             None => Rectangle::new(
                 (x.unwrap_or(g.loc.x), y.unwrap_or(g.loc.y)).into(),
-                Size::from((w.unwrap_or(g.size.w as u32) as i32, h.unwrap_or(g.size.h as u32) as i32)),
+                Size::from((clamp(w.unwrap_or(g.size.w.max(1) as u32)), clamp(h.unwrap_or(g.size.h.max(1) as u32)))),
             ),
         };
         let _ = s.configure(rect);

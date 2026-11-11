@@ -213,9 +213,16 @@ impl Uwc {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        // Write then rename, so a crash mid-write cannot leave half a file.
+        // Write then rename, so a crash mid-write cannot leave half a file. The file lists window titles
+        // (document names, page titles): readable by its owner only.
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &text)?;
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::remove_file(&tmp);
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            f.write_all(text.as_bytes())?;
+        }
         std::fs::rename(&tmp, &path)?;
         self.session_written = Some(text);
         Ok(())
@@ -261,7 +268,10 @@ impl Uwc {
         }
         tracing::info!("session: {} remembered windows from {}", s.windows.len(), path.display());
         self.session_pool = s.windows;
-        for f in &s.frames {
+        for f in s.frames.iter().take(crate::frames::MAX_FRAMES) {
+            if !(f.width > 0.0 && f.height > 0.0 && f.x.is_finite() && f.y.is_finite()) {
+                continue;
+            }
             let rect = smithay::utils::Rectangle::new((f.x, f.y).into(), (f.width, f.height).into());
             self.frame_add(rect, &f.label, f.tags & crate::canvas::ALLTAGS);
         }
