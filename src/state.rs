@@ -181,8 +181,6 @@ pub struct Client {
     pub minimized: u32,
     /// Kept out of the tiling layouts (tiling.rs): by a rule, `toggle-float`, or being moved by hand.
     pub floating: bool,
-    /// The layout frame it is tiled in (tiling.rs), if any.
-    pub tile_frame: Option<u32>,
     /// Its announced (min, max) size, 0 = none; read at every commit.
     pub limits: crate::tiling::Limits,
     /// The size it showed it needs when it drew bigger than the slot it was told.
@@ -332,17 +330,6 @@ pub enum Drag {
         ratio0: f64,
         /// Screen px per canvas px of the window being dragged.
         zoom: f64,
-    },
-    /// Dragging a frame by its title strip; the windows it carries are in `frames.carrying`.
-    FrameMove {
-        id: u32,
-        start: Point<f64, Logical>,
-        orig: Point<f64, Logical>,
-    },
-    FrameResize {
-        id: u32,
-        start: Point<f64, Logical>,
-        orig: Size<f64, Logical>,
     },
 }
 
@@ -541,8 +528,6 @@ pub struct Uwc {
     /// The active keyboard layout: (index, name, count).
     pub layout: (usize, String, usize),
     pub hot: crate::hotzones::HotState,
-    /// Labelled regions of the canvas (frames.rs).
-    pub frames: crate::frames::Frames,
     /// Each tag's tiling layout (tiling.rs).
     pub tiling: crate::tiling::Tiling,
     /// Alignment lines drawn while a window is dragged (snap.rs).
@@ -733,7 +718,6 @@ impl Uwc {
             window_layouts: Default::default(),
             layout: (0, String::new(), 1),
             hot: Default::default(),
-            frames: Default::default(),
             tiling: Default::default(),
             guides: Default::default(),
             hints: None,
@@ -2022,17 +2006,6 @@ impl Uwc {
             Action::JumpHints => self.hints_toggle(),
             Action::NextLayout => self.set_layout(None),
             Action::Tile(l) => self.tile_set(Some(*l)),
-            Action::FrameTile(l) => {
-                if let Some(f) = self.frame_of_focus() {
-                    self.frame_tile_set(f, Some(*l));
-                }
-            }
-            Action::FrameTileOff => {
-                if let Some(f) = self.frame_of_focus() {
-                    self.frame_tile_set(f, None);
-                }
-            }
-            Action::FrameTileCycle => self.frame_tile_cycle(),
             Action::TileOnce(l) => self.tile_once(*l),
             Action::TileOff => self.tile_set(None),
             Action::TileCycle => self.tile_cycle(),
@@ -2044,23 +2017,6 @@ impl Uwc {
                     self.set_floating(id, on);
                 }
             }
-            Action::FrameNew => {
-                if let Some(id) = self.focus {
-                    self.frame_around(id);
-                }
-            }
-            Action::FrameRemove => {
-                if let Some(f) = self.frame_of_focus() {
-                    self.frame_remove(f);
-                }
-            }
-            Action::FrameFit => {
-                if let Some(f) = self.frame_of_focus() {
-                    self.frame_fit(f);
-                }
-            }
-            Action::FrameNext => self.frame_cycle(true),
-            Action::FramePrevious => self.frame_cycle(false),
             Action::Hint(k) => self.hint_key(k.clone()),
             Action::ToggleFullscreen => {
                 if let Some(i) = self.focus.and_then(|id| self.client_index(id)) {

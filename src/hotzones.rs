@@ -3,7 +3,7 @@
 //! ```kdl
 //! hot-zones {
 //!     top-left     { toggle-overview; }
-//!     bottom-right { frame-next; }
+//!     bottom-right { jump-hints; }
 //!     left         { view-previous; }
 //! }
 //! ```

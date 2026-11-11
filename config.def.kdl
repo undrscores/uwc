@@ -78,7 +78,7 @@ options {
     close-ms 160                // a closing window fades out (shrinking towards open-scale) over this long; 0 = vanishes at once. Its last frame is kept for the fade, with the decoration it closed with
     focus-ms 0                  // the focus look (border, shadow, dim) crossfades between the old and the new window over this long; 0 = jumps at once
     pan-momentum-ms 600         // let go of a touchpad swipe or a touch drag while moving and the view glides on, losing most of its speed in about this long; 0 = stops dead. Not uwm's option
-    // Dragging a window snaps its edges and centre lines to other windows and frames within this many screen px
+    // Dragging a window snaps its edges and centre lines to other windows within this many screen px
     // (so it feels the same at any zoom), drawing a guide line; hold Ctrl to drag freely. 0 = off. Not uwm's option.
     snap-distance 8
     snap-grid 0                 // also snap to a grid of this many canvas px (0 = no grid); windows' edges win over the grid
@@ -88,21 +88,14 @@ options {
     // on the canvas, so panning moves and resizes nothing (run `tile` again to re-anchor it where you are). A window
     // float (toggle-float, `open { float }` in a rule), or move or resize with the keys, leaves the layout; so does a
     // window with one fixed size. With the mouse a tile is lifted: drop it on another tile to swap, inside the area to
-    // put it back, on a frame with a layout to join that, anywhere else to float it; resizing one moves the main split
+    // put it back, anywhere else to float it; resizing one moves the main split
     // (the ratio) with the pointer. A window that cannot get as small as its slot is given the room it needs.
-    // `tile-once` arranges once and leaves the windows floating. A frame can have a layout of its own (frame-tile): the
-    // windows inside it are tiled in it, new ones join while one of its windows has the focus. `uwc msg tile ...` and
-    // `uwc msg frame layout ID LAYOUT` do the same from a script. Not uwm's.
+    // `tile-once` arranges once and leaves the windows floating. `uwc msg tile ...` does the same from a
+    // script. Not uwm's.
     tile-gap 12                 // px between the windows and the edge of the tile area
     tile-inner-gap 12           // px between neighbouring tiled windows
     tile-ratio 0.55             // the share the master column (or the first split) takes, 0.1 to 0.9; tile-ratio in binds changes it per tag
     tile-masters 1              // master-stack: windows in the master column
-    // Frames: labelled regions of the canvas behind the windows (frame-new draws one around the focused window).
-    // Drag a frame by its title strip and its windows go with it; drag the bottom-right corner to resize.
-    frame-color "#7aa2f7"       // border, title strip and label badge
-    frame-opacity 0.08          // how much the inside is tinted
-    frame-label-scale 2         // size of the label, in screen px per font pixel (the strip is 11 of them tall)
-    frame-border-width 2        // px; 0 = none
     per-window-layout false     // each window keeps the keyboard layout it was typed in (with several layouts in input { keyboard { xkb-layout "us,de" } }). Not uwm's option
     hot-zone-size 2             // hot zones (below) are this many px deep at the screen's corners and edges; 0 = off
     hot-zone-delay-ms 250       // the pointer has to rest in one this long, so passing by does nothing
@@ -212,7 +205,7 @@ options {
 // screen, all monitors together; each fires once per visit). Any bind action works.
 // hot-zones {
 //     top-left     { toggle-overview; }
-//     bottom-right { frame-next; }
+//     bottom-right { jump-hints; }
 //     left         { view-previous; }
 // }
 
@@ -257,14 +250,6 @@ binds {
     // Zoom out, label every window, type a label to glide to that window at the zoom you came from
     // (Escape cancels). From a script: `uwc msg jump QUERY` fuzzy-finds a window by app-id and title.
     Mod+Slash { jump-hints; }
-    // Frames: label a region of the canvas and move it, or jump the view to it, as a unit. Name one from a
-    // script: `uwc msg frame label ID mail`. Windows belong to a frame while their centre is inside it.
-    Mod+B { frame-new; }                // a frame around the focused window
-    Mod+Shift+B { frame-remove; }       // remove the focused window's frame
-    Mod+Ctrl+B { frame-fit; }           // fit the view to the focused window's frame
-    Mod+Alt+B { frame-tile-cycle; }     // tile the windows inside the focused window's frame: master-stack, dwindle, ... off
-    Mod+bracketright { frame-next; }    // fit the next frame, in reading order
-    Mod+bracketleft { frame-previous; }
     // A VM or remote desktop can ask for every key (keyboard-shortcuts-inhibit); this takes them back, and
     // is the one bind that still works while they are held.
     Mod+Shift+Escape { toggle-shortcuts-inhibit; }

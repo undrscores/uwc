@@ -417,14 +417,6 @@ impl Uwc {
             Drag::TileResize { region, start, ratio0, zoom } => {
                 self.tile_resize_to(region, ratio0, (pos.x - start.x) / zoom.max(1e-6));
             }
-            Drag::FrameMove { id, start, orig } => {
-                let z = self.viewport().zoom;
-                self.frame_drag_to(id, ((pos.x - start.x) / z, (pos.y - start.y) / z), orig);
-            }
-            Drag::FrameResize { id, start, orig } => {
-                let z = self.viewport().zoom;
-                self.frame_resize(id, orig.w + (pos.x - start.x) / z, orig.h + (pos.y - start.y) / z);
-            }
             Drag::Pan => {
                 let (dx, dy) = (pos.x - self.drag_last.x, pos.y - self.drag_last.y);
                 self.with_viewport(|v, _| v.pan_screen(dx, dy));
@@ -528,15 +520,6 @@ impl Uwc {
                         self.layer_focus = None;
                     }
                     self.focus_client(Some(self.clients[i].id));
-                }
-                // A frame's title strip moves it (with its windows), its corner resizes it.
-                (None, None) if button == BTN_LEFT && self.frame_hit(self.cursor).is_some() => {
-                    match self.frame_hit(self.cursor) {
-                        Some((id, crate::frames::FrameHit::Strip)) => self.frame_begin_move(id),
-                        Some((id, crate::frames::FrameHit::Corner)) => self.frame_begin_resize(id),
-                        None => {}
-                    }
-                    return;
                 }
                 // Dragging empty canvas pans it.
                 (None, None) if button == BTN_LEFT => {

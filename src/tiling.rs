@@ -4,20 +4,17 @@
 //! - a tag (`tile "master-stack"`): the region is the *tile area*, a rect of canvas px taken from
 //!   the view when the layout was turned on (so panning never moves or resizes anything; run `tile`
 //!   again to re-anchor to where you are);
-//! - a frame (`frame-tile "dwindle"`, frames.rs): the region is the frame, under its title strip.
-//!   The windows inside it when the layout is turned on join it, and so does a window that opens
-//!   while a window of the frame has the focus (or opens inside the frame).
 //!
 //! Windows are re-placed when one maps, closes, is minimized, pinned, floated or sent to another
-//! tag, when a frame moves or resizes, and when the layout or its options change. `tile-once`
+//! tag, and when the layout or its options change. `tile-once`
 //! arranges the windows one time and leaves it at that.
 //!
 //! Tiled: mapped, not pinned, not fullscreen, not minimized, not a dialog (it has a parent), not a
 //! fixed-size window (its minimum and maximum size are the same), not floating. A window is
 //! floating when a rule says `open { float }`, `toggle-float` (or IPC `float ID`) says so, or it was
 //! moved or resized with the keys or IPC. With the mouse a tile is *lifted*: let go over another
-//! tile of its region and the two swap places; over a layout frame and it joins that; inside its own
-//! region and it goes back; anywhere else it floats. Resizing a tile with the mouse moves the main
+//! tile of its region and the two swap places; inside its own region and it goes back; anywhere else
+//! it floats. Resizing a tile with the mouse moves the main
 //! split (the ratio) with the pointer's horizontal travel.
 //!
 //! Windows keep an order per region (the order they opened in, until swapped), so focusing and
@@ -25,8 +22,7 @@
 //! it announces, or one it shows by drawing bigger than it was told) gets the room it needs and the
 //! others share the rest.
 //!
-//! Nothing is saved with the session except a frame's layout: a restart brings the windows back
-//! where they were, floating, and those that open inside a layout frame join it.
+//! Nothing is saved with the session: a restart brings the windows back where they were, floating.
 
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -36,11 +32,10 @@ use crate::{
     state::{Drag, Shell, Uwc},
 };
 
-/// Something that has a layout: a tag's tile area or a frame.
+/// Something that has a layout: a tag's tile area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     Tag(usize),
-    Frame(u32),
 }
 
 /// What a region is doing.
@@ -107,14 +102,12 @@ impl Uwc {
     pub fn tile_state(&self, r: Region) -> Option<&TileState> {
         match r {
             Region::Tag(t) => self.tiling.tags.get(t).map(|t| &t.state),
-            Region::Frame(id) => self.frames.list.iter().find(|f| f.id == id).map(|f| &f.tile),
         }
     }
 
     fn tile_state_mut(&mut self, r: Region) -> Option<&mut TileState> {
         match r {
             Region::Tag(t) => self.tiling.tags.get_mut(t).map(|t| &mut t.state),
-            Region::Frame(id) => self.frames.list.iter_mut().find(|f| f.id == id).map(|f| &mut f.tile),
         }
     }
 
@@ -122,16 +115,6 @@ impl Uwc {
     pub fn tile_area(&self, r: Region) -> Option<Rectangle<i32, Logical>> {
         match r {
             Region::Tag(t) => self.tiling.tags.get(t).map(|t| t.area),
-            Region::Frame(id) => {
-                let f = self.frames.list.iter().find(|f| f.id == id)?;
-                // Under the title strip, which is `frame_strip_height` screen px: at zoom 1 here, so
-                // the layout does not change with the zoom.
-                let strip = self.frame_strip_height().round();
-                Some(Rectangle::new(
-                    (f.rect.loc.x.round() as i32, (f.rect.loc.y + strip).round() as i32).into(),
-                    ((f.rect.size.w.round() as i32).max(1), ((f.rect.size.h - strip).round() as i32).max(1)).into(),
-                ))
-            }
         }
     }
 
@@ -160,13 +143,6 @@ impl Uwc {
         if self.parent_of(i).is_some() {
             return None;
         }
-        if let Some(fid) = c.tile_frame {
-            if let Some(f) = self.frames.list.iter().find(|f| f.id == fid) {
-                if f.tile.layout.is_some() && f.tags & c.tags != 0 {
-                    return Some(Region::Frame(fid));
-                }
-            }
-        }
         (0..TAGCOUNT).find(|&t| c.tags & (1 << t) != 0 && self.tiling.tags[t].state.layout.is_some()).map(Region::Tag)
     }
 
@@ -187,7 +163,6 @@ impl Uwc {
     /// Whether any region has a layout (so there is something to keep in place).
     fn any_tiling(&self) -> bool {
         self.tiling.tags.iter().any(|t| t.state.layout.is_some())
-            || self.frames.list.iter().any(|f| f.tile.layout.is_some())
     }
 
     /// The part of the canvas the current monitor shows (minus panels), in canvas px.
@@ -280,10 +255,6 @@ impl Uwc {
         for t in 0..TAGCOUNT {
             self.retile(Region::Tag(t), glide);
         }
-        let frames: Vec<u32> = self.frames.list.iter().map(|f| f.id).collect();
-        for f in frames {
-            self.retile(Region::Frame(f), glide);
-        }
     }
 
     pub fn retile_all(&mut self) {
@@ -326,50 +297,6 @@ impl Uwc {
             Some(l) => l.next(),
         };
         self.tile_set(next);
-    }
-
-    /// Give frame `id` a layout (or take it away): the windows inside it join, or are let go.
-    pub fn frame_tile_set(&mut self, id: u32, layout: Option<Layout>) {
-        if !self.frames.list.iter().any(|f| f.id == id) {
-            return;
-        }
-        let members = self.frame_members(id);
-        if layout.is_some() {
-            for m in members {
-                if let Some(i) = self.client_index(m) {
-                    self.clients[i].tile_frame = Some(id);
-                }
-            }
-        } else {
-            for c in self.clients.iter_mut().filter(|c| c.tile_frame == Some(id)) {
-                c.tile_frame = None;
-            }
-        }
-        if let Some(f) = self.frames.list.iter_mut().find(|f| f.id == id) {
-            if layout.is_none() {
-                f.tile = TileState::default();
-            }
-            f.tile.layout = layout;
-        }
-        self.retile_all();
-        self.tiling_changed();
-    }
-
-    /// The next layout for the focused window's frame, and off after the last.
-    pub fn frame_tile_cycle(&mut self) {
-        let Some(id) = self.frame_of_focus() else { return };
-        let next = match self.tile_state(Region::Frame(id)).and_then(|s| s.layout) {
-            None => Some(Layout::ALL[0]),
-            Some(l) => l.next(),
-        };
-        self.frame_tile_set(id, next);
-    }
-
-    /// A frame is gone: its windows are let go.
-    pub fn frame_tile_forget(&mut self, id: u32) {
-        for c in self.clients.iter_mut().filter(|c| c.tile_frame == Some(id)) {
-            c.tile_frame = None;
-        }
     }
 
     pub fn tile_ratio(&mut self, delta: f64) {
@@ -460,20 +387,6 @@ impl Uwc {
             self.tiling_changed();
             return;
         }
-        // Inside a layout frame that is not its own: join it.
-        let frame = self
-            .frames
-            .list
-            .iter()
-            .filter(|f| f.tile.layout.is_some() && f.tags & self.clients[i].tags != 0 && contains(f.rect, p))
-            .min_by(|a, b| (a.rect.size.w * a.rect.size.h).total_cmp(&(b.rect.size.w * b.rect.size.h)))
-            .map(|f| f.id);
-        if let Some(f) = frame.filter(|&f| region != Region::Frame(f)) {
-            self.clients[i].tile_frame = Some(f);
-            self.retile_all();
-            self.tiling_changed();
-            return;
-        }
         // Inside its own region: back into the slot. Anywhere else: floating where it was dropped.
         let own = self.tile_area(region).is_some_and(|a| {
             contains(
@@ -485,7 +398,6 @@ impl Uwc {
             self.retile(region, Glide::Ease);
             self.tiling_changed();
         } else {
-            self.clients[i].tile_frame = None;
             self.set_floating(id, true);
         }
     }
@@ -541,31 +453,6 @@ impl Uwc {
         if changed && self.any_tiling() {
             self.retile_all_with(Glide::Ease);
         }
-    }
-
-    /// A window just opened: it joins the layout frame the focused window is tiled in, else the one
-    /// it opened inside.
-    pub fn join_frame_on_open(&mut self, i: usize, prev_focus: Option<u32>) {
-        if !self.frames.list.iter().any(|f| f.tile.layout.is_some()) {
-            return;
-        }
-        let from_focus = prev_focus
-            .and_then(|id| self.client_index(id))
-            .and_then(|j| match self.tile_region(j) {
-                Some(Region::Frame(f)) => Some(f),
-                _ => None,
-            })
-            .filter(|f| self.frames.list.iter().any(|x| x.id == *f && x.tags & self.clients[i].tags != 0));
-        let r = self.clients[i].rect();
-        let centre: Point<f64, Logical> = (r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0).into();
-        let inside = self
-            .frames
-            .list
-            .iter()
-            .filter(|f| f.tile.layout.is_some() && f.tags & self.clients[i].tags != 0 && contains(f.rect, centre))
-            .min_by(|a, b| (a.rect.size.w * a.rect.size.h).total_cmp(&(b.rect.size.w * b.rect.size.h)))
-            .map(|f| f.id);
-        self.clients[i].tile_frame = from_focus.or(inside);
     }
 
     /// Something about tiling changed: the snapshot is out of date and a frame is due.

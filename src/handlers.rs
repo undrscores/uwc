@@ -178,7 +178,6 @@ impl Uwc {
     /// The first buffer arrived: place the window as its rules say (else centred in the work area,
     /// cascading), and focus it. A window that comes back after hiding itself maps where it was.
     fn map_client(&mut self, i: usize) {
-        let prev_focus = self.focus;
         let n = self.clients.iter().filter(|c| c.mapped).count() as i32;
         self.clients[i].mapped = true;
         let first_map = !self.clients[i].ever_mapped;
@@ -258,11 +257,7 @@ impl Uwc {
         if first_map {
             self.run_hook(crate::hooks::Hook::WindowOpen, self.client_index(id));
         }
-        // A new window goes straight to its slot (in the frame of the focused window, if that has a
-        // layout); the others glide to theirs.
-        if first_map {
-            self.join_frame_on_open(i, prev_focus);
-        }
+        // A new window goes straight to its slot; the others glide to theirs.
         self.retile_all_with(if first_map { crate::tiling::Glide::InstantFor(id) } else { crate::tiling::Glide::Ease });
         self.refresh_pointer();
         self.damage();
@@ -327,7 +322,6 @@ impl XdgShellHandler for Uwc {
             mapped: false,
             ever_mapped: false,
             floating: false,
-            tile_frame: None,
             limits: ((0, 0), (0, 0)),
             tile_min: (0, 0),
             tile_want: None,

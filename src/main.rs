@@ -15,7 +15,6 @@ mod doctor;
 mod export;
 mod ext_capture;
 mod extras;
-mod frames;
 mod handlers;
 mod hints;
 mod hooks;

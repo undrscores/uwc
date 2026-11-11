@@ -366,28 +366,6 @@ impl Uwc {
             monitors,
             cursor: P::Cursor { x: self.cursor.x.round() as i64, y: self.cursor.y.round() as i64, hidden: false },
             windows,
-            frames: self
-                .frames
-                .list
-                .iter()
-                .map(|f| P::Frame {
-                    id: f.id,
-                    label: f.label.clone(),
-                    tags: f.tags,
-                    rect: P::Rect {
-                        x: f.rect.loc.x.round() as i64,
-                        y: f.rect.loc.y.round() as i64,
-                        width: f.rect.size.w.round() as i64,
-                        height: f.rect.size.h.round() as i64,
-                    },
-                    windows: self.frame_members(f.id),
-                    tiling: f.tile.layout.map(|l| P::FrameTiling {
-                        layout: l.name(),
-                        ratio: self.tile_opts(crate::tiling::Region::Frame(f.id)).ratio,
-                        masters: self.tile_opts(crate::tiling::Region::Frame(f.id)).masters,
-                    }),
-                })
-                .collect(),
         }
     }
 
@@ -487,48 +465,6 @@ impl Uwc {
                 }
             }
             R::Pan(dx, dy) => self.pan_canvas(dx, dy),
-            R::Frame(cmd) => {
-                use P::FrameCmd as F;
-                let known = |s: &Self, id: u32| -> Result<(), String> {
-                    s.frames.list.iter().any(|f| f.id == id).then_some(()).ok_or_else(|| format!("no frame {id}"))
-                };
-                match cmd {
-                    F::Add { x, y, w, h, label } => {
-                        if w <= 0.0 || h <= 0.0 {
-                            return Err("a frame needs a positive width and height".into());
-                        }
-                        if self.frames.list.len() >= crate::frames::MAX_FRAMES {
-                            return Err(format!("at most {} frames", crate::frames::MAX_FRAMES));
-                        }
-                        let tags = self.tagset;
-                        self.frame_add(smithay::utils::Rectangle::new((x, y).into(), (w, h).into()), &label, tags);
-                    }
-                    F::Label(id, text) => {
-                        known(self, id)?;
-                        self.frame_set_label(id, &text);
-                    }
-                    F::Move(id, x, y) => {
-                        known(self, id)?;
-                        self.frame_move(id, x, y);
-                    }
-                    F::Resize(id, w, h) => {
-                        known(self, id)?;
-                        self.frame_resize(id, w, h);
-                    }
-                    F::Remove(id) => {
-                        known(self, id)?;
-                        self.frame_remove(id);
-                    }
-                    F::Fit(id) => {
-                        known(self, id)?;
-                        self.frame_fit(id);
-                    }
-                    F::Layout(id, layout) => {
-                        known(self, id)?;
-                        self.frame_tile_set(id, layout);
-                    }
-                }
-            }
             R::Layout(n) => {
                 if n.is_some_and(|n| n >= self.layout.2) {
                     return Err(format!("there are {} layouts (0 to {})", self.layout.2, self.layout.2 - 1));

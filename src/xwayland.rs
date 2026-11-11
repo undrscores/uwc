@@ -60,7 +60,6 @@ impl Uwc {
             mapped: true,
             ever_mapped: true,
             floating: false,
-            tile_frame: None,
             limits: ((0, 0), (0, 0)),
             tile_min: (0, 0),
             tile_want: None,

@@ -46,23 +46,6 @@ pub struct SavedWindow {
     pub fs_mon: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SavedFrame {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-    pub label: String,
-    pub tags: u32,
-    /// The layout its windows are tiled with (tiling.rs), by name.
-    #[serde(default)]
-    pub layout: Option<String>,
-    #[serde(default)]
-    pub ratio: Option<f64>,
-    #[serde(default)]
-    pub masters: Option<usize>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SavedView {
     pub x: f64,
@@ -102,8 +85,6 @@ pub struct Session {
     #[serde(default)]
     pub bookmarks: Vec<Vec<Option<SavedView>>>,
     pub windows: Vec<SavedWindow>,
-    #[serde(default)]
-    pub frames: Vec<SavedFrame>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -191,22 +172,6 @@ impl Uwc {
             viewports: Vec::new(),
             bookmarks: Vec::new(),
             windows,
-            frames: self
-                .frames
-                .list
-                .iter()
-                .map(|f| SavedFrame {
-                    x: f.rect.loc.x,
-                    y: f.rect.loc.y,
-                    width: f.rect.size.w,
-                    height: f.rect.size.h,
-                    label: f.label.clone(),
-                    tags: f.tags,
-                    layout: f.tile.layout.map(|l| l.name().to_string()),
-                    ratio: f.tile.ratio,
-                    masters: f.tile.masters,
-                })
-                .collect(),
         }
     }
 
@@ -278,19 +243,6 @@ impl Uwc {
         }
         tracing::info!("session: {} remembered windows from {}", s.windows.len(), path.display());
         self.session_pool = s.windows;
-        for f in s.frames.iter().take(crate::frames::MAX_FRAMES) {
-            if !(f.width > 0.0 && f.height > 0.0 && f.x.is_finite() && f.y.is_finite()) {
-                continue;
-            }
-            let rect = smithay::utils::Rectangle::new((f.x, f.y).into(), (f.width, f.height).into());
-            let id = self.frame_add(rect, &f.label, f.tags & crate::canvas::ALLTAGS);
-            // Its windows join as they open again, inside it.
-            if let Some(fr) = self.frames.list.iter_mut().find(|x| x.id == id) {
-                fr.tile.layout = f.layout.as_deref().and_then(crate::layout::Layout::parse);
-                fr.tile.ratio = f.ratio.filter(|r| (0.1..=0.9).contains(r));
-                fr.tile.masters = f.masters.map(|n| n.clamp(1, crate::tiling::MAX_MASTERS));
-            }
-        }
         self.session_written = Some(text);
         self.damage();
     }
@@ -351,17 +303,6 @@ mod tests {
             viewports: Vec::new(),
             bookmarks: Vec::new(),
             windows: vec![w("foot", "a")],
-            frames: vec![SavedFrame {
-                x: 1.0,
-                y: 2.0,
-                width: 300.0,
-                height: 200.0,
-                label: "mail".into(),
-                tags: 1,
-                layout: Some("spiral".into()),
-                ratio: Some(0.4),
-                masters: None,
-            }],
         };
         let back: Session = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);

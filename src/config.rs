@@ -94,22 +94,11 @@ pub enum Action {
     TileOnce(crate::layout::Layout),
     TileOff,
     TileCycle,
-    /// The same for the focused window's frame (frames.rs): its windows are tiled inside it.
-    FrameTile(crate::layout::Layout),
-    FrameTileOff,
-    FrameTileCycle,
     /// Change the share the master column / first split takes, or the number of masters, by this much.
     TileRatio(f64),
     TileMasters(i32),
     /// Keep the focused window out of the layouts, or put it back.
     ToggleFloat,
-    /// A frame around the focused window / remove the focused window's frame / fit the view to it
-    /// / fit the next or previous frame (frames.rs).
-    FrameNew,
-    FrameRemove,
-    FrameFit,
-    FrameNext,
-    FramePrevious,
     /// A key typed while hint mode is up; never in a config.
     Hint(crate::hints::HintKey),
     ToggleFullscreen,
@@ -269,7 +258,6 @@ pub struct Config {
     pub pan_momentum_ms: f64,
     pub edge_pan_size: f64,
     pub hint_keys: String,
-    pub frame_color: Color,
     pub tile_gap: i32,
     pub tile_inner_gap: i32,
     pub tile_ratio: f64,
@@ -277,9 +265,6 @@ pub struct Config {
     pub snap_distance: f64,
     pub snap_grid: f64,
     pub snap_color: Color,
-    pub frame_opacity: f64,
-    pub frame_label_scale: f64,
-    pub frame_border_width: f64,
     pub hint_scale: f64,
     pub edge_pan_speed: f64,
     /// A new window fades in and grows from `open_scale` over this long (0 = appears at once).
@@ -417,7 +402,6 @@ impl Config {
             pan_momentum_ms: 600.0,
             edge_pan_size: 12.0,
             hint_keys: "asdfghjkl".into(),
-            frame_color: [0.478, 0.635, 0.969, 1.0],
             tile_gap: 12,
             tile_inner_gap: 12,
             tile_ratio: 0.55,
@@ -425,9 +409,6 @@ impl Config {
             snap_distance: 8.0,
             snap_grid: 0.0,
             snap_color: [1.0, 0.416, 0.757, 1.0],
-            frame_opacity: 0.08,
-            frame_label_scale: 2.0,
-            frame_border_width: 2.0,
             hint_scale: 3.0,
             edge_pan_speed: 900.0,
             open_ms: 160.0,
@@ -899,15 +880,6 @@ fn parse_action(n: &Node) -> Result<Action> {
                 Action::TileOnce(l)
             }
         }
-        "frame-tile" => {
-            let name = args.first().and_then(Val::as_str).unwrap_or("");
-            Action::FrameTile(
-                crate::layout::Layout::parse(name)
-                    .ok_or_else(|| anyhow!("frame-tile needs a layout: {}", crate::layout::Layout::names()))?,
-            )
-        }
-        "frame-tile-off" => Action::FrameTileOff,
-        "frame-tile-cycle" => Action::FrameTileCycle,
         "tile-off" => Action::TileOff,
         "tile-cycle" => Action::TileCycle,
         "tile-ratio" => {
@@ -920,11 +892,6 @@ fn parse_action(n: &Node) -> Result<Action> {
             Action::TileMasters(range(d.round(), -16.0, 16.0)? as i32)
         }
         "toggle-float" => Action::ToggleFloat,
-        "frame-new" => Action::FrameNew,
-        "frame-remove" => Action::FrameRemove,
-        "frame-fit" => Action::FrameFit,
-        "frame-next" => Action::FrameNext,
-        "frame-previous" => Action::FramePrevious,
         "toggle-fullscreen" => Action::ToggleFullscreen,
         "toggle-pin" => Action::TogglePin,
         "minimize-window" => Action::MinimizeWindow,

@@ -1,5 +1,5 @@
 //! Snapping while a window is dragged: its edges and centre line jump to the edges and centre lines
-//! of nearby windows and frames (`snap-distance`, in screen px, so it feels the same at any zoom),
+//! of nearby windows (`snap-distance`, in screen px, so it feels the same at any zoom),
 //! and to a grid when `snap-grid` is set (canvas px). A guide line is drawn along each alignment
 //! (`snap-color`). Holding Ctrl while dragging turns it off.
 
@@ -58,14 +58,13 @@ impl Uwc {
         }
         let threshold = dist / self.viewport().zoom.max(0.01);
         let me = self.clients[i].rect().size;
-        // Everything else that is drawn on this view: other canvas windows and frames.
-        let mut others: Vec<Rectangle<f64, smithay::utils::Logical>> = self
+        // Everything else that is drawn on this view: other canvas windows.
+        let others: Vec<Rectangle<f64, smithay::utils::Logical>> = self
             .clients
             .iter()
             .filter(|c| c.id != id && self.visible_on(self.cur, c) && c.pin.is_none() && !c.fullscreen)
             .map(|c| c.rect())
             .collect();
-        others.extend(self.frames.list.iter().filter(|f| f.tags & self.tagset != 0).map(|f| f.rect));
         let lines = |r: &Rectangle<f64, smithay::utils::Logical>, vertical: bool| -> Vec<(f64, (f64, f64))> {
             let (a, len, span) = if vertical {
                 (r.loc.x, r.size.w, (r.loc.y, r.loc.y + r.size.h))
